@@ -36,15 +36,17 @@ export const Navigation: React.FC<NavigationProps> = ({
               onClick={() => onChangeTab(item.id)}
               type="button"
               className={`flex flex-col items-center justify-center flex-1 py-1.5 px-2 rounded-xl transition-all duration-200 ${
-                isActive
-                  ? 'text-violet-400 font-semibold'
-                  : 'text-slate-400 hover:text-slate-200'
+                isActive ? 'font-semibold' : 'text-slate-400 hover:text-slate-200'
               }`}
+              style={isActive ? { color: 'var(--theme-accent, #8b5cf6)' } : undefined}
             >
               <div
-                className={`p-1 rounded-xl transition-all ${
-                  isActive ? 'bg-violet-600/20' : ''
-                }`}
+                className="p-1 rounded-xl transition-all"
+                style={
+                  isActive
+                    ? { backgroundColor: 'rgba(var(--theme-accent-rgb, 139, 92, 246), 0.2)' }
+                    : undefined
+                }
               >
                 <Icon className={`w-5 h-5 ${isActive ? 'stroke-[2.5]' : 'stroke-[1.8]'}`} />
               </div>

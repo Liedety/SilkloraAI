@@ -374,11 +374,20 @@ export async function fetchVisionModels(
   ];
 }
 
-function cleanArtifacts(str: string): string {
+export function cleanArtifacts(str: string): string {
+  if (!str) return '';
   return str
     .replace(/\\"/g, '"')
     .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '')
     .replace(/\{\s*\}/g, '')
+    .replace(/\{\s*\.\.\.\s*\}/g, '')
+    .replace(/\{\{\s*user\s*\}\}/gi, 'ты')
+    .replace(/\{\{\s*char\s*\}\}/gi, '')
+    .replace(/\{\s*user\s*\}/gi, 'ты')
+    .replace(/\{\s*char\s*\}/gi, '')
+    .replace(/\s*[\{\}]\s*$/g, '')
+    .replace(/^\s*[\{\}]\s*/g, '')
     .trim();
 }
 

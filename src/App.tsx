@@ -9,6 +9,20 @@ import { GroupsView } from './views/GroupsView';
 import { SettingsView } from './views/SettingsView';
 import { ChatView } from './views/ChatView';
 
+function hexToRgb(hex: string): string {
+  const clean = hex.replace('#', '');
+  if (clean.length === 3) {
+    const r = parseInt(clean[0] + clean[0], 16) || 139;
+    const g = parseInt(clean[1] + clean[1], 16) || 92;
+    const b = parseInt(clean[2] + clean[2], 16) || 246;
+    return `${r}, ${g}, ${b}`;
+  }
+  const r = parseInt(clean.substring(0, 2), 16) || 139;
+  const g = parseInt(clean.substring(2, 4), 16) || 92;
+  const b = parseInt(clean.substring(4, 6), 16) || 246;
+  return `${r}, ${g}, ${b}`;
+}
+
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>('characters');
   const [activeChat, setActiveChat] = useState<{
@@ -29,6 +43,18 @@ export const App: React.FC = () => {
     initDatabaseDefaults();
   }, []);
 
+  // Dynamically update CSS variables when theme changes
+  useEffect(() => {
+    if (settings?.theme) {
+      const root = document.documentElement;
+      const accent = settings.theme.accentColor || '#8b5cf6';
+      const action = settings.theme.actionColor || '#fb7185';
+      root.style.setProperty('--theme-accent', accent);
+      root.style.setProperty('--theme-action', action);
+      root.style.setProperty('--theme-accent-rgb', hexToRgb(accent));
+    }
+  }, [settings?.theme]);
+
   const handleLanguageChange = async (newLang: Language) => {
     await db.settings.update('default', { language: newLang });
   };
@@ -46,6 +72,18 @@ export const App: React.FC = () => {
     setIsDirty(false);
     setSaveAction(null);
     setActiveTab(tab);
+  };
+
+  const handleOpenChat = (chat: { type: 'character' | 'group'; targetId: string }) => {
+    setIsDirty(false);
+    setSaveAction(null);
+    setActiveChat(chat);
+  };
+
+  const handleBackFromChat = () => {
+    setIsDirty(false);
+    setSaveAction(null);
+    setActiveChat(null);
   };
 
   const handleSave = async () => {
@@ -66,21 +104,21 @@ export const App: React.FC = () => {
             type={activeChat.type}
             targetId={activeChat.targetId}
             language={language}
-            onBack={() => setActiveChat(null)}
+            onBack={handleBackFromChat}
           />
         ) : (
           <>
             {activeTab === 'characters' && (
               <CharactersView
                 language={language}
-                onOpenChat={(charId) => setActiveChat({ type: 'character', targetId: charId })}
+                onOpenChat={(charId) => handleOpenChat({ type: 'character', targetId: charId })}
                 onDirtyChange={handleDirtyChange}
               />
             )}
             {activeTab === 'groups' && (
               <GroupsView
                 language={language}
-                onOpenGroupChat={(grpId) => setActiveChat({ type: 'group', targetId: grpId })}
+                onOpenGroupChat={(grpId) => handleOpenChat({ type: 'group', targetId: grpId })}
                 onDirtyChange={handleDirtyChange}
               />
             )}
@@ -101,6 +139,8 @@ export const App: React.FC = () => {
         onSave={handleSave}
         saved={isSaved}
         label={language === 'ru' ? 'Сохранить' : 'Save'}
+        savedLabel={language === 'ru' ? 'Сохранено!' : 'Saved!'}
+        accentColor={settings?.theme?.accentColor}
       />
 
       {/* Bottom Navigation (Hidden while in active chat) */}

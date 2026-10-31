@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ZoomIn, ZoomOut, Check, X, RotateCcw } from 'lucide-react';
-import type { ImageCropOffset } from '../types';
+import type { ImageCropOffset, Language } from '../types';
 
 interface ImageCropperModalProps {
   isOpen: boolean;
@@ -8,6 +8,7 @@ interface ImageCropperModalProps {
   isAvatar?: boolean;
   initialOffset?: ImageCropOffset;
   title?: string;
+  language?: Language;
   onConfirm: (croppedDataUrl: string, offset: ImageCropOffset) => void;
   onClose: () => void;
 }
@@ -17,10 +18,15 @@ export const ImageCropperModal: React.FC<ImageCropperModalProps> = ({
   imageSrc,
   isAvatar = true,
   initialOffset,
-  title = 'Position Image',
+  title,
+  language = 'en',
   onConfirm,
   onClose,
 }) => {
+  const isRu = language === 'ru';
+  const defaultTitle = isRu ? (isAvatar ? 'Настройка аватара' : 'Настройка фона') : (isAvatar ? 'Position Avatar' : 'Position Background');
+  const modalTitle = title || defaultTitle;
+
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [scale, setScale] = useState<number>(initialOffset?.scale || 1);
   const [position, setPosition] = useState<{ x: number; y: number }>({
@@ -40,6 +46,16 @@ export const ImageCropperModal: React.FC<ImageCropperModalProps> = ({
       setImageObj(img);
     };
   }, [imageSrc, isOpen]);
+
+  useEffect(() => {
+    if (isOpen) {
+      setScale(initialOffset?.scale || 1);
+      setPosition({
+        x: initialOffset?.x || 0,
+        y: initialOffset?.y || 0,
+      });
+    }
+  }, [isOpen, initialOffset]);
 
   useEffect(() => {
     if (!imageObj || !canvasRef.current) return;
@@ -93,12 +109,12 @@ export const ImageCropperModal: React.FC<ImageCropperModalProps> = ({
       // Border circle
       ctx.beginPath();
       ctx.arc(width / 2, height / 2, radius, 0, Math.PI * 2);
-      ctx.strokeStyle = '#8b5cf6';
+      ctx.strokeStyle = 'var(--theme-accent, #8b5cf6)';
       ctx.lineWidth = 2;
       ctx.stroke();
     } else {
       // Rectangular border
-      ctx.strokeStyle = '#8b5cf6';
+      ctx.strokeStyle = 'var(--theme-accent, #8b5cf6)';
       ctx.lineWidth = 2;
       ctx.strokeRect(10, 10, width - 20, height - 20);
     }
@@ -165,11 +181,11 @@ export const ImageCropperModal: React.FC<ImageCropperModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
       <div className="w-full max-w-sm bg-silk-900 border border-silk-700/80 rounded-2xl overflow-hidden shadow-2xl flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-silk-800">
-          <h3 className="font-semibold text-sm text-slate-200">{title}</h3>
+          <h3 className="font-semibold text-sm text-slate-200">{modalTitle}</h3>
           <button
             onClick={onClose}
             className="p-1 text-slate-400 hover:text-white rounded-lg hover:bg-silk-800"
@@ -191,7 +207,7 @@ export const ImageCropperModal: React.FC<ImageCropperModalProps> = ({
             className="rounded-xl cursor-grab active:cursor-grabbing touch-none border border-silk-800 shadow-inner"
           />
           <p className="text-xs text-slate-500 mt-2 text-center">
-            Drag to pan, use slider below to zoom
+            {isRu ? 'Перетаскивайте для сдвига, ползунок ниже — масштаб' : 'Drag to pan, use slider below to zoom'}
           </p>
         </div>
 
@@ -211,7 +227,7 @@ export const ImageCropperModal: React.FC<ImageCropperModalProps> = ({
             <ZoomIn className="w-4 h-4 text-slate-400 shrink-0" />
           </div>
 
-          <div className="flex justify-between items-center pt-1">
+          <div className="flex justify-between items-center pt-1 pb-1">
             <button
               onClick={() => {
                 setPosition({ x: 0, y: 0 });
@@ -221,7 +237,7 @@ export const ImageCropperModal: React.FC<ImageCropperModalProps> = ({
               className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-white py-1.5 px-2.5 rounded-lg hover:bg-silk-800"
             >
               <RotateCcw className="w-3.5 h-3.5" />
-              Reset
+              <span>{isRu ? 'Сброс' : 'Reset'}</span>
             </button>
 
             <div className="flex items-center gap-2">
@@ -230,15 +246,15 @@ export const ImageCropperModal: React.FC<ImageCropperModalProps> = ({
                 type="button"
                 className="px-3 py-1.5 text-xs font-medium text-slate-300 rounded-lg hover:bg-silk-800"
               >
-                Cancel
+                {isRu ? 'Отмена' : 'Cancel'}
               </button>
               <button
                 onClick={handleApply}
                 type="button"
-                className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium text-white bg-violet-600 hover:bg-violet-500 rounded-lg shadow-md"
+                className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium text-white rounded-lg shadow-md theme-accent-bg"
               >
                 <Check className="w-3.5 h-3.5" />
-                Done
+                <span>{isRu ? 'Готово' : 'Done'}</span>
               </button>
             </div>
           </div>

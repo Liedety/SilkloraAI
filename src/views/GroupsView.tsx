@@ -165,17 +165,19 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
   };
 
   const handleToggleFolder = (fldId: string) => {
-    setSelectedFolderIds((prev) => {
-      const isSelected = prev.includes(fldId);
-      const nextFolders = isSelected ? prev.filter((id) => id !== fldId) : [...prev, fldId];
-
+    setSelectedFolderIds((prevFolders) => {
+      const isSelected = prevFolders.includes(fldId);
+      const nextFolders = isSelected ? prevFolders.filter((id) => id !== fldId) : [...prevFolders, fldId];
       const charsInFolder = characters.filter((c) => c.folderId === fldId).map((c) => c.id);
-      let nextChars = selectedCharIds;
-      if (!isSelected) {
-        nextChars = Array.from(new Set([...selectedCharIds, ...charsInFolder]));
-        setSelectedCharIds(nextChars);
-      }
-      syncFormRef({ folderIds: nextFolders, characterIds: nextChars });
+
+      setSelectedCharIds((prevChars) => {
+        const nextChars = isSelected
+          ? prevChars
+          : Array.from(new Set([...prevChars, ...charsInFolder]));
+        syncFormRef({ folderIds: nextFolders, characterIds: nextChars });
+        return nextChars;
+      });
+
       return nextFolders;
     });
     onDirtyChange(true, handleSaveGroup);
@@ -214,7 +216,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
       syncFormRef({ characterRoles: generated });
       onDirtyChange(true, handleSaveGroup);
     } catch (err: any) {
-      alert(`AI Roles error: ${err.message}`);
+      alert(language === 'ru' ? `Ошибка генерации ролей: ${err.message}` : `AI Roles error: ${err.message}`);
     } finally {
       setIsGeneratingRoles(false);
     }
@@ -247,7 +249,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
       setShowGenModal(false);
       onDirtyChange(true, handleSaveGroup);
     } catch (err: any) {
-      alert(`Group generation error: ${err.message}`);
+      alert(language === 'ru' ? `Ошибка генерации группы: ${err.message}` : `Group generation error: ${err.message}`);
     } finally {
       setIsGeneratingGroup(false);
     }
@@ -261,10 +263,23 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
       const result = event.target?.result as string;
       setCropperRawSrc(result);
       setCropperIsAvatar(isAvatarTarget);
+      if (isAvatarTarget) {
+        setAvatarOffset({ x: 0, y: 0, scale: 1 });
+      } else {
+        setChatBackgroundOffset({ x: 0, y: 0, scale: 1 });
+      }
       setCropperOpen(true);
     };
     reader.readAsDataURL(file);
     e.target.value = '';
+  };
+
+  const handleRepositionExisting = (isAvatarTarget: boolean) => {
+    const src = isAvatarTarget ? avatar : chatBackground;
+    if (!src) return;
+    setCropperRawSrc(src);
+    setCropperIsAvatar(isAvatarTarget);
+    setCropperOpen(true);
   };
 
   const handleSaveGroup = async () => {
@@ -348,9 +363,6 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                         src={grp.avatar}
                         alt={grp.name}
                         className="w-full h-full object-cover"
-                        style={{
-                          transform: `translate(${grp.avatarOffset?.x || 0}px, ${grp.avatarOffset?.y || 0}px) scale(${grp.avatarOffset?.scale || 1})`,
-                        }}
                       />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center bg-violet-600/20 text-violet-400">
@@ -458,9 +470,6 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                       src={avatar}
                       alt="Avatar"
                       className="w-full h-full object-cover"
-                      style={{
-                        transform: `translate(${avatarOffset.x}px, ${avatarOffset.y}px) scale(${avatarOffset.scale})`,
-                      }}
                     />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-slate-500">
@@ -468,15 +477,26 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                     </div>
                   )}
                 </div>
-                <label className="flex items-center gap-1 px-3 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-violet-400 font-medium cursor-pointer">
-                  <span>{avatar ? t.reposition : t.uploadAndPosition}</span>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => handleFileSelect(e, true)}
-                    className="hidden"
-                  />
-                </label>
+                <div className="flex items-center gap-1.5">
+                  <label className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-violet-400 font-medium cursor-pointer">
+                    <span>{avatar ? (language === 'ru' ? 'Сменить' : 'Change') : t.uploadAndPosition}</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => handleFileSelect(e, true)}
+                      className="hidden"
+                    />
+                  </label>
+                  {avatar && (
+                    <button
+                      type="button"
+                      onClick={() => handleRepositionExisting(true)}
+                      className="px-2 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-slate-300 font-medium"
+                    >
+                      {t.reposition}
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Group Chat Background */}
@@ -495,15 +515,26 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                     </div>
                   )}
                 </div>
-                <label className="flex items-center gap-1 px-3 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-violet-400 font-medium cursor-pointer">
-                  <span>{chatBackground ? t.reposition : t.uploadAndPosition}</span>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => handleFileSelect(e, false)}
-                    className="hidden"
-                  />
-                </label>
+                <div className="flex items-center gap-1.5">
+                  <label className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-violet-400 font-medium cursor-pointer">
+                    <span>{chatBackground ? (language === 'ru' ? 'Сменить' : 'Change') : t.uploadAndPosition}</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => handleFileSelect(e, false)}
+                      className="hidden"
+                    />
+                  </label>
+                  {chatBackground && (
+                    <button
+                      type="button"
+                      onClick={() => handleRepositionExisting(false)}
+                      className="px-2 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-slate-300 font-medium"
+                    >
+                      {t.reposition}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -786,6 +817,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
         imageSrc={cropperRawSrc}
         isAvatar={cropperIsAvatar}
         initialOffset={cropperIsAvatar ? avatarOffset : chatBackgroundOffset}
+        language={language}
         onConfirm={(croppedUrl, offset) => {
           if (cropperIsAvatar) {
             setAvatar(croppedUrl);

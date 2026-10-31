@@ -227,6 +227,14 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
       for (const c of charsInFolder) {
         await db.characters.update(c.id, { folderId: null });
       }
+      const allGroups = await db.groups.toArray();
+      for (const g of allGroups) {
+        if (g.folderIds && g.folderIds.includes(folderId)) {
+          await db.groups.update(g.id, {
+            folderIds: g.folderIds.filter((id) => id !== folderId),
+          });
+        }
+      }
       await db.folders.delete(folderId);
       if (selectedFolderId === folderId) {
         setSelectedFolderId(null);
@@ -270,6 +278,14 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
     e.target.value = '';
   };
 
+  const handleRepositionEmotion = (em: CharacterEmotion) => {
+    if (!em.avatar) return;
+    setCropperRawSrc(em.avatar);
+    setCropperIsAvatar(true);
+    setActiveEmotionCropperId(em.id);
+    setCropperOpen(true);
+  };
+
   // Image Upload handler
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>, isAvatarTarget: boolean) => {
     const file = e.target.files?.[0];
@@ -279,11 +295,25 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
       const result = event.target?.result as string;
       setCropperRawSrc(result);
       setCropperIsAvatar(isAvatarTarget);
+      if (isAvatarTarget) {
+        setAvatarOffset({ x: 0, y: 0, scale: 1 });
+      } else {
+        setChatBackgroundOffset({ x: 0, y: 0, scale: 1 });
+      }
       setActiveEmotionCropperId(null);
       setCropperOpen(true);
     };
     reader.readAsDataURL(file);
     e.target.value = '';
+  };
+
+  const handleRepositionExisting = (isAvatarTarget: boolean) => {
+    const src = isAvatarTarget ? avatar : chatBackground;
+    if (!src) return;
+    setCropperRawSrc(src);
+    setCropperIsAvatar(isAvatarTarget);
+    setActiveEmotionCropperId(null);
+    setCropperOpen(true);
   };
 
   // AI Generator with @ mentions
@@ -311,7 +341,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
 
   const handleRunAiGenerator = async () => {
     if (!activeApiKey || !activeApiKey.key.trim()) {
-      alert('Please add and configure an API key in the Settings tab first.');
+      alert(language === 'ru' ? 'Сначала настройте API ключ во вкладке Настройки.' : 'Please add and configure an API key in the Settings tab first.');
       return;
     }
     setIsGenerating(true);
@@ -359,7 +389,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
       setShowGeneratorModal(false);
       onDirtyChange(true, handleSaveCharacter);
     } catch (err: any) {
-      alert(`Generation failed: ${err.message}`);
+      alert(language === 'ru' ? `Ошибка генерации: ${err.message}` : `Generation failed: ${err.message}`);
     } finally {
       setIsGenerating(false);
     }
@@ -484,9 +514,6 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                     src={char.avatar}
                     alt={char.name}
                     className="w-full h-full object-cover"
-                    style={{
-                      transform: `translate(${char.avatarOffset?.x || 0}px, ${char.avatarOffset?.y || 0}px) scale(${char.avatarOffset?.scale || 1})`,
-                    }}
                   />
                 </div>
 
@@ -608,9 +635,6 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                       src={avatar}
                       alt="Avatar"
                       className="w-full h-full object-cover"
-                      style={{
-                        transform: `translate(${avatarOffset.x}px, ${avatarOffset.y}px) scale(${avatarOffset.scale})`,
-                      }}
                     />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-slate-500">
@@ -618,15 +642,26 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                     </div>
                   )}
                 </div>
-                <label className="flex items-center gap-1 px-3 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-violet-400 font-medium cursor-pointer">
-                  <span>{avatar ? t.reposition : t.uploadAndPosition}</span>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => handleFileSelect(e, true)}
-                    className="hidden"
-                  />
-                </label>
+                <div className="flex items-center gap-1.5">
+                  <label className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-violet-400 font-medium cursor-pointer">
+                    <span>{avatar ? (language === 'ru' ? 'Сменить' : 'Change') : t.uploadAndPosition}</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => handleFileSelect(e, true)}
+                      className="hidden"
+                    />
+                  </label>
+                  {avatar && (
+                    <button
+                      type="button"
+                      onClick={() => handleRepositionExisting(true)}
+                      className="px-2 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-slate-300 font-medium"
+                    >
+                      {t.reposition}
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Chat Background Box */}
@@ -645,15 +680,26 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                     </div>
                   )}
                 </div>
-                <label className="flex items-center gap-1 px-3 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-violet-400 font-medium cursor-pointer">
-                  <span>{chatBackground ? t.reposition : t.uploadAndPosition}</span>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => handleFileSelect(e, false)}
-                    className="hidden"
-                  />
-                </label>
+                <div className="flex items-center gap-1.5">
+                  <label className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-violet-400 font-medium cursor-pointer">
+                    <span>{chatBackground ? (language === 'ru' ? 'Сменить' : 'Change') : t.uploadAndPosition}</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => handleFileSelect(e, false)}
+                      className="hidden"
+                    />
+                  </label>
+                  {chatBackground && (
+                    <button
+                      type="button"
+                      onClick={() => handleRepositionExisting(false)}
+                      className="px-2 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-slate-300 font-medium"
+                    >
+                      {t.reposition}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -838,16 +884,27 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                         </div>
 
                         {/* Upload sprite button */}
-                        <label className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-violet-400 font-medium cursor-pointer shrink-0">
-                          <Camera className="w-3.5 h-3.5" />
-                          <span>{em.avatar ? t.reposition : t.uploadEmotionAvatar}</span>
-                          <input
-                            type="file"
-                            accept="image/*"
-                            onChange={(e) => handleEmotionFileSelect(e, em.id)}
-                            className="hidden"
-                          />
-                        </label>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <label className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-violet-400 font-medium cursor-pointer">
+                            <Camera className="w-3.5 h-3.5" />
+                            <span>{em.avatar ? (language === 'ru' ? 'Сменить' : 'Change') : t.uploadEmotionAvatar}</span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={(e) => handleEmotionFileSelect(e, em.id)}
+                              className="hidden"
+                            />
+                          </label>
+                          {em.avatar && (
+                            <button
+                              type="button"
+                              onClick={() => handleRepositionEmotion(em)}
+                              className="px-2 py-1.5 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-slate-300 font-medium"
+                            >
+                              {t.reposition}
+                            </button>
+                          )}
+                        </div>
 
                         {/* Remove button */}
                         <button
@@ -1041,6 +1098,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
         imageSrc={cropperRawSrc}
         isAvatar={cropperIsAvatar}
         initialOffset={cropperIsAvatar ? avatarOffset : chatBackgroundOffset}
+        language={language}
         onConfirm={(croppedUrl, offset) => {
           if (activeEmotionCropperId) {
             const next = emotions.map((em) =>

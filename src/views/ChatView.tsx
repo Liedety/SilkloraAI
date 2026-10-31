@@ -82,7 +82,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
       if (existing) {
         setCurrentSessionId(existing.id);
       } else {
-        const title = type === 'character' ? (character?.name || 'Chat') : (group?.name || 'Group Chat');
+        const title = type === 'character'
+          ? (character?.name || (language === 'ru' ? 'Чат' : 'Chat'))
+          : (group?.name || (language === 'ru' ? 'Групповой чат' : 'Group Chat'));
         const newSession: ChatSession = {
           id: 'chat-' + Math.random().toString(36).substring(2, 10),
           title,
@@ -196,6 +198,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   };
 
+  useEffect(() => {
+    adjustTextareaHeight();
+  }, [inputText]);
+
   // Slash command trigger & auto-expanding textarea
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
@@ -244,7 +250,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     existingBotMsgToVariant?: ChatMessage
   ) => {
     if (!activeApiKey || !activeApiKey.key.trim()) {
-      alert('Please configure an active API key in Settings.');
+      alert(language === 'ru' ? 'Пожалуйста, настройте активный API ключ в Настройках.' : 'Please configure an active API key in Settings.');
       return;
     }
 
@@ -280,7 +286,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       : null;
 
     // Retrieve affinity score
-    const affinity = session.relationships[speaker.id] || 0;
+    const affinity = session.relationships?.[speaker.id] || 0;
 
     // Build system prompt
     const groupMembers = type === 'group' ? allCharacters.filter((c) => group?.characterIds.includes(c.id)) : [];
@@ -304,8 +310,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
     // Build message array for API
     const apiMessages: any[] = [{ role: 'system', content: systemPrompt }];
 
-    // Context sliding window (last 16 messages)
-    const contextMsgs = messages.slice(-16);
+    // Context sliding window (query fresh messages directly from DB)
+    const freshDbMsgs = await db.messages.where('chatId').equals(session.id).sortBy('createdAt');
+    const contextMsgs = freshDbMsgs.slice(-16);
     for (const msg of contextMsgs) {
       const activeVariant = msg.variants[msg.activeVariantIndex];
       if (!activeVariant) continue;
@@ -350,7 +357,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           display = '';
         }
 
-        const emotionMatch = display.match(/<emotion>([a-zA-Z0-9_\-\s]+)<\/emotion>/i);
+        const emotionMatch = display.match(/<emotion>([^<]+)<\/emotion>/i);
         if (emotionMatch) {
           setStreamingEmotion(emotionMatch[1].trim().toLowerCase());
           display = display.replace(/<emotion>[\s\S]*?<\/emotion>/gi, '').trimStart();
@@ -373,7 +380,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           finalText = completed.replace(/<thought>[\s\S]*?<\/thought>/, '').trim();
         }
 
-        const emotionMatch = finalText.match(/<emotion>([a-zA-Z0-9_\-\s]+)<\/emotion>/i);
+        const emotionMatch = finalText.match(/<emotion>([^<]+)<\/emotion>/i);
         if (emotionMatch) {
           finalEmotion = emotionMatch[1].trim().toLowerCase();
           finalText = finalText.replace(/<emotion>[\s\S]*?<\/emotion>/gi, '').trim();
@@ -415,12 +422,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
         await db.chats.update(session.id, { updatedAt: Date.now() });
 
-        // Run automated memory graph extraction and affinity change in background
+        // Run automated memory graph extraction and affinity change in background with fresh DB messages
+        const freshHistory = await db.messages.where('chatId').equals(session.id).sortBy('createdAt');
         extractMemoryAndAffinity(
           session.id,
           speaker.id,
           affinity,
-          updatedMsgList,
+          freshHistory,
           activeApiKey,
           settings?.textModel
         ).then(async ({ newAffinity }) => {
@@ -436,7 +444,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       onError: (err) => {
         setIsGenerating(false);
         abortControllerRef.current = null;
-        alert(`Generation Error: ${err.message}`);
+        alert((language === 'ru' ? 'Ошибка генерации: ' : 'Generation Error: ') + err.message);
       },
     });
   };
@@ -453,7 +461,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       id: 'msg-' + Math.random().toString(36).substring(2, 10),
       chatId: session.id,
       senderId: 'user',
-      senderName: userPersona ? userPersona.name : 'You',
+      senderName: userPersona ? userPersona.name : (language === 'ru' ? 'Вы' : 'You'),
       senderAvatar: userPersona ? userPersona.avatar : undefined,
       variants: [
         {
@@ -596,7 +604,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       setShowUserWandModal(false);
       setUserWandPrompt('');
     } catch (err: any) {
-      alert(`Ghostwriter failed: ${err.message}`);
+      alert((language === 'ru' ? 'Ошибка подсказки реплики: ' : 'Ghostwriter failed: ') + err.message);
     } finally {
       setIsWandGenerating(false);
     }
@@ -611,10 +619,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
     } else if (cmd === '/summary') {
       setInputText('');
       if (!activeApiKey) {
-        alert('API key required for summary.');
+        alert(language === 'ru' ? 'Требуется API ключ для генерации сводки.' : 'API key required for summary.');
         return;
       }
-      setSummaryModalText('Generating scene recap...');
+      setSummaryModalText(language === 'ru' ? 'Генерация сводки сцены...' : 'Generating scene recap...');
       try {
         const history = buildContextHistory(messages);
         const recap = await summarizeScene(
@@ -624,7 +632,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         );
         setSummaryModalText(recap);
       } catch (err: any) {
-        setSummaryModalText(`Failed to summarize: ${err.message}`);
+        setSummaryModalText(language === 'ru' ? `Ошибка генерации сводки: ${err.message}` : `Failed to summarize: ${err.message}`);
       }
     } else if (cmd === '/memory') {
       setInputText('');
@@ -632,7 +640,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     } else if (cmd === '/action') {
       setInputText('*action* ');
     } else if (cmd === '/reset') {
-      if (window.confirm('Clear messages in this chat session?')) {
+      if (window.confirm(language === 'ru' ? 'Очистить все сообщения в этой сессии?' : 'Clear messages in this chat session?')) {
         if (session) {
           await db.messages.where('chatId').equals(session.id).delete();
         }
@@ -698,18 +706,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   src={character.avatar}
                   alt={character.name}
                   className="w-full h-full object-cover"
-                  style={{
-                    transform: `translate(${character.avatarOffset?.x || 0}px, ${character.avatarOffset?.y || 0}px) scale(${character.avatarOffset?.scale || 1})`,
-                  }}
                 />
               ) : group?.avatar ? (
                 <img
                   src={group.avatar}
                   alt={group.name}
                   className="w-full h-full object-cover"
-                  style={{
-                    transform: `translate(${group.avatarOffset?.x || 0}px, ${group.avatarOffset?.y || 0}px) scale(${group.avatarOffset?.scale || 1})`,
-                  }}
                 />
               ) : (
                 <div className="w-full h-full flex items-center justify-center bg-violet-600/20 text-violet-400">
@@ -723,12 +725,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <h2 className="text-sm font-bold text-white leading-tight truncate max-w-[150px]">
                   {type === 'character' ? character?.name : group?.name}
                 </h2>
-                {type === 'character' && character && session && (
+                {type === 'character' && character && session ? (
                   <span className="px-2 py-0.5 rounded-full bg-silk-800/80 border border-silk-700 text-[10px] text-rose-400 font-semibold flex items-center gap-1">
                     <span>❤️</span>
                     <span>{session.relationships?.[character.id] ?? 0}</span>
                   </span>
-                )}
+                ) : type === 'group' && streamingSender && session ? (
+                  <span className="px-2 py-0.5 rounded-full bg-silk-800/80 border border-silk-700 text-[10px] text-rose-400 font-semibold flex items-center gap-1">
+                    <span>❤️ {streamingSender.name}:</span>
+                    <span>{session.relationships?.[streamingSender.id] ?? 0}</span>
+                  </span>
+                ) : null}
               </div>
               <span className="text-[10px] text-emerald-400 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
@@ -845,9 +852,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   {isEditing ? (
                     <div className="space-y-2">
                       <textarea
-                        rows={3}
+                        rows={2}
+                        ref={(el) => {
+                          if (el) {
+                            el.style.height = 'auto';
+                            el.style.height = `${Math.min(el.scrollHeight, 260)}px`;
+                          }
+                        }}
                         value={editText}
-                        onChange={(e) => setEditText(e.target.value)}
+                        onChange={(e) => {
+                          setEditText(e.target.value);
+                          e.target.style.height = 'auto';
+                          e.target.style.height = `${Math.min(e.target.scrollHeight, 260)}px`;
+                        }}
                         className="w-full p-2 bg-silk-950 border border-silk-700 rounded-lg text-xs text-white resize-none"
                       />
                       <div className="flex justify-end gap-1.5">
@@ -1208,7 +1225,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 className="flex items-center gap-1.5 px-4 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-md"
               >
                 <Sparkles className="w-3.5 h-3.5" />
-                <span>{isWandGenerating ? 'Formulating...' : t.applyToInput}</span>
+                <span>{isWandGenerating ? (language === 'ru' ? 'Формулирую...' : 'Formulating...') : t.applyToInput}</span>
               </button>
             </div>
           </div>

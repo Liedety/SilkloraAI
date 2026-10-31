@@ -122,7 +122,7 @@ export const ChatSettingsModal: React.FC<ChatSettingsModalProps> = ({
 
   const handleDeleteSession = async (id: string) => {
     if (allSessions.length <= 1) {
-      alert('Cannot delete the only remaining session.');
+      alert(language === 'ru' ? 'Нельзя удалить единственную сессию.' : 'Cannot delete the only remaining session.');
       return;
     }
     await db.chats.delete(id);
@@ -136,11 +136,12 @@ export const ChatSettingsModal: React.FC<ChatSettingsModalProps> = ({
   };
 
   const getAffinityStatus = (score: number) => {
-    if (score <= -50) return { label: 'Hostile / Враждебный', color: 'text-rose-500' };
-    if (score < 0) return { label: 'Cold / Настороженный', color: 'text-orange-400' };
-    if (score < 25) return { label: 'Neutral / Нейтральный', color: 'text-slate-400' };
-    if (score < 60) return { label: 'Friendly / Теплый', color: 'text-emerald-400' };
-    return { label: 'Devoted / Близкий', color: 'text-violet-400' };
+    const isRu = language === 'ru';
+    if (score <= -50) return { label: isRu ? 'Враждебный' : 'Hostile', color: 'text-rose-500' };
+    if (score < 0) return { label: isRu ? 'Настороженный' : 'Cold', color: 'text-orange-400' };
+    if (score < 25) return { label: isRu ? 'Нейтральный' : 'Neutral', color: 'text-slate-400' };
+    if (score < 60) return { label: isRu ? 'Теплый' : 'Friendly', color: 'text-emerald-400' };
+    return { label: isRu ? 'Близкий' : 'Devoted', color: 'text-violet-400' };
   };
 
   return (
@@ -218,7 +219,7 @@ export const ChatSettingsModal: React.FC<ChatSettingsModalProps> = ({
               </div>
 
               {/* Interactive Canvas Graph */}
-              <MemoryGraphView nodes={memoryNodes} edges={memoryEdges} />
+              <MemoryGraphView nodes={memoryNodes} edges={memoryEdges} language={language} />
             </div>
           )}
 

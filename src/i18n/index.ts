@@ -208,6 +208,10 @@ export const translations = {
     customModelInput: 'Or Enter Custom Model ID',
     selectedModel: 'Selected',
     applyModel: 'Set',
+    noMatchingModels: 'No matching models found',
+    activateKeyFirst: 'Please activate an API key first.',
+    failedLoadModels: 'Failed to load models',
+    failedLoadVisionModels: 'Failed to load vision models',
 
     sectionVisionModel: 'Vision AI Model (Photo Analysis)',
     visionModelDesc: 'Model used to inspect photos attached to messages and character creation references.',
@@ -216,9 +220,13 @@ export const translations = {
 
     sectionStyles: 'Text & RP Styles',
     createStyle: 'New Custom Style',
+    editStyle: 'Edit Style',
     styleName: 'Style Name',
+    styleNamePlaceholder: 'e.g. Victorian Romance',
     styleDesc: 'Short Description',
+    styleDescPlaceholder: 'Brief summary...',
     styleInstruction: 'System Directives for AI',
+    styleInstructionPlaceholder: 'Direct instructions given to the AI system prompt...',
     customStyleBadge: 'Custom',
 
     sectionThemes: 'Visual Theme & Chat Customizer',
@@ -449,6 +457,10 @@ export const translations = {
     customModelInput: 'Или введите идентификатор модели вручную',
     selectedModel: 'Выбрана',
     applyModel: 'Применить',
+    noMatchingModels: 'Модели не найдены',
+    activateKeyFirst: 'Сначала активируйте API ключ.',
+    failedLoadModels: 'Не удалось загрузить список моделей',
+    failedLoadVisionModels: 'Не удалось загрузить vision-модели',
 
     sectionVisionModel: 'Модель для анализа фото (Vision)',
     visionModelDesc: 'Используется для распознавания фото в чате и фото-референсов персонажей.',
@@ -457,9 +469,13 @@ export const translations = {
 
     sectionStyles: 'Стили текста RP',
     createStyle: 'Создать свой стиль',
+    editStyle: 'Редактировать стиль',
     styleName: 'Название стиля',
+    styleNamePlaceholder: 'например, Викторианский роман',
     styleDesc: 'Краткое описание',
+    styleDescPlaceholder: 'Краткое описание...',
     styleInstruction: 'Системные инструкции для ИИ',
+    styleInstructionPlaceholder: 'Прямые инструкции для системного промпта ИИ...',
     customStyleBadge: 'Кастомный',
 
     sectionThemes: 'Темы и оформление чата',

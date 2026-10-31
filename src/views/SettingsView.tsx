@@ -120,7 +120,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleRefreshModels = async () => {
     const activeKey = apiKeys.find((k) => k.isActive);
     if (!activeKey) {
-      alert('Please activate an API key first.');
+      alert(t.activateKeyFirst);
       return;
     }
     setIsLoadingModels(true);
@@ -128,7 +128,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const list = await fetchAvailableModels(activeKey);
       setAvailableModels(list);
     } catch (err: any) {
-      alert(`Failed to load models: ${err.message}`);
+      alert(`${t.failedLoadModels}: ${err.message}`);
     } finally {
       setIsLoadingModels(false);
     }
@@ -144,12 +144,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const handleRefreshVisionModels = async () => {
     const activeKey = apiKeys.find((k) => k.isActive);
+    if (!activeKey) {
+      alert(t.activateKeyFirst);
+      return;
+    }
     setIsLoadingVisionModels(true);
     try {
       const list = await fetchVisionModels(activeKey);
       setAvailableVisionModels(list);
     } catch (err: any) {
-      alert(`Failed to load vision models: ${err.message}`);
+      alert(`${t.failedLoadVisionModels}: ${err.message}`);
     } finally {
       setIsLoadingVisionModels(false);
     }
@@ -513,7 +517,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           {/* Compact Selectable Models List */}
           <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
             {filteredTextModels.length === 0 ? (
-              <div className="text-xs text-slate-500 italic p-2 text-center">No matching models</div>
+              <div className="text-xs text-slate-500 italic p-2 text-center">{t.noMatchingModels}</div>
             ) : (
               filteredTextModels.map((m) => {
                 const isSelected = settings?.textModel === m.id;
@@ -617,7 +621,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
           <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
             {filteredVisionModels.length === 0 ? (
-              <div className="text-xs text-slate-500 italic p-2 text-center">No matching models</div>
+              <div className="text-xs text-slate-500 italic p-2 text-center">{t.noMatchingModels}</div>
             ) : (
               filteredVisionModels.map((m) => {
                 const isSelected = settings?.visionModel === m.id;
@@ -861,7 +865,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-sm text-white">
-                {editingStyleId ? 'Edit Style' : t.createStyle}
+                {editingStyleId ? t.editStyle : t.createStyle}
               </h3>
               <button
                 onClick={() => setShowStyleModal(false)}
@@ -877,7 +881,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 type="text"
                 value={styleName}
                 onChange={(e) => setStyleName(e.target.value)}
-                placeholder="e.g. Victorian Romance"
+                placeholder={t.styleNamePlaceholder}
                 className="w-full px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white"
               />
             </div>
@@ -888,7 +892,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 type="text"
                 value={styleDesc}
                 onChange={(e) => setStyleDesc(e.target.value)}
-                placeholder="Brief summary..."
+                placeholder={t.styleDescPlaceholder}
                 className="w-full px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white"
               />
             </div>
@@ -899,7 +903,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 rows={4}
                 value={styleInstruction}
                 onChange={(e) => setStyleInstruction(e.target.value)}
-                placeholder="Direct instructions given to the AI system prompt..."
+                placeholder={t.styleInstructionPlaceholder}
                 className="w-full px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white resize-none"
               />
             </div>

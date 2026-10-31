@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --experimental-strip-types --test test/**/*.test.ts"
   },
   "dependencies": {
     "@capacitor/android": "^6.1.2",

@@ -2,6 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --theme-accent: #8b5cf6;
+  --theme-action: #fb7185;
+  --theme-accent-rgb: 139, 92, 246;
+}
+
 @layer utilities {
   .pb-safe {
     padding-bottom: env(safe-area-inset-bottom, 1rem);
@@ -15,6 +21,15 @@
   .no-scrollbar {
     -ms-overflow-style: none;
     scrollbar-width: none;
+  }
+  .theme-accent-bg {
+    background-color: var(--theme-accent, #8b5cf6);
+  }
+  .theme-accent-text {
+    color: var(--theme-accent, #8b5cf6);
+  }
+  .theme-accent-border {
+    border-color: var(--theme-accent, #8b5cf6);
   }
 }
 
@@ -40,12 +55,12 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(139, 92, 246, 0.3);
+  background: rgba(var(--theme-accent-rgb, 139, 92, 246), 0.35);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(139, 92, 246, 0.6);
+  background: rgba(var(--theme-accent-rgb, 139, 92, 246), 0.7);
 }
 
 @keyframes fadeIn {

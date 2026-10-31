@@ -1,10 +1,12 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { ZoomIn, ZoomOut, RotateCcw, X, Info } from 'lucide-react';
-import type { MemoryNode, MemoryEdge } from '../types';
+import { ZoomIn, ZoomOut, RotateCcw, X, Network, LayoutGrid, Trash2 } from 'lucide-react';
+import type { MemoryNode, MemoryEdge, Language } from '../types';
+import { db } from '../db';
 
 interface MemoryGraphViewProps {
   nodes: MemoryNode[];
   edges: MemoryEdge[];
+  language?: Language;
 }
 
 interface SimNode extends MemoryNode {
@@ -15,42 +17,93 @@ interface SimNode extends MemoryNode {
   radius: number;
 }
 
-const TYPE_COLORS: Record<string, { bg: string; border: string; glow: string }> = {
-  event: { bg: '#d97706', border: '#f59e0b', glow: 'rgba(245, 158, 11, 0.4)' },
-  relationship: { bg: '#e11d48', border: '#fb7185', glow: 'rgba(244, 63, 94, 0.4)' },
-  fact: { bg: '#0284c7', border: '#38bdf8', glow: 'rgba(56, 189, 248, 0.4)' },
-  location: { bg: '#059669', border: '#34d399', glow: 'rgba(16, 185, 129, 0.4)' },
-  secret: { bg: '#7e22ce', border: '#c084fc', glow: 'rgba(168, 85, 247, 0.4)' },
+const TYPE_CONFIG: Record<
+  string,
+  { bg: string; border: string; glow: string; labelEn: string; labelRu: string }
+> = {
+  event: {
+    bg: '#d97706',
+    border: '#f59e0b',
+    glow: 'rgba(245, 158, 11, 0.4)',
+    labelEn: 'Event',
+    labelRu: 'Событие',
+  },
+  relationship: {
+    bg: '#e11d48',
+    border: '#fb7185',
+    glow: 'rgba(244, 63, 94, 0.4)',
+    labelEn: 'Bond',
+    labelRu: 'Связь',
+  },
+  fact: {
+    bg: '#0284c7',
+    border: '#38bdf8',
+    glow: 'rgba(56, 189, 248, 0.4)',
+    labelEn: 'Fact',
+    labelRu: 'Факт',
+  },
+  location: {
+    bg: '#059669',
+    border: '#34d399',
+    glow: 'rgba(16, 185, 129, 0.4)',
+    labelEn: 'Location',
+    labelRu: 'Локация',
+  },
+  secret: {
+    bg: '#7e22ce',
+    border: '#c084fc',
+    glow: 'rgba(168, 85, 247, 0.4)',
+    labelEn: 'Secret',
+    labelRu: 'Секрет',
+  },
 };
 
-export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({ nodes, edges }) => {
+export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
+  nodes,
+  edges,
+  language = 'en',
+}) => {
+  const isRu = language === 'ru';
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [zoom, setZoom] = useState<number>(1);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [selectedNode, setSelectedNode] = useState<MemoryNode | null>(null);
+  const [viewMode, setViewMode] = useState<'graph' | 'cards'>('graph');
 
   const simNodesRef = useRef<SimNode[]>([]);
   const isDraggingRef = useRef(false);
   const dragTargetRef = useRef<SimNode | null>(null);
   const lastMousePosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
-  // Dynamically update canvas dimensions on resize to prevent stretching / squashing
+  // Dynamically update canvas dimensions on resize using ResizeObserver
   useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
     const updateSize = () => {
-      const container = containerRef.current;
       const canvas = canvasRef.current;
-      if (!container || !canvas) return;
+      if (!canvas || !container) return;
       const rect = container.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
       const dpr = window.devicePixelRatio || 1;
       canvas.width = Math.floor(rect.width * dpr);
       canvas.height = Math.floor(rect.height * dpr);
     };
 
     updateSize();
+
+    const ro = new ResizeObserver(() => {
+      updateSize();
+    });
+    ro.observe(container);
+
     window.addEventListener('resize', updateSize);
-    return () => window.removeEventListener('resize', updateSize);
-  }, []);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', updateSize);
+    };
+  }, [viewMode]);
 
   // Initialize simulation positions
   useEffect(() => {
@@ -59,7 +112,9 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({ nodes, edges }
 
     simNodesRef.current = nodes.map((node, i) => {
       const existing = existingMap.get(node.id);
-      if (existing) return existing;
+      if (existing) {
+        return { ...existing, label: node.label, detail: node.detail, type: node.type };
+      }
 
       const angle = i * angleStep;
       const distance = 80 + (i % 3) * 60;
@@ -76,6 +131,7 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({ nodes, edges }
 
   // Main rendering & physics animation loop
   useEffect(() => {
+    if (viewMode !== 'graph') return;
     let animId: number;
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -86,6 +142,10 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({ nodes, edges }
       const dpr = window.devicePixelRatio || 1;
       const width = canvas.width / dpr;
       const height = canvas.height / dpr;
+      if (width <= 0 || height <= 0) {
+        animId = requestAnimationFrame(render);
+        return;
+      }
       const centerX = width / 2;
       const centerY = height / 2;
 
@@ -105,7 +165,7 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({ nodes, edges }
           const dy = b.y - a.y;
           const dist = Math.sqrt(dx * dx + dy * dy) || 1;
           if (dist < 260) {
-            const force = (kRepulsion / (dist * dist));
+            const force = kRepulsion / (dist * dist);
             const fx = (dx / dist) * force;
             const fy = (dy / dist) * force;
             a.vx -= fx;
@@ -161,7 +221,7 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({ nodes, edges }
       ctx.translate(centerX + pan.x, centerY + pan.y);
       ctx.scale(zoom, zoom);
 
-      // Draw subtle grid lines
+      // Draw subtle grid lines with square 1:1 aspect
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
       ctx.lineWidth = 1;
       const gridSize = 50;
@@ -202,21 +262,21 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({ nodes, edges }
 
       // Draw Nodes
       for (const node of simNodes) {
-        const colors = TYPE_COLORS[node.type] || TYPE_COLORS.fact;
+        const conf = TYPE_CONFIG[node.type] || TYPE_CONFIG.fact;
 
         // Outer glow
         ctx.beginPath();
         ctx.arc(node.x, node.y, node.radius + 6, 0, Math.PI * 2);
-        ctx.fillStyle = colors.glow;
+        ctx.fillStyle = conf.glow;
         ctx.fill();
 
         // Node circle
         ctx.beginPath();
         ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
-        ctx.fillStyle = colors.bg;
+        ctx.fillStyle = conf.bg;
         ctx.fill();
         ctx.lineWidth = 2.5;
-        ctx.strokeStyle = colors.border;
+        ctx.strokeStyle = conf.border;
         ctx.stroke();
 
         // Node label
@@ -244,9 +304,9 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({ nodes, edges }
 
     render();
     return () => cancelAnimationFrame(animId);
-  }, [edges, pan, zoom]);
+  }, [edges, pan, zoom, viewMode]);
 
-  // Pointer interactions
+  // Pointer interactions with accurate CSS-to-Canvas coordinate projection
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -254,22 +314,25 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({ nodes, edges }
     const clientX = e.clientX - rect.left;
     const clientY = e.clientY - rect.top;
 
-    // Convert screen coordinates to world coordinates
-    const worldX = (clientX - canvas.width / 2 - pan.x) / zoom;
-    const worldY = (clientY - canvas.height / 2 - pan.y) / zoom;
+    // Use CSS dimensions (rect.width & rect.height), NOT device pixels (canvas.width)
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
 
-    // Check hit test on nodes
+    const worldX = (clientX - centerX - pan.x) / zoom;
+    const worldY = (clientY - centerY - pan.y) / zoom;
+
+    // Hit test on nodes
     const hit = simNodesRef.current.find((n) => {
       const dx = n.x - worldX;
       const dy = n.y - worldY;
-      return Math.sqrt(dx * dx + dy * dy) <= n.radius + 5;
+      return Math.sqrt(dx * dx + dy * dy) <= n.radius + 6;
     });
 
     if (hit) {
       dragTargetRef.current = hit;
       setSelectedNode(hit);
     } else {
-      dragTargetRef.current = null;
+      setSelectedNode(null);
     }
 
     isDraggingRef.current = true;
@@ -303,92 +366,189 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({ nodes, edges }
     setZoom((z) => Math.max(0.4, Math.min(2.5, z * factor)));
   };
 
+  const handleDeleteNode = async (nodeId: string) => {
+    await db.memoryNodes.delete(nodeId);
+    await db.memoryEdges.where('source').equals(nodeId).delete();
+    await db.memoryEdges.where('target').equals(nodeId).delete();
+    if (selectedNode?.id === nodeId) {
+      setSelectedNode(null);
+    }
+  };
+
   return (
-    <div
-      ref={containerRef}
-      className="relative w-full h-[360px] bg-silk-950 rounded-2xl overflow-hidden border border-silk-800 shadow-inner select-none flex flex-col"
-    >
-      {/* Floating View Controls */}
-      <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5 bg-silk-900/90 backdrop-blur-md p-1.5 rounded-xl border border-silk-700/60 shadow-lg">
-        <button
-          onClick={() => setZoom((z) => Math.min(2.5, z * 1.2))}
-          type="button"
-          className="p-1.5 text-slate-300 hover:text-white rounded-lg hover:bg-silk-800"
-          title="Zoom in"
-        >
-          <ZoomIn className="w-4 h-4" />
-        </button>
-        <button
-          onClick={() => setZoom((z) => Math.max(0.4, z * 0.8))}
-          type="button"
-          className="p-1.5 text-slate-300 hover:text-white rounded-lg hover:bg-silk-800"
-          title="Zoom out"
-        >
-          <ZoomOut className="w-4 h-4" />
-        </button>
-        <button
-          onClick={() => {
-            setZoom(1);
-            setPan({ x: 0, y: 0 });
-          }}
-          type="button"
-          className="p-1.5 text-slate-300 hover:text-white rounded-lg hover:bg-silk-800"
-          title="Reset View"
-        >
-          <RotateCcw className="w-4 h-4" />
-        </button>
+    <div className="space-y-3">
+      {/* View Switcher Bar */}
+      <div className="flex items-center justify-between pb-1">
+        <div className="flex items-center gap-1 bg-silk-850 p-1 rounded-xl border border-silk-800">
+          <button
+            type="button"
+            onClick={() => setViewMode('graph')}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+              viewMode === 'graph'
+                ? 'bg-violet-600 text-white shadow'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <Network className="w-3.5 h-3.5" />
+            <span>{isRu ? 'Граф связей' : 'Graph'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('cards')}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+              viewMode === 'cards'
+                ? 'bg-violet-600 text-white shadow'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <LayoutGrid className="w-3.5 h-3.5" />
+            <span>{isRu ? 'Карточки' : 'Cards'}</span>
+          </button>
+        </div>
+
+        <div className="text-[11px] font-mono text-slate-400">
+          {nodes.length} {isRu ? 'элементов' : 'items'}
+        </div>
       </div>
 
-      {/* Legend */}
-      <div className="absolute bottom-3 left-3 z-10 flex flex-wrap gap-2 text-[10px] text-slate-400 bg-silk-900/80 backdrop-blur-sm px-3 py-1.5 rounded-lg border border-silk-800">
-        <span className="flex items-center gap-1">
-          <span className="w-2 h-2 rounded-full bg-amber-500 inline-block" /> Event
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="w-2 h-2 rounded-full bg-rose-500 inline-block" /> Bond
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="w-2 h-2 rounded-full bg-sky-500 inline-block" /> Fact
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> Place
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="w-2 h-2 rounded-full bg-purple-500 inline-block" /> Secret
-        </span>
-      </div>
-
-      <canvas
-        ref={canvasRef}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerUp}
-        onWheel={handleWheel}
-        className="w-full h-full cursor-grab active:cursor-grabbing touch-none block"
-      />
-
-      {/* Node Detail Sheet */}
-      {selectedNode && (
-        <div className="absolute inset-x-3 bottom-12 z-20 bg-silk-900/95 backdrop-blur-md border border-silk-700/80 rounded-xl p-3 shadow-2xl animate-fade-in text-xs">
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <span
-                className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase text-white tracking-wider"
-                style={{ backgroundColor: TYPE_COLORS[selectedNode.type]?.bg || '#0284c7' }}
-              >
-                {selectedNode.type}
-              </span>
-              <h4 className="font-semibold text-slate-200 text-sm">{selectedNode.label}</h4>
-            </div>
+      {viewMode === 'graph' ? (
+        <div
+          ref={containerRef}
+          className="relative w-full h-[360px] bg-silk-950 rounded-2xl overflow-hidden border border-silk-800 shadow-inner select-none flex flex-col"
+        >
+          {/* Floating View Controls */}
+          <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5 bg-silk-900/90 backdrop-blur-md p-1.5 rounded-xl border border-silk-700/60 shadow-lg">
             <button
-              onClick={() => setSelectedNode(null)}
-              className="text-slate-400 hover:text-white p-0.5"
+              onClick={() => setZoom((z) => Math.min(2.5, z * 1.2))}
+              type="button"
+              className="p-1.5 text-slate-300 hover:text-white rounded-lg hover:bg-silk-800"
+              title={isRu ? 'Приблизить' : 'Zoom in'}
             >
-              <X className="w-4 h-4" />
+              <ZoomIn className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setZoom((z) => Math.max(0.4, z * 0.8))}
+              type="button"
+              className="p-1.5 text-slate-300 hover:text-white rounded-lg hover:bg-silk-800"
+              title={isRu ? 'Отдалить' : 'Zoom out'}
+            >
+              <ZoomOut className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => {
+                setZoom(1);
+                setPan({ x: 0, y: 0 });
+              }}
+              type="button"
+              className="p-1.5 text-slate-300 hover:text-white rounded-lg hover:bg-silk-800"
+              title={isRu ? 'Сбросить вид' : 'Reset View'}
+            >
+              <RotateCcw className="w-4 h-4" />
             </button>
           </div>
-          <p className="mt-1.5 text-slate-300 leading-relaxed">{selectedNode.detail}</p>
+
+          {/* Localized Legend */}
+          <div className="absolute bottom-3 left-3 z-10 flex flex-wrap gap-2 text-[10px] text-slate-400 bg-silk-900/85 backdrop-blur-sm px-3 py-1.5 rounded-lg border border-silk-800">
+            {Object.entries(TYPE_CONFIG).map(([type, conf]) => (
+              <span key={type} className="flex items-center gap-1">
+                <span
+                  className="w-2 h-2 rounded-full inline-block"
+                  style={{ backgroundColor: conf.border }}
+                />
+                <span>{isRu ? conf.labelRu : conf.labelEn}</span>
+              </span>
+            ))}
+          </div>
+
+          <canvas
+            ref={canvasRef}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerLeave={handlePointerUp}
+            onWheel={handleWheel}
+            className="w-full h-full cursor-grab active:cursor-grabbing touch-none block"
+          />
+
+          {/* Node Detail Sheet */}
+          {selectedNode && (
+            <div className="absolute inset-x-3 bottom-12 z-20 bg-silk-900/95 backdrop-blur-md border border-silk-700/80 rounded-xl p-3 shadow-2xl animate-fade-in text-xs">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase text-white tracking-wider"
+                    style={{ backgroundColor: TYPE_CONFIG[selectedNode.type]?.bg || '#0284c7' }}
+                  >
+                    {isRu
+                      ? TYPE_CONFIG[selectedNode.type]?.labelRu || selectedNode.type
+                      : TYPE_CONFIG[selectedNode.type]?.labelEn || selectedNode.type}
+                  </span>
+                  <h4 className="font-semibold text-slate-200 text-sm">{selectedNode.label}</h4>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => handleDeleteNode(selectedNode.id)}
+                    type="button"
+                    className="text-slate-400 hover:text-rose-400 p-1 rounded hover:bg-silk-800"
+                    title={isRu ? 'Удалить узел' : 'Delete node'}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => setSelectedNode(null)}
+                    type="button"
+                    className="text-slate-400 hover:text-white p-1 rounded hover:bg-silk-800"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+              <p className="mt-1.5 text-slate-300 leading-relaxed">{selectedNode.detail}</p>
+            </div>
+          )}
+        </div>
+      ) : (
+        /* Cards View for comfortable inspection without squishing */
+        <div className="space-y-2 max-h-[360px] overflow-y-auto pr-1">
+          {nodes.length === 0 ? (
+            <div className="text-center py-8 text-xs text-slate-500 italic">
+              {isRu ? 'Узлы памяти пока не сформированы' : 'No memory nodes formed yet'}
+            </div>
+          ) : (
+            nodes.map((node) => {
+              const conf = TYPE_CONFIG[node.type] || TYPE_CONFIG.fact;
+              return (
+                <div
+                  key={node.id}
+                  className="p-3 rounded-xl bg-silk-850 border border-silk-800 space-y-1.5 shadow-sm hover:border-silk-700 transition-all"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="px-2 py-0.5 rounded text-[10px] font-semibold text-white uppercase tracking-wider shrink-0"
+                        style={{ backgroundColor: conf.bg }}
+                      >
+                        {isRu ? conf.labelRu : conf.labelEn}
+                      </span>
+                      <h4 className="font-semibold text-xs text-white truncate">{node.label}</h4>
+                    </div>
+                    <button
+                      onClick={() => handleDeleteNode(node.id)}
+                      type="button"
+                      className="text-slate-400 hover:text-rose-400 p-1 rounded hover:bg-silk-800 shrink-0"
+                      title={isRu ? 'Удалить' : 'Delete'}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <p className="text-xs text-slate-300 leading-relaxed">{node.detail}</p>
+                  <span className="text-[10px] text-slate-500 block">
+                    {new Date(node.createdAt).toLocaleString(isRu ? 'ru-RU' : 'en-US')}
+                  </span>
+                </div>
+              );
+            })
+          )}
         </div>
       )}
     </div>

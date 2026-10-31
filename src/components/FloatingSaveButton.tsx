@@ -6,6 +6,8 @@ interface FloatingSaveButtonProps {
   onSave: () => void;
   saved?: boolean;
   label?: string;
+  savedLabel?: string;
+  accentColor?: string;
 }
 
 export const FloatingSaveButton: React.FC<FloatingSaveButtonProps> = ({
@@ -13,6 +15,8 @@ export const FloatingSaveButton: React.FC<FloatingSaveButtonProps> = ({
   onSave,
   saved = false,
   label = 'Save',
+  savedLabel = 'Saved!',
+  accentColor = '#8b5cf6',
 }) => {
   if (!visible) return null;
 
@@ -20,18 +24,18 @@ export const FloatingSaveButton: React.FC<FloatingSaveButtonProps> = ({
     <button
       onClick={onSave}
       type="button"
-      className="fixed bottom-20 right-5 z-40 flex items-center gap-2 px-5 py-3 rounded-full shadow-2xl font-medium text-sm tracking-wide text-white transition-all transform active:scale-95 duration-200 border border-white/20"
+      className="fixed bottom-20 right-5 z-40 flex items-center gap-2 px-5 py-3 rounded-full shadow-2xl font-medium text-sm tracking-wide text-white transition-all transform active:scale-95 duration-200 border border-white/20 animate-fade-in"
       style={{
         background: saved
           ? 'linear-gradient(135deg, #059669 0%, #10b981 100%)'
-          : 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-        boxShadow: '0 10px 25px -5px rgba(99, 102, 241, 0.5)',
+          : `linear-gradient(135deg, ${accentColor} 0%, #312e81 100%)`,
+        boxShadow: `0 10px 25px -5px ${accentColor}80`,
       }}
     >
       {saved ? (
         <>
           <Check className="w-4 h-4 text-white" />
-          <span>Saved!</span>
+          <span>{savedLabel}</span>
         </>
       ) : (
         <>

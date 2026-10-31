@@ -57,7 +57,12 @@ No markdown wrappers, raw JSON only.`;
         onError: () => {},
       });
 
-      const cleaned = rawResponse.trim().replace(/^```json\s*/i, '').replace(/\s*```$/, '');
+      let cleaned = rawResponse.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+      const firstBrace = cleaned.indexOf('{');
+      const lastBrace = cleaned.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace !== -1) {
+        cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+      }
       const parsed = JSON.parse(cleaned);
 
       const delta = typeof parsed.affinityDelta === 'number' ? parsed.affinityDelta : 0;
