@@ -6,6 +6,8 @@
   --theme-accent: #8b5cf6;
   --theme-action: #fb7185;
   --theme-accent-rgb: 139, 92, 246;
+  --app-bg: #0a0814;
+  --app-surface: #141126;
 }
 
 @layer utilities {
@@ -30,6 +32,12 @@
   }
   .theme-accent-border {
     border-color: var(--theme-accent, #8b5cf6);
+  }
+  .app-bg {
+    background-color: var(--app-bg, #0a0814);
+  }
+  .app-surface {
+    background-color: var(--app-surface, #141126);
   }
 }
 

@@ -724,11 +724,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
-        {/* 6. Themes & Live Chat Preview */}
+        {/* 6. Application Theme & Palette */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4">
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
-            <Palette className="w-4 h-4 text-violet-400" />
-            <span>{t.sectionThemes}</span>
+          <div>
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+              <Palette className="w-4 h-4 text-violet-400" />
+              <span>{t.sectionAppThemes}</span>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1 leading-snug">{t.sectionAppThemesDesc}</p>
           </div>
 
           {/* Theme Presets */}
@@ -758,8 +761,79 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             })}
           </div>
 
+          {/* Custom App Colors: Accent, Action, Background, Surface */}
+          <div className="space-y-3 pt-1 border-t border-silk-800/80">
+            <h4 className="text-xs font-semibold text-slate-300">
+              {language === 'ru' ? 'Собственные цвета оформления приложения:' : 'Custom App Color Pickers:'}
+            </h4>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">{t.accentColor}</label>
+                <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
+                  <input
+                    type="color"
+                    value={currentTheme.accentColor}
+                    onChange={(e) => handleUpdateTheme({ accentColor: e.target.value })}
+                    className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
+                  />
+                  <span className="text-xs font-mono text-slate-300">{currentTheme.accentColor}</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">{t.actionColor}</label>
+                <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
+                  <input
+                    type="color"
+                    value={currentTheme.actionColor}
+                    onChange={(e) => handleUpdateTheme({ actionColor: e.target.value })}
+                    className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
+                  />
+                  <span className="text-xs font-mono text-slate-300">{currentTheme.actionColor}</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">{t.appBgColor}</label>
+                <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
+                  <input
+                    type="color"
+                    value={currentTheme.appBgColor || '#0a0814'}
+                    onChange={(e) => handleUpdateTheme({ appBgColor: e.target.value })}
+                    className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
+                  />
+                  <span className="text-xs font-mono text-slate-300">{currentTheme.appBgColor || '#0a0814'}</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">{t.appSurfaceColor}</label>
+                <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
+                  <input
+                    type="color"
+                    value={currentTheme.appSurfaceColor || '#141126'}
+                    onChange={(e) => handleUpdateTheme({ appSurfaceColor: e.target.value })}
+                    className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
+                  />
+                  <span className="text-xs font-mono text-slate-300">{currentTheme.appSurfaceColor || '#141126'}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* 7. Chat Bubbles & Visual Readability */}
+        <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4">
+          <div>
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+              <Sliders className="w-4 h-4 text-violet-400" />
+              <span>{t.sectionChatStyling}</span>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1 leading-snug">{t.sectionChatStylingDesc}</p>
+          </div>
+
           {/* Sliders: Radius, Opacity, Font size, Background tint */}
-          <div className="space-y-3 pt-2">
+          <div className="space-y-3 pt-1">
             <div>
               <div className="flex justify-between text-xs text-slate-400 mb-1">
                 <span>{t.bubbleRadius}</span>
@@ -822,31 +896,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               />
             </div>
 
-            {/* Colors picker row */}
+            {/* Bubble Colors: User and Bot */}
             <div className="grid grid-cols-2 gap-3 pt-1">
               <div>
-                <label className="block text-[11px] text-slate-400 mb-1">{t.accentColor}</label>
+                <label className="block text-[11px] text-slate-400 mb-1">{t.bubbleUserBg}</label>
                 <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
                   <input
                     type="color"
-                    value={currentTheme.accentColor}
-                    onChange={(e) => handleUpdateTheme({ accentColor: e.target.value })}
+                    value={currentTheme.bubbleUserBg}
+                    onChange={(e) => handleUpdateTheme({ bubbleUserBg: e.target.value })}
                     className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
                   />
-                  <span className="text-xs font-mono text-slate-300">{currentTheme.accentColor}</span>
+                  <span className="text-xs font-mono text-slate-300">{currentTheme.bubbleUserBg}</span>
                 </div>
               </div>
 
               <div>
-                <label className="block text-[11px] text-slate-400 mb-1">{t.actionColor}</label>
+                <label className="block text-[11px] text-slate-400 mb-1">{t.bubbleBotBg}</label>
                 <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
                   <input
                     type="color"
-                    value={currentTheme.actionColor}
-                    onChange={(e) => handleUpdateTheme({ actionColor: e.target.value })}
+                    value={currentTheme.bubbleBotBg}
+                    onChange={(e) => handleUpdateTheme({ bubbleBotBg: e.target.value })}
                     className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
                   />
-                  <span className="text-xs font-mono text-slate-300">{currentTheme.actionColor}</span>
+                  <span className="text-xs font-mono text-slate-300">{currentTheme.bubbleBotBg}</span>
                 </div>
               </div>
             </div>

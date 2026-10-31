@@ -59,6 +59,9 @@ export const ChatSettingsModal: React.FC<ChatSettingsModalProps> = ({
     () => db.memoryEdges.where('chatId').equals(session.id).toArray(),
     [session.id]
   ) || [];
+  const textStyles = useLiveQuery(() => db.textStyles.toArray()) || [];
+  const settings = useLiveQuery(() => db.settings.get('default'));
+  const activeDefaultStyle = textStyles.find((st) => st.id === settings?.textStyleId);
 
   // Group members if this is a group chat
   const group = useLiveQuery(
@@ -243,6 +246,32 @@ export const ChatSettingsModal: React.FC<ChatSettingsModalProps> = ({
                   {availablePersonas.map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Text Style for Session */}
+              <div className="p-3.5 rounded-xl bg-silk-850 border border-silk-800 space-y-2">
+                <label className="block text-xs font-semibold text-white">
+                  {language === 'ru' ? 'Стиль текста для этой сессии' : 'Writing Style for this Session'}
+                </label>
+                <select
+                  value={session.textStyleId || ''}
+                  onChange={(e) => {
+                    const val = e.target.value || null;
+                    db.chats.update(session.id, { textStyleId: val });
+                  }}
+                  className="w-full px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white"
+                >
+                  <option value="">
+                    {language === 'ru'
+                      ? `Общий из настроек (${activeDefaultStyle?.name || 'Иммерсивный'})`
+                      : `Global Setting (${activeDefaultStyle?.name || 'Immersive'})`}
+                  </option>
+                  {textStyles.map((st) => (
+                    <option key={st.id} value={st.id}>
+                      {st.name}
                     </option>
                   ))}
                 </select>

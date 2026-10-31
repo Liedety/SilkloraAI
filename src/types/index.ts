@@ -78,6 +78,7 @@ export interface ChatSession {
   type: 'character' | 'group';
   targetId: string; // characterId or groupId
   personaId?: string | null; // characterId representing the user
+  textStyleId?: string | null; // per-chat text style override
   thoughtsEnabled: boolean;
   chatDirectives?: string;
   relationships: Record<string, number>; // characterId -> affinity (-100 to 100)
@@ -95,6 +96,7 @@ export interface MemoryNode {
   y?: number;
   vx?: number;
   vy?: number;
+  isPinned?: boolean;
   createdAt: number;
 }
 
@@ -137,6 +139,8 @@ export interface ThemeConfig {
   name: string;
   accentColor: string; // e.g. #7c3aed or #38bdf8
   actionColor: string; // color for *actions*
+  appBgColor?: string; // full application background (e.g. #09090b)
+  appSurfaceColor?: string; // panel/card surface (e.g. #13141f)
   bubbleUserBg: string;
   bubbleBotBg: string;
   bubbleRadius: number; // 0 to 28

@@ -30,10 +30,11 @@ import type {
   MessageVariant,
 } from '../types';
 import { translations } from '../i18n';
-import { streamChatCompletion, suggestUserReply, summarizeScene } from '../services/ai';
+import { streamChatCompletion, suggestUserReply, summarizeScene, cleanArtifacts } from '../services/ai';
 import { buildSystemPrompt } from '../services/promptBuilder';
 import { extractMemoryAndAffinity } from '../services/memoryGraph';
 import { ChatSettingsModal } from './ChatSettingsModal';
+import { AvatarImage } from '../components/AvatarImage';
 
 interface ChatViewProps {
   type: 'character' | 'group';
@@ -62,10 +63,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const allCharacters = useLiveQuery(() => db.characters.toArray()) || [];
   const settings = useLiveQuery(() => db.settings.get('default'));
   const activeApiKey = useLiveQuery(() => db.apiKeys.filter((k) => k.isActive).first());
-  const activeStyle = useLiveQuery(
-    () => (settings ? db.textStyles.get(settings.textStyleId) : undefined),
-    [settings]
-  );
 
   // Active Session state
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
@@ -91,7 +88,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           type,
           targetId,
           personaId: null,
-          thoughtsEnabled: true,
+          thoughtsEnabled: false,
           relationships: {},
           createdAt: Date.now(),
           updatedAt: Date.now(),
@@ -130,6 +127,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const session = useLiveQuery(
     () => (currentSessionId ? db.chats.get(currentSessionId) : undefined),
     [currentSessionId]
+  );
+
+  const activeStyle = useLiveQuery(
+    () => (settings ? db.textStyles.get(session?.textStyleId || settings.textStyleId) : undefined),
+    [settings, session?.textStyleId]
   );
 
   // Messages in this session
@@ -222,11 +224,33 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const char = allCharacters.find((c) => c.id === senderId) || (type === 'character' ? character : undefined);
     if (!char) return fallbackAvatar || '';
     if (emotion && char.emotions && char.emotions.length > 0) {
-      const em = char.emotions.find(
-        (e) => e.name.toLowerCase() === emotion.toLowerCase() || e.label?.toLowerCase() === emotion.toLowerCase()
+      const emLower = emotion.trim().toLowerCase();
+      // 1. Direct match on name or label
+      const direct = char.emotions.find(
+        (e) => e.name.toLowerCase() === emLower || e.label?.toLowerCase() === emLower
       );
-      if (em && em.avatar) {
-        return em.avatar;
+      if (direct?.avatar) return direct.avatar;
+
+      // 2. Fuzzy synonym match (Russian & English)
+      const synonymGroups: Record<string, string[]> = {
+        happy: ['happy', 'joy', 'smile', 'радость', 'улыбка', 'веселье', 'счастье'],
+        sad: ['sad', 'sorrow', 'crying', 'грусть', 'печаль', 'слезы', 'тоска'],
+        angry: ['angry', 'furious', 'rage', 'гнев', 'злость', 'ярость', 'раздражение'],
+        blushing: ['blushing', 'shy', 'embarrassed', 'смущение', 'стыд', 'румянец'],
+        smirk: ['smirk', 'tease', 'playful', 'усмешка', 'сарказм', 'ухмылка'],
+        surprised: ['surprised', 'shocked', 'удивление', 'шок', 'испуг'],
+        thoughtful: ['thoughtful', 'pensive', 'задумчивость', 'размышление'],
+        neutral: ['neutral', 'calm', 'нейтральный', 'спокойствие'],
+      };
+
+      for (const [, words] of Object.entries(synonymGroups)) {
+        if (words.some((w) => emLower.includes(w))) {
+          const match = char.emotions.find((e) => {
+            const eName = (e.name + ' ' + (e.label || '')).toLowerCase();
+            return words.some((w) => eName.includes(w));
+          });
+          if (match?.avatar) return match.avatar;
+        }
       }
     }
     return char.avatar || fallbackAvatar || '';
@@ -364,7 +388,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         }
 
         setStreamingThought(currentThought);
-        setStreamingText(display);
+        setStreamingText(cleanArtifacts(display));
       },
       onComplete: async (completed) => {
         setIsGenerating(false);
@@ -386,8 +410,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
           finalText = finalText.replace(/<emotion>[\s\S]*?<\/emotion>/gi, '').trim();
         }
 
+        finalText = cleanArtifacts(finalText);
+
         const newVariant: MessageVariant = {
-          text: finalText || completed,
+          text: finalText || cleanArtifacts(completed),
           thought: finalThought || undefined,
           emotion: finalEmotion,
           timestamp: Date.now(),
@@ -701,41 +727,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
           {/* Avatar & Title */}
           <div className="flex items-center gap-2.5">
             <div className="relative w-9 h-9 rounded-xl overflow-hidden bg-silk-800 border border-silk-700 shrink-0">
-              {type === 'character' && character ? (
-                <img
-                  src={character.avatar}
-                  alt={character.name}
-                  className="w-full h-full object-cover"
-                />
-              ) : group?.avatar ? (
-                <img
-                  src={group.avatar}
-                  alt={group.name}
-                  className="w-full h-full object-cover"
-                />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center bg-violet-600/20 text-violet-400">
-                  <Bot className="w-5 h-5" />
-                </div>
-              )}
+              <AvatarImage
+                src={type === 'character' ? character?.avatar : group?.avatar}
+                alt={type === 'character' ? character?.name : group?.name}
+                isGroup={type === 'group'}
+                className="w-full h-full object-cover"
+              />
             </div>
 
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white leading-tight truncate max-w-[150px]">
+                <h2 className="text-sm font-bold text-white leading-tight truncate max-w-[180px]">
                   {type === 'character' ? character?.name : group?.name}
                 </h2>
-                {type === 'character' && character && session ? (
-                  <span className="px-2 py-0.5 rounded-full bg-silk-800/80 border border-silk-700 text-[10px] text-rose-400 font-semibold flex items-center gap-1">
-                    <span>❤️</span>
-                    <span>{session.relationships?.[character.id] ?? 0}</span>
-                  </span>
-                ) : type === 'group' && streamingSender && session ? (
-                  <span className="px-2 py-0.5 rounded-full bg-silk-800/80 border border-silk-700 text-[10px] text-rose-400 font-semibold flex items-center gap-1">
-                    <span>❤️ {streamingSender.name}:</span>
-                    <span>{session.relationships?.[streamingSender.id] ?? 0}</span>
-                  </span>
-                ) : null}
               </div>
               <span className="text-[10px] text-emerald-400 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
@@ -777,7 +781,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               {/* Bot Avatar with Emotion Sprite */}
               {!isUser && (
                 <div className="relative w-8 h-8 rounded-xl overflow-hidden shrink-0 border border-silk-700 bg-silk-800 mb-1">
-                  <img
+                  <AvatarImage
                     src={botAvatar}
                     alt={msg.senderName}
                     className="w-full h-full object-cover"
@@ -786,13 +790,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
               )}
 
               <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} max-w-[85%] space-y-1`}>
-                {/* Sender Name in group */}
-                {!isUser && type === 'group' && (
+                {/* Sender Name & Active Emotion Badge */}
+                {!isUser && (
                   <div className="flex items-center gap-1.5 text-[11px] font-semibold text-violet-300 ml-1">
-                    <span>{msg.senderName}</span>
+                    {type === 'group' && <span>{msg.senderName}</span>}
                     {(activeVariant.emotion || msg.emotion) && (
-                      <span className="text-[10px] text-slate-400 font-normal">
-                        ({activeVariant.emotion || msg.emotion})
+                      <span className="px-2 py-0.5 rounded-full bg-violet-950/60 border border-violet-700/50 text-[10px] text-violet-300 font-medium">
+                        {activeVariant.emotion || msg.emotion}
                       </span>
                     )}
                   </div>
@@ -989,23 +993,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
         {isGenerating && streamingSender && (
           <div className="flex justify-start items-end gap-2.5 animate-fade-in">
             <div className="relative w-8 h-8 rounded-xl overflow-hidden shrink-0 border border-silk-700 bg-silk-800 mb-1">
-              <img
+              <AvatarImage
                 src={getSpeakerAvatar(streamingSender.id, streamingEmotion || undefined, streamingSender.avatar)}
                 alt={streamingSender.name}
                 className="w-full h-full object-cover"
               />
             </div>
             <div className="flex flex-col items-start max-w-[85%] space-y-1">
-              {type === 'group' && (
-                <span className="text-[11px] font-semibold text-violet-300 ml-1">
-                  {streamingSender.name}
-                  {streamingEmotion && (
-                    <span className="text-[10px] text-slate-400 font-normal ml-1">
-                      ({streamingEmotion})
-                    </span>
-                  )}
-                </span>
-              )}
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold text-violet-300 ml-1">
+                {type === 'group' && <span>{streamingSender.name}</span>}
+                {streamingEmotion && (
+                  <span className="px-2 py-0.5 rounded-full bg-violet-950/60 border border-violet-700/50 text-[10px] text-violet-300 font-medium">
+                    {streamingEmotion}
+                  </span>
+                )}
+              </div>
               <div
                 className="p-3.5 shadow-xl text-slate-200"
                 style={{
@@ -1159,7 +1161,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               }
             }}
             placeholder={t.chatInputPlaceholder}
-            className="flex-1 px-4 py-2.5 bg-silk-800 border border-silk-700/80 rounded-2xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 resize-none max-h-36 overflow-y-auto leading-relaxed"
+            className="flex-1 min-w-0 px-4 py-2.5 bg-silk-800 border border-silk-700/80 rounded-2xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 resize-none max-h-48 overflow-y-auto leading-relaxed break-words whitespace-pre-wrap"
           />
 
           {/* Send or Stop button */}
@@ -1313,7 +1315,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     className="w-full flex items-center gap-2.5 p-2 rounded-xl bg-silk-850 hover:bg-silk-800 border border-silk-800 text-left text-xs text-slate-200"
                   >
                     <div className="w-7 h-7 rounded-lg overflow-hidden bg-silk-800 shrink-0">
-                      <img src={c.avatar} alt={c.name} className="w-full h-full object-cover" />
+                      <AvatarImage src={c.avatar} alt={c.name} className="w-full h-full object-cover" />
                     </div>
                     <span className="font-semibold truncate flex-1">{c.name}</span>
                     <CornerDownRight className="w-3.5 h-3.5 text-slate-500" />

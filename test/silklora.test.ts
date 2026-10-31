@@ -16,6 +16,23 @@ test('cleanArtifacts: strips empty {} brackets and Tavern tokens', () => {
   assert.strictEqual(cleaned.endsWith('}'), false, 'Should strip trailing unmatched brace');
 });
 
+test('cleanArtifacts: strips tokenizer artifacts and role leak tags', () => {
+  const sample1 = '<|begin_of_sentence|>package.json *smiles warmly*';
+  assert.strictEqual(cleanArtifacts(sample1), 'package.json *smiles warmly*');
+
+  const sample2 = '< | begin__of__sentence | >package.json';
+  assert.strictEqual(cleanArtifacts(sample2), 'package.json');
+
+  const sample3 = '<user> привет, как дела?';
+  assert.strictEqual(cleanArtifacts(sample3), 'привет, как дела?');
+
+  const sample4 = '*входит в комнату*\n<user> Что ты здесь делаешь?';
+  assert.strictEqual(cleanArtifacts(sample4), '*входит в комнату*');
+
+  const sample5 = '<bot>: *смотрит в глаза* Привет!';
+  assert.strictEqual(cleanArtifacts(sample5), '*смотрит в глаза* Привет!');
+});
+
 test('buildSystemPrompt: generates complete prompt with group roles and emotions', () => {
   const speaker: Character = {
     id: 'char-1',

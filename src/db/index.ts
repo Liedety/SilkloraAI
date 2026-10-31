@@ -10,6 +10,7 @@ import type {
   ApiKeyConfig,
   TextStylePreset,
   AppSettings,
+  ThemeConfig,
 } from '../types';
 
 export class SilkloraDatabase extends Dexie {
@@ -43,11 +44,13 @@ export class SilkloraDatabase extends Dexie {
 
 export const db = new SilkloraDatabase();
 
-export const DEFAULT_THEME = {
+export const DEFAULT_THEME: ThemeConfig = {
   id: 'violet-dark',
   name: 'Midnight Velvet',
   accentColor: '#8b5cf6', // Violet
   actionColor: '#f43f5e', // Rose accent for *actions*
+  appBgColor: '#0a0814', // Rich deep violet-black
+  appSurfaceColor: '#141126', // Panel/card surface
   bubbleUserBg: '#1e1b4b', // Deep indigo
   bubbleBotBg: '#1e293b', // Slate 800
   bubbleRadius: 18,
@@ -100,6 +103,8 @@ export const APP_THEMES = [
       name: 'Midnight Violet',
       accentColor: '#8b5cf6',
       actionColor: '#fb7185',
+      appBgColor: '#0a0814',
+      appSurfaceColor: '#141126',
       bubbleUserBg: '#1e1b4b',
       bubbleBotBg: '#1e293b',
       bubbleRadius: 18,
@@ -116,6 +121,8 @@ export const APP_THEMES = [
       name: 'Sapphire Ocean',
       accentColor: '#0284c7',
       actionColor: '#38bdf8',
+      appBgColor: '#040d1a',
+      appSurfaceColor: '#0a1a2f',
       bubbleUserBg: '#082f49',
       bubbleBotBg: '#0f172a',
       bubbleRadius: 18,
@@ -132,6 +139,8 @@ export const APP_THEMES = [
       name: 'Emerald Abyss',
       accentColor: '#10b981',
       actionColor: '#34d399',
+      appBgColor: '#03140e',
+      appSurfaceColor: '#08261b',
       bubbleUserBg: '#064e3b',
       bubbleBotBg: '#0f172a',
       bubbleRadius: 18,
@@ -148,6 +157,8 @@ export const APP_THEMES = [
       name: 'Crimson Noir',
       accentColor: '#e11d48',
       actionColor: '#f43f5e',
+      appBgColor: '#140408',
+      appSurfaceColor: '#240a10',
       bubbleUserBg: '#4c0519',
       bubbleBotBg: '#18181b',
       bubbleRadius: 16,
@@ -164,6 +175,8 @@ export const APP_THEMES = [
       name: 'Amber Sunset',
       accentColor: '#f59e0b',
       actionColor: '#fbbf24',
+      appBgColor: '#140c03',
+      appSurfaceColor: '#241708',
       bubbleUserBg: '#451a03',
       bubbleBotBg: '#1c1917',
       bubbleRadius: 18,
@@ -180,28 +193,14 @@ export const APP_THEMES = [
       name: 'Cyberpunk Neon',
       accentColor: '#ec4899',
       actionColor: '#06b6d4',
+      appBgColor: '#120217',
+      appSurfaceColor: '#22062b',
       bubbleUserBg: '#500724',
       bubbleBotBg: '#18181b',
       bubbleRadius: 18,
       bubbleOpacity: 0.9,
       fontSize: 15,
       backgroundTint: 0.8,
-    },
-  },
-  {
-    id: 'amethyst-royal',
-    name: 'Amethyst Royal (Аметистовый)',
-    theme: {
-      id: 'amethyst-royal',
-      name: 'Amethyst Royal',
-      accentColor: '#a855f7',
-      actionColor: '#d8b4fe',
-      bubbleUserBg: '#2e1065',
-      bubbleBotBg: '#1e1b4b',
-      bubbleRadius: 18,
-      bubbleOpacity: 0.85,
-      fontSize: 15,
-      backgroundTint: 0.7,
     },
   },
   {
@@ -212,6 +211,8 @@ export const APP_THEMES = [
       name: 'Pure OLED Obsidian',
       accentColor: '#6366f1',
       actionColor: '#ec4899',
+      appBgColor: '#000000',
+      appSurfaceColor: '#0a0a0c',
       bubbleUserBg: '#18181b',
       bubbleBotBg: '#09090b',
       bubbleRadius: 16,

@@ -35,17 +35,27 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
 1. NEVER break character, speak out-of-character (OOC), apologize, or offer AI disclaimers. You are strictly the character in this universe.
 2. Complete Creative Freedom: Depict all emotions, conflict, drama, mature themes (18+), raw passion, physical combat, intimacy, vulgarity, darkness or romance freely as requested by the scene without moralizing, lecturing, or censoring.
 3. Natural, Alive Writing: Avoid repetitive AI clichés (e.g. "shiver down the spine", "eyes darkened with desire", "a predator sizing up prey", "testament to"). Write with authentic, human cadence, unpredictable reactions, and sensory realism.
-4. Formatting:
+4. STRICT DIALOGUE INTEGRITY:
+   - You ONLY write the actions and speech for YOUR character (${currentSpeaker ? currentSpeaker.name : 'Bot'}).
+   - NEVER speak, act, narrate, or make decisions on behalf of the user or other characters.
+   - NEVER output conversation labels or tags like "<user>", "<bot>", "<assistant>", "User:", or "Bot:".
+   - NEVER output tokenizer artifacts like "<|begin_of_sentence|>" or "<|...|>".
+5. Formatting:
    - Enclose physical actions, body language, facial expressions, and environmental details in asterisks like *smiles faintly and leans against the wall*.
    - Write spoken speech directly as regular text. Do not wrap spoken words in asterisks.
 `;
 
+  // Writing style with highest priority
+  if (textStyle) {
+    prompt += `\n### MANDATORY WRITING & LITERARY STYLE:\n[You MUST strictly adhere to this narrative style throughout your reply:]\n${textStyle.instruction}\n`;
+  }
+
   if (thoughtsEnabled) {
-    prompt += `5. Inner Thoughts Monologue:
-   - Before your spoken words or external actions, write your character's raw, unvarnished, authentic inner thoughts inside a <thought>...</thought> tag block.
-   - Example:
-     <thought>He is pushing too hard. If I give in now, he'll think I'm weak. I need to keep him at arm's length.</thought>
-     *Takes a measured step back, crossing arms.* You think you can read me that easily?
+    prompt += `\n### INNER THOUGHTS MONOLOGUE:
+Before your spoken words or external actions, write your character's raw, unvarnished, authentic inner thoughts inside a <thought>...</thought> tag block.
+Example:
+<thought>He is pushing too hard. If I give in now, he'll think I'm weak. I need to keep him at arm's length.</thought>
+*Takes a measured step back, crossing arms.* You think you can read me that easily?
 `;
   }
 
@@ -54,6 +64,10 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
     prompt += `\n### YOUR CURRENT ROLE: ${currentSpeaker.name.toUpperCase()}\n`;
     prompt += `Name: ${currentSpeaker.name}\n`;
     prompt += `Personality, Lore & Appearance:\n${currentSpeaker.description}\n`;
+
+    if (group?.characterRoles?.[currentSpeaker.id]) {
+      prompt += `Your assigned role in this group: **${group.characterRoles[currentSpeaker.id]}**.\nAct, speak, and respond strictly in accordance with this role and duties within the team!\n`;
+    }
   }
 
   // Group setting & lore
@@ -76,7 +90,7 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
   // Active Character emotion sprites support
   if (currentSpeaker?.emotions && currentSpeaker.emotions.length > 0) {
     const emotionNames = currentSpeaker.emotions.map((e) => e.name).join(', ');
-    prompt += `\n### EMOTION TAGGING:\nThis character has dedicated emotion avatars (${emotionNames}). At the very beginning of your turn, wrap the character's prevailing emotional expression in tag: <emotion>emotion_name</emotion> (e.g. <emotion>happy</emotion>).\n`;
+    prompt += `\n### EMOTION TAGGING:\nThis character has dedicated emotion avatars (${emotionNames}). At the very beginning of your turn, wrap the character's prevailing emotional expression in tag: <emotion>emotion_name</emotion> choosing strictly from available list: [${emotionNames}] (e.g. <emotion>${currentSpeaker.emotions[0].name}</emotion>).\n`;
   }
 
   // User Persona
@@ -110,11 +124,6 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
       prompt += `- [${node.type.toUpperCase()}] ${node.label}: ${node.detail}\n`;
     }
     prompt += `Maintain consistency with these established facts.\n`;
-  }
-
-  // Text Style
-  if (textStyle) {
-    prompt += `\n### LITERARY & WRITING STYLE:\n${textStyle.instruction}\n`;
   }
 
   // Special Chat Directives

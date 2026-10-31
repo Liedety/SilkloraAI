@@ -15,6 +15,7 @@ interface SimNode extends MemoryNode {
   vx: number;
   vy: number;
   radius: number;
+  isPinned?: boolean;
 }
 
 const TYPE_CONFIG: Record<
@@ -75,6 +76,8 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
   const isDraggingRef = useRef(false);
   const dragTargetRef = useRef<SimNode | null>(null);
   const lastMousePosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const pointerDownPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const hasDraggedRef = useRef(false);
 
   // Dynamically update canvas dimensions on resize using ResizeObserver
   useEffect(() => {
@@ -198,14 +201,17 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
 
       // Center gravity & update positions
       for (const node of simNodes) {
-        if (dragTargetRef.current !== node) {
-          node.vx -= node.x * kCenter;
-          node.vy -= node.y * kCenter;
-          node.vx *= damping;
-          node.vy *= damping;
-          node.x += node.vx;
-          node.y += node.vy;
+        if (node.isPinned || dragTargetRef.current === node) {
+          node.vx = 0;
+          node.vy = 0;
+          continue;
         }
+        node.vx -= node.x * kCenter;
+        node.vy -= node.y * kCenter;
+        node.vx *= damping;
+        node.vy *= damping;
+        node.x += node.vx;
+        node.y += node.vy;
       }
 
       // Drawing
@@ -310,6 +316,11 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
     const rect = canvas.getBoundingClientRect();
     const clientX = e.clientX - rect.left;
     const clientY = e.clientY - rect.top;
@@ -321,31 +332,38 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
     const worldX = (clientX - centerX - pan.x) / zoom;
     const worldY = (clientY - centerY - pan.y) / zoom;
 
-    // Hit test on nodes
+    // Hit test on nodes with comfortable touch target radius
     const hit = simNodesRef.current.find((n) => {
       const dx = n.x - worldX;
       const dy = n.y - worldY;
-      return Math.sqrt(dx * dx + dy * dy) <= n.radius + 6;
+      const touchR = Math.max(n.radius + 14, 34);
+      return Math.sqrt(dx * dx + dy * dy) <= touchR;
     });
 
     if (hit) {
       dragTargetRef.current = hit;
       setSelectedNode(hit);
-    } else {
-      setSelectedNode(null);
     }
 
     isDraggingRef.current = true;
+    hasDraggedRef.current = false;
+    pointerDownPosRef.current = { x: e.clientX, y: e.clientY };
     lastMousePosRef.current = { x: e.clientX, y: e.clientY };
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isDraggingRef.current) return;
+    const dist = Math.hypot(e.clientX - pointerDownPosRef.current.x, e.clientY - pointerDownPosRef.current.y);
+    if (dist > 4) {
+      hasDraggedRef.current = true;
+    }
+
     const dx = e.clientX - lastMousePosRef.current.x;
     const dy = e.clientY - lastMousePosRef.current.y;
     lastMousePosRef.current = { x: e.clientX, y: e.clientY };
 
     if (dragTargetRef.current) {
+      dragTargetRef.current.isPinned = true;
       dragTargetRef.current.x += dx / zoom;
       dragTargetRef.current.y += dy / zoom;
       dragTargetRef.current.vx = 0;
@@ -355,7 +373,15 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
     }
   };
 
-  const handlePointerUp = () => {
+  const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+    if (dragTargetRef.current && hasDraggedRef.current) {
+      dragTargetRef.current.isPinned = true;
+    }
     isDraggingRef.current = false;
     dragTargetRef.current = null;
   };
@@ -438,10 +464,13 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
               onClick={() => {
                 setZoom(1);
                 setPan({ x: 0, y: 0 });
+                for (const n of simNodesRef.current) {
+                  n.isPinned = false;
+                }
               }}
               type="button"
               className="p-1.5 text-slate-300 hover:text-white rounded-lg hover:bg-silk-800"
-              title={isRu ? 'Сбросить вид' : 'Reset View'}
+              title={isRu ? 'Сбросить вид и позиции' : 'Reset View & Positions'}
             >
               <RotateCcw className="w-4 h-4" />
             </button>

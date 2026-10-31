@@ -49,9 +49,13 @@ export const App: React.FC = () => {
       const root = document.documentElement;
       const accent = settings.theme.accentColor || '#8b5cf6';
       const action = settings.theme.actionColor || '#fb7185';
+      const bg = settings.theme.appBgColor || '#0a0814';
+      const surface = settings.theme.appSurfaceColor || '#141126';
       root.style.setProperty('--theme-accent', accent);
       root.style.setProperty('--theme-action', action);
       root.style.setProperty('--theme-accent-rgb', hexToRgb(accent));
+      root.style.setProperty('--app-bg', bg);
+      root.style.setProperty('--app-surface', surface);
     }
   }, [settings?.theme]);
 
@@ -96,7 +100,7 @@ export const App: React.FC = () => {
   };
 
   return (
-    <div className="relative w-full h-full flex flex-col overflow-hidden bg-silk-950 text-slate-100 font-sans select-none">
+    <div className="relative w-full h-full flex flex-col overflow-hidden app-bg text-slate-100 font-sans select-none">
       {/* Active Screen */}
       <main className="flex-1 w-full h-full overflow-hidden">
         {activeChat ? (

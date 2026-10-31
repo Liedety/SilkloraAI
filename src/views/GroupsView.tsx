@@ -19,6 +19,7 @@ import { db } from '../db';
 import type { Group, ImageCropOffset, Language } from '../types';
 import { translations } from '../i18n';
 import { ImageCropperModal } from '../components/ImageCropperModal';
+import { AvatarImage } from '../components/AvatarImage';
 import { generateGroupWithAI, generateGroupRolesWithAI } from '../services/ai';
 
 interface GroupsViewProps {
@@ -91,6 +92,8 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
   const [genConcept, setGenConcept] = useState('');
   const [isGeneratingGroup, setIsGeneratingGroup] = useState(false);
   const [isGeneratingRoles, setIsGeneratingRoles] = useState(false);
+  const [showRolesModal, setShowRolesModal] = useState(false);
+  const [rolesConcept, setRolesConcept] = useState('');
 
   const handleOpenCreate = () => {
     setEditingGroupId(null);
@@ -161,7 +164,6 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
       syncFormRef({ characterIds: next });
       return next;
     });
-    onDirtyChange(true, handleSaveGroup);
   };
 
   const handleToggleFolder = (fldId: string) => {
@@ -180,7 +182,6 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
 
       return nextFolders;
     });
-    onDirtyChange(true, handleSaveGroup);
   };
 
   const handleRoleChange = (charId: string, role: string) => {
@@ -189,10 +190,9 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
       syncFormRef({ characterRoles: next });
       return next;
     });
-    onDirtyChange(true, handleSaveGroup);
   };
 
-  const handleGenerateRolesWithAI = async () => {
+  const handleOpenRolesModal = () => {
     if (!activeApiKey || !activeApiKey.key.trim()) {
       alert(language === 'ru' ? 'Настройте API ключ в Настройках.' : 'Configure API key in Settings.');
       return;
@@ -202,19 +202,26 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
       alert(language === 'ru' ? 'Сначала выберите участников группы.' : 'Select group members first.');
       return;
     }
+    setRolesConcept('');
+    setShowRolesModal(true);
+  };
+
+  const handleRunRolesGen = async () => {
+    const selectedChars = characters.filter((c) => currentFormRef.current.characterIds.includes(c.id));
     setIsGeneratingRoles(true);
     try {
       const generated = await generateGroupRolesWithAI(
-        activeApiKey,
+        activeApiKey!,
         settings?.textModel || 'deepseek/deepseek-chat',
         currentFormRef.current.name || 'Group',
         currentFormRef.current.description || '',
         selectedChars,
+        rolesConcept,
         language
       );
       setCharacterRoles(generated);
       syncFormRef({ characterRoles: generated });
-      onDirtyChange(true, handleSaveGroup);
+      setShowRolesModal(false);
     } catch (err: any) {
       alert(language === 'ru' ? `Ошибка генерации ролей: ${err.message}` : `AI Roles error: ${err.message}`);
     } finally {
@@ -247,7 +254,6 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
         backstoryEnabled: true,
       });
       setShowGenModal(false);
-      onDirtyChange(true, handleSaveGroup);
     } catch (err: any) {
       alert(language === 'ru' ? `Ошибка генерации группы: ${err.message}` : `Group generation error: ${err.message}`);
     } finally {
@@ -358,17 +364,12 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                 <div className="flex items-start gap-3">
                   {/* Group Avatar */}
                   <div className="relative w-12 h-12 rounded-xl overflow-hidden bg-silk-800 border border-silk-700 shrink-0">
-                    {grp.avatar ? (
-                      <img
-                        src={grp.avatar}
-                        alt={grp.name}
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center bg-violet-600/20 text-violet-400">
-                        <Users className="w-6 h-6" />
-                      </div>
-                    )}
+                    <AvatarImage
+                      src={grp.avatar}
+                      alt={grp.name}
+                      isGroup
+                      className="w-full h-full object-cover"
+                    />
                   </div>
 
                   <div className="flex-1 min-w-0">
@@ -407,7 +408,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                         key={m.id}
                         className="w-7 h-7 rounded-full overflow-hidden border-2 border-silk-900 bg-silk-800 shrink-0"
                       >
-                        <img src={m.avatar} alt={m.name} className="w-full h-full object-cover" />
+                        <AvatarImage src={m.avatar} alt={m.name} className="w-full h-full object-cover" />
                       </div>
                     ))}
                     {memberChars.length > 5 && (
@@ -671,7 +672,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                       }`}
                     >
                       <div className="w-8 h-8 rounded-lg overflow-hidden bg-silk-800 shrink-0">
-                        <img src={c.avatar} alt={c.name} className="w-full h-full object-cover" />
+                        <AvatarImage src={c.avatar} alt={c.name} className="w-full h-full object-cover" />
                       </div>
                       <span className="text-xs font-medium truncate flex-1">{c.name}</span>
                       {isSelected && <Check className="w-3.5 h-3.5 text-violet-400 shrink-0" />}
@@ -684,7 +685,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
             {/* Character Roles in Group */}
             {selectedCharIds.length > 0 && (
               <div className="p-4 rounded-2xl bg-silk-900/90 border border-silk-800 space-y-3 mt-4">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div>
                     <h3 className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
                       <Shield className="w-4 h-4 text-violet-400" />
@@ -694,10 +695,10 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                   </div>
 
                   <button
-                    onClick={handleGenerateRolesWithAI}
+                    onClick={handleOpenRolesModal}
                     disabled={isGeneratingRoles}
                     type="button"
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600/30 hover:bg-violet-600 border border-violet-500/50 text-violet-200 hover:text-white rounded-xl text-xs font-semibold shadow-sm active:scale-95 transition-all"
+                    className="self-start sm:self-auto flex items-center gap-1.5 px-3 py-1.5 bg-violet-600/30 hover:bg-violet-600 border border-violet-500/50 text-violet-200 hover:text-white rounded-xl text-xs font-semibold shadow-sm active:scale-95 transition-all"
                   >
                     <Sparkles className="w-3.5 h-3.5 text-violet-400" />
                     <span>{isGeneratingRoles ? t.generatingRoles : t.generateRolesAI}</span>
@@ -711,20 +712,22 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                     return (
                       <div
                         key={charId}
-                        className="flex items-center gap-3 p-2 rounded-xl bg-silk-850 border border-silk-800"
+                        className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 p-2.5 rounded-xl bg-silk-850 border border-silk-800 w-full min-w-0"
                       >
-                        <div className="w-8 h-8 rounded-lg overflow-hidden bg-silk-800 shrink-0 border border-silk-700">
-                          <img src={char.avatar} alt={char.name} className="w-full h-full object-cover" />
+                        <div className="flex items-center gap-2 min-w-0 shrink-0">
+                          <div className="w-8 h-8 rounded-lg overflow-hidden bg-silk-800 shrink-0 border border-silk-700">
+                            <AvatarImage src={char.avatar} alt={char.name} className="w-full h-full object-cover" />
+                          </div>
+                          <span className="text-xs font-semibold text-white truncate max-w-[140px]">
+                            {char.name}
+                          </span>
                         </div>
-                        <span className="text-xs font-semibold text-white w-24 truncate shrink-0">
-                          {char.name}
-                        </span>
                         <input
                           type="text"
                           value={characterRoles[charId] || ''}
                           onChange={(e) => handleRoleChange(charId, e.target.value)}
                           placeholder={t.charRolePlaceholder}
-                          className="flex-1 px-3 py-1.5 bg-silk-900 border border-silk-700 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
+                          className="w-full min-w-0 flex-1 px-3 py-1.5 bg-silk-900 border border-silk-700 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
                         />
                       </div>
                     );
@@ -733,24 +736,69 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
               </div>
             )}
           </div>
+        </div>
+      )}
 
-          {/* Sticky Modal Footer */}
-          <div className="p-3 border-t border-silk-800 bg-silk-900/95 backdrop-blur-md flex items-center justify-end gap-3 shrink-0">
-            <button
-              onClick={handleCloseModal}
-              type="button"
-              className="px-4 py-2 text-xs font-medium text-slate-300 hover:text-white rounded-xl hover:bg-silk-800"
-            >
-              {t.cancel}
-            </button>
-            <button
-              onClick={handleSaveGroup}
-              type="button"
-              className="flex items-center gap-1.5 px-5 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white text-xs font-semibold rounded-xl shadow-lg active:scale-95"
-            >
-              <Check className="w-4 h-4" />
-              <span>{t.saveGroup}</span>
-            </button>
+      {/* AI Roles Generator Modal */}
+      {showRolesModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in">
+          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl flex flex-col overflow-hidden shadow-2xl">
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-silk-800">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-violet-400" />
+                <h3 className="font-semibold text-sm text-white">
+                  {language === 'ru' ? 'Назначение ролей с ИИ' : 'AI Role Assignment'}
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowRolesModal(false)}
+                className="p-1 text-slate-400 hover:text-white rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-4 space-y-3">
+              <label className="block text-xs font-semibold text-slate-300">
+                {language === 'ru'
+                  ? 'Опишите сюжет и кто кем должен быть:'
+                  : 'Describe the scenario and who should be what:'}
+              </label>
+              <textarea
+                rows={4}
+                value={rolesConcept}
+                onChange={(e) => setRolesConcept(e.target.value)}
+                placeholder={
+                  language === 'ru'
+                    ? 'например: Капитан звездолета, мятежный пилот, хакер и андроид-медик...'
+                    : 'e.g. Starship captain, rebellious pilot, rogue hacker and android medic...'
+                }
+                className="w-full px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 resize-none"
+                autoFocus
+              />
+            </div>
+
+            {/* Footer */}
+            <div className="p-3 border-t border-silk-800 flex justify-end gap-2 bg-silk-900">
+              <button
+                onClick={() => setShowRolesModal(false)}
+                type="button"
+                className="px-3 py-1.5 text-xs text-slate-400 hover:text-white rounded-lg"
+              >
+                {t.cancel}
+              </button>
+              <button
+                onClick={handleRunRolesGen}
+                disabled={isGeneratingRoles}
+                type="button"
+                className="flex items-center gap-1.5 px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold shadow-md active:scale-95"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>{isGeneratingRoles ? t.generatingRoles : t.generateRolesAI}</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

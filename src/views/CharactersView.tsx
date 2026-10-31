@@ -20,6 +20,7 @@ import { db } from '../db';
 import type { Character, CharacterEmotion, Folder, Group, ImageCropOffset, Language } from '../types';
 import { translations } from '../i18n';
 import { ImageCropperModal } from '../components/ImageCropperModal';
+import { AvatarImage } from '../components/AvatarImage';
 import { generatePersonaWithAI } from '../services/ai';
 
 interface CharactersViewProps {
@@ -253,14 +254,12 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
     const next = [...emotions, newEm];
     setEmotions(next);
     syncFormRef({ emotions: next });
-    onDirtyChange(true, handleSaveCharacter);
   };
 
   const handleRemoveEmotion = (id: string) => {
     const next = emotions.filter((e) => e.id !== id);
     setEmotions(next);
     syncFormRef({ emotions: next });
-    onDirtyChange(true, handleSaveCharacter);
   };
 
   const handleEmotionFileSelect = (e: React.ChangeEvent<HTMLInputElement>, emotionId: string) => {
@@ -387,7 +386,6 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
         syncFormRef({ avatar: genPhotoRef });
       }
       setShowGeneratorModal(false);
-      onDirtyChange(true, handleSaveCharacter);
     } catch (err: any) {
       alert(language === 'ru' ? `Ошибка генерации: ${err.message}` : `Generation failed: ${err.message}`);
     } finally {
@@ -510,7 +508,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
               >
                 {/* Avatar with offset */}
                 <div className="relative w-14 h-14 rounded-2xl overflow-hidden shrink-0 border border-silk-700/60 bg-silk-800">
-                  <img
+                  <AvatarImage
                     src={char.avatar}
                     alt={char.name}
                     className="w-full h-full object-cover"
@@ -716,7 +714,9 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                 <div>
                   <h4 className="text-xs font-semibold text-violet-200">{t.generateWithAI}</h4>
                   <p className="text-[11px] text-slate-400">
-                    Auto-create detailed personality, lore, and greeting with @ mentions
+                    {language === 'ru'
+                      ? 'Автоматическое создание характера, лора и первой реплики с поддержкой @ упоминаний'
+                      : 'Auto-create detailed personality, lore, and greeting with @ mentions'}
                   </p>
                 </div>
               </div>
@@ -733,7 +733,6 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                   onChange={(e) => {
                     setName(e.target.value);
                     syncFormRef({ name: e.target.value });
-                    onDirtyChange(true, handleSaveCharacter);
                   }}
                   placeholder={t.charNamePlaceholder}
                   className="w-full px-3.5 py-2.5 bg-silk-900 border border-silk-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
@@ -748,7 +747,6 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                   onChange={(e) => {
                     setDescription(e.target.value);
                     syncFormRef({ description: e.target.value });
-                    onDirtyChange(true, handleSaveCharacter);
                   }}
                   placeholder={t.charDescriptionPlaceholder}
                   className="w-full px-3.5 py-2.5 bg-silk-900 border border-silk-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 leading-relaxed resize-none"
@@ -766,7 +764,6 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                       onChange={(e) => {
                         setGreetingEnabled(e.target.checked);
                         syncFormRef({ greetingEnabled: e.target.checked });
-                        onDirtyChange(true, handleSaveCharacter);
                       }}
                       className="accent-violet-600 rounded"
                     />
@@ -780,7 +777,6 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                   onChange={(e) => {
                     setGreeting(e.target.value);
                     syncFormRef({ greeting: e.target.value });
-                    onDirtyChange(true, handleSaveCharacter);
                   }}
                   placeholder={t.charGreetingPlaceholder}
                   className={`w-full px-3.5 py-2.5 bg-silk-900 border border-silk-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 leading-relaxed resize-none ${
@@ -798,7 +794,6 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                     const fVal = e.target.value || null;
                     setFolderId(fVal);
                     syncFormRef({ folderId: fVal });
-                    onDirtyChange(true, handleSaveCharacter);
                   }}
                   className="w-full px-3.5 py-2.5 bg-silk-900 border border-silk-800 rounded-xl text-xs text-white focus:outline-none focus:border-violet-500"
                 >
@@ -921,25 +916,6 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                 )}
               </div>
             </div>
-          </div>
-
-          {/* Modal Sticky Footer */}
-          <div className="p-3 border-t border-silk-800 bg-silk-900/95 backdrop-blur-md flex items-center justify-end gap-3 shrink-0">
-            <button
-              onClick={handleCloseModal}
-              type="button"
-              className="px-4 py-2 text-xs font-medium text-slate-300 hover:text-white rounded-xl hover:bg-silk-800"
-            >
-              {t.cancel}
-            </button>
-            <button
-              onClick={handleSaveCharacter}
-              type="button"
-              className="flex items-center gap-1.5 px-5 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white text-xs font-semibold rounded-xl shadow-lg active:scale-95"
-            >
-              <Check className="w-4 h-4" />
-              <span>{t.saveCharacter}</span>
-            </button>
           </div>
         </div>
       )}
@@ -1116,7 +1092,6 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
             setChatBackgroundOffset(offset);
             syncFormRef({ chatBackground: croppedUrl, chatBackgroundOffset: offset });
           }
-          onDirtyChange(true, handleSaveCharacter);
         }}
         onClose={() => setCropperOpen(false)}
       />

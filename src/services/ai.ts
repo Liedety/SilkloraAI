@@ -72,6 +72,19 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
         temperature,
         max_tokens: maxTokens,
         stream: true,
+        stop: [
+          '<user>',
+          '<bot>',
+          '<assistant>',
+          '<|begin_of_sentence|>',
+          '<|end_of_sentence|>',
+          '<|im_end|>',
+          '<|im_start|>',
+          '<|endoftext|>',
+          '\n<user>',
+          '\nUser:',
+          '\n\nUser:',
+        ],
       }),
     });
 
@@ -377,6 +390,18 @@ export async function fetchVisionModels(
 export function cleanArtifacts(str: string): string {
   if (!str) return '';
   return str
+    // Strip tokenizer tokens like <|begin_of_sentence|>, < | begin__of__sentence | >, <|im_end|>, etc.
+    .replace(/<\s*\|\s*[^>]+\s*\|\s*>/gi, '')
+    // Strip simulated turns starting with <user> or User:
+    .replace(/\n\s*<user>[\s\S]*$/gi, '')
+    .replace(/\n\s*User:[\s\S]*$/gi, '')
+    // Strip leading turn prefixes like <user>, <bot>, <assistant>, User:, Bot:, Assistant:
+    .replace(/^\s*<user>[:\s]*/i, '')
+    .replace(/^\s*<bot>[:\s]*/i, '')
+    .replace(/^\s*<assistant>[:\s]*/i, '')
+    .replace(/^\s*User:[:\s]*/i, '')
+    .replace(/^\s*Bot:[:\s]*/i, '')
+    .replace(/^\s*Assistant:[:\s]*/i, '')
     .replace(/\\"/g, '"')
     .replace(/\\n/g, '\n')
     .replace(/\\r/g, '')
@@ -560,6 +585,7 @@ export async function generateGroupRolesWithAI(
   groupName: string,
   groupDescription: string,
   characters: Character[],
+  userConcept?: string,
   language: Language = 'en'
 ): Promise<Record<string, string>> {
   if (characters.length === 0) return {};
@@ -578,7 +604,10 @@ Respond STRICT JSON mapping character names to concise role titles with brief du
 }
 Raw JSON only.`;
 
-  const user = `Group: ${groupName}\nLore: ${groupDescription}\n\nMembers:\n${charProfiles}`;
+  let user = `Group: ${groupName}\nLore: ${groupDescription}\n\nMembers:\n${charProfiles}`;
+  if (userConcept && userConcept.trim()) {
+    user += `\n\nUser instructions and desired assignments:\n${userConcept.trim()}`;
+  }
 
   let result = '';
   await streamChatCompletion({
