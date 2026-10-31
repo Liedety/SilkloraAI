@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">SilkloraAI</string>
+    <string name="title_activity_main">SilkloraAI</string>
+    <string name="package_name">com.silklora.ai</string>
+    <string name="custom_url_scheme">com.silklora.ai</string>
+</resources>
