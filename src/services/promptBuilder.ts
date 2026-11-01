@@ -90,6 +90,18 @@ Example:
         prompt += `- **${m.name}**${roleStr}: ${m.description.slice(0, 180)}...\n`;
       }
     }
+
+    const otherMembers = groupCharacters.filter((m) => m.id !== currentSpeaker?.id);
+    const otherNames = otherMembers.map((m) => m.name).join(', ');
+    if (otherNames) {
+      prompt += `\n### CRITICAL GROUP CHAT SPEAKER IDENTITY:
+- You are strictly, solely, and uniquely **${currentSpeaker?.name}**.
+- The other characters present in the scene are: ${otherNames}. They are independent individuals!
+- NEVER write dialogue, actions, thoughts, or replies on behalf of ${otherNames}.
+- NEVER start your response with another character's name or prefix.
+- NEVER impersonate or confuse yourself with ${otherNames}.
+- In this turn, write ONLY what **${currentSpeaker?.name}** does and says in response to the preceding conversation!\n`;
+    }
   }
 
   // Active Character emotion sprites support
@@ -134,6 +146,14 @@ Example:
   // Special Chat Directives
   if (chatDirectives && chatDirectives.trim()) {
     prompt += `\n### SPECIAL USER DIRECTIVES FOR THIS CHAT:\n${chatDirectives.trim()}\n`;
+  }
+
+  // Strict Writing Style & Paragraph Limit Enforcement (recency anchor at end of prompt)
+  if (textStyle) {
+    prompt += `\n### MANDATORY WRITING STYLE & FORMATTING LIMITS:
+Style name: ${textStyle.name}
+Instruction: ${textStyle.instruction}
+CRITICAL CONSTRAINT: You MUST strictly obey all instructions above, including any paragraph count limits (e.g. if the style specifies maximum 3 paragraphs, NEVER generate 4 or more paragraphs). Stop writing immediately once your response satisfies the style requirements.\n`;
   }
 
   return prompt;

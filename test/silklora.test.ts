@@ -187,3 +187,48 @@ test('Group chat persona filtering: user persona is excluded from available bot 
   assert.strictEqual(availableBotSpeakers.some((c) => c.id === 'char-2'), false, 'Persona must not be among bot speakers');
   assert.deepStrictEqual(availableBotSpeakers.map((c) => c.id), ['char-1', 'char-3']);
 });
+
+test('buildSystemPrompt: enforces group speaker identity and style paragraph limits', () => {
+  const alice: Character = {
+    id: 'char-alice',
+    name: 'Алиса',
+    description: 'Снайпер',
+    createdAt: 0,
+    updatedAt: 0,
+  };
+  const bob: Character = {
+    id: 'char-bob',
+    name: 'Боб',
+    description: 'Инженер',
+    createdAt: 0,
+    updatedAt: 0,
+  };
+  const group: Group = {
+    id: 'grp-1',
+    name: 'Отряд Омега',
+    description: 'Специальный отряд',
+    characterIds: ['char-alice', 'char-bob'],
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  const prompt = buildSystemPrompt({
+    character: bob,
+    group,
+    groupCharacters: [alice, bob],
+    speakerCharacter: bob,
+    textStyle: {
+      id: 'custom-short',
+      name: 'Короткий стиль',
+      description: 'Максимум 3 абзаца',
+      instruction: 'Пиши кратко. Максимум 3 абзаца.',
+      isCustom: true,
+    },
+  });
+
+  assert.match(prompt, /CRITICAL GROUP CHAT SPEAKER IDENTITY/, 'Should include group chat identity rule');
+  assert.match(prompt, /solely, and uniquely \*\*Боб\*\*/, 'Should isolate current speaker identity');
+  assert.match(prompt, /NEVER write dialogue, actions, thoughts, or replies on behalf of Алиса/, 'Should prevent speaking as other characters');
+  assert.match(prompt, /MANDATORY WRITING STYLE & FORMATTING LIMITS/, 'Should enforce style limits at end of prompt');
+  assert.match(prompt, /Максимум 3 абзаца/, 'Should include paragraph limit instruction');
+});

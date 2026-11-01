@@ -73,17 +73,14 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
         max_tokens: maxTokens,
         stream: true,
         stop: [
-          '<user>',
-          '<bot>',
-          '<assistant>',
-          '<|begin_of_sentence|>',
           '<|end_of_sentence|>',
           '<|im_end|>',
-          '<|im_start|>',
           '<|endoftext|>',
           '\n<user>',
+          '\n<human>',
           '\nUser:',
           '\n\nUser:',
+          '\nПользователь:',
         ],
       }),
     });
@@ -664,12 +661,19 @@ export async function suggestUserReply(
   prompt: string,
   recentHistory: string
 ): Promise<string> {
-  const system = `You are a roleplay ghostwriter.
-Based on the current scene and the user's intent, formulate what the user's persona should say and do.
-Write actions in *asterisks* and spoken dialogue in plain text.
-Keep it natural, in-character, and direct. Output ONLY the resulting action/speech with no meta explanation.`;
+  const isRu = /[а-яА-ЯёЁ]/.test(recentHistory + (userPersona?.description || ''));
+  const effectivePrompt = prompt && prompt.trim()
+    ? prompt.trim()
+    : (isRu
+        ? 'Придумай наиболее логичное, интересное и живое продолжение реплики от лица игрока / персоны в текущей ситуации.'
+        : 'Invent the most natural, clever, and compelling continuation of the dialogue on behalf of the player / persona in this scene.');
 
-  const userMsg = `Scene History:\n${recentHistory}\n\nUser Persona: ${userPersona ? userPersona.name + ' (' + userPersona.description.slice(0, 200) + ')' : 'Player'}\n\nUser's Intent/Guidance: ${prompt}`;
+  const system = `You are a creative roleplay ghostwriter.
+Based on the current ongoing scene and dialogue context, formulate what the user's persona should say and do next.
+Write actions and body language in *asterisks* and spoken dialogue in plain text.
+Keep it natural, evocative, and strictly in character. Output ONLY the resulting action/speech with no meta explanation or quotation marks.`;
+
+  const userMsg = `Scene History:\n${recentHistory}\n\nUser Persona: ${userPersona ? userPersona.name + ' (' + userPersona.description.slice(0, 200) + ')' : 'Player'}\n\nUser's Intent/Guidance: ${effectivePrompt}`;
 
   let out = '';
   await streamChatCompletion({

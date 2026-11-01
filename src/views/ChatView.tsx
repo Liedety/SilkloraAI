@@ -374,6 +374,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
     // Retrieve affinity score
     const affinity = session.relationships?.[speaker.id] || 0;
 
+    // Query fresh settings & text style from database
+    const freshSettings = await db.settings.get('app_settings');
+    const styleId = session.textStyleId || freshSettings?.textStyleId || 'literary';
+    const textStyleToUse = (await db.textStyles.get(styleId)) || activeStyle;
+
     // Build system prompt
     const groupMembers = type === 'group' ? allCharacters.filter((c) => group?.characterIds.includes(c.id)) : [];
     let systemPrompt = buildSystemPrompt({
@@ -381,7 +386,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       group: group || undefined,
       groupCharacters: groupMembers,
       userPersona,
-      textStyle: activeStyle,
+      textStyle: textStyleToUse,
       chatDirectives: session.chatDirectives,
       thoughtsEnabled: session.thoughtsEnabled === true,
       memoryNodes,
@@ -399,28 +404,92 @@ export const ChatView: React.FC<ChatViewProps> = ({
     // Context sliding window (query fresh messages directly from DB)
     const freshDbMsgs = await db.messages.where('chatId').equals(session.id).sortBy('createdAt');
     const contextMsgs = freshDbMsgs.slice(-16);
+
+    // Process raw dialogue turns with clear speaker attribution
+    const rawTurns: Array<{ role: 'user' | 'assistant'; text: string; image?: string }> = [];
     for (const msg of contextMsgs) {
       const activeVariant = msg.variants[msg.activeVariantIndex];
-      if (!activeVariant) continue;
+      if (!activeVariant || !activeVariant.text?.trim()) continue;
 
-      const role = msg.senderId === 'user' ? 'user' : 'assistant';
-      let content = activeVariant.text;
-      if (msg.senderId !== 'user' && activeVariant.thought) {
-        content = `<thought>${activeVariant.thought}</thought>\n${content}`;
+      // In 1-on-1: speaker is assistant, user is user.
+      // In group: ONLY this specific speaker's past messages are assistant! All other bots & user are user inputs!
+      const isMe = type === 'group' ? msg.senderId === speaker.id : msg.senderId !== 'user';
+      const role: 'user' | 'assistant' = isMe ? 'assistant' : 'user';
+
+      let textContent = activeVariant.text.trim();
+      if (type === 'group' && !isMe) {
+        // Tag speaker name so the LLM knows with 100% certainty who spoke!
+        textContent = `[${msg.senderName}]: ${textContent}`;
+      }
+      if (isMe && activeVariant.thought && session.thoughtsEnabled) {
+        textContent = `<thought>${activeVariant.thought}</thought>\n${textContent}`;
       }
 
-      if (msg.image && msg.senderId === 'user') {
-        apiMessages.push({
-          role: 'user',
-          content: [
-            { type: 'text', text: content },
-            { type: 'image_url', image_url: { url: msg.image } },
-          ],
-        });
+      rawTurns.push({
+        role,
+        text: textContent,
+        image: msg.image && msg.senderId === 'user' ? msg.image : undefined,
+      });
+    }
+
+    // Merge adjacent turns of the same role so LLM API receives perfectly alternating turns!
+    // This prevents Anthropic/Gemini/OpenRouter 400 errors, timeouts, and empty message bugs.
+    const alternatingTurns: any[] = [];
+    for (const turn of rawTurns) {
+      const last = alternatingTurns[alternatingTurns.length - 1];
+      if (last && last.role === turn.role) {
+        if (typeof last.content === 'string') {
+          last.content += `\n\n${turn.text}`;
+        } else if (Array.isArray(last.content)) {
+          last.content[0].text += `\n\n${turn.text}`;
+        }
+        if (turn.image) {
+          if (typeof last.content === 'string') {
+            last.content = [
+              { type: 'text', text: last.content },
+              { type: 'image_url', image_url: { url: turn.image } },
+            ];
+          } else if (Array.isArray(last.content)) {
+            last.content.push({ type: 'image_url', image_url: { url: turn.image } });
+          }
+        }
       } else {
-        apiMessages.push({ role, content });
+        if (turn.image && turn.role === 'user') {
+          alternatingTurns.push({
+            role: 'user',
+            content: [
+              { type: 'text', text: turn.text },
+              { type: 'image_url', image_url: { url: turn.image } },
+            ],
+          });
+        } else {
+          alternatingTurns.push({
+            role: turn.role,
+            content: turn.text,
+          });
+        }
       }
     }
+
+    // Ensure the conversation starts with a user turn (API requirement for Gemini / Claude / OpenRouter)
+    if (alternatingTurns.length > 0 && alternatingTurns[0].role === 'assistant') {
+      alternatingTurns.unshift({
+        role: 'user',
+        content: type === 'group'
+          ? (language === 'ru' ? '[Сцена начинается]' : '[Scene begins]')
+          : (language === 'ru' ? 'Привет.' : 'Hello.'),
+      });
+    }
+
+    // If there are no turns yet, seed a start prompt
+    if (alternatingTurns.length === 0) {
+      alternatingTurns.push({
+        role: 'user',
+        content: language === 'ru' ? '[Сцена начинается. Начни разговор.]' : '[Scene begins. Start conversation.]',
+      });
+    }
+
+    apiMessages.push(...alternatingTurns);
 
     let fullGenerated = '';
 
@@ -707,7 +776,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   // User Magic Wand Ghostwriter
   const handleExecuteUserWand = async () => {
-    if (!activeApiKey || !userWandPrompt.trim()) return;
+    if (!activeApiKey) return;
     setIsWandGenerating(true);
     try {
       const history = buildContextHistory(messages);
@@ -866,8 +935,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
           const hasVariants = msg.variants.length > 1;
           const isThoughtExpanded = !!expandedThoughts[msg.id];
 
+          const botChar = !isUser ? allCharacters.find((c) => c.id === msg.senderId) || (type === 'character' ? character : undefined) : undefined;
           const botAvatar = !isUser
-            ? getSpeakerAvatar(msg.senderId, activeVariant.emotion || msg.emotion, msg.senderAvatar)
+            ? (botChar?.avatar || msg.senderAvatar || '')
             : undefined;
 
           return (
@@ -1168,7 +1238,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <div className="flex justify-start items-end gap-2.5 animate-fade-in">
             <div className="relative w-8 h-8 rounded-xl overflow-hidden shrink-0 border border-silk-700 bg-silk-800 mb-1">
               <AvatarImage
-                src={getSpeakerAvatar(streamingSender.id, streamingEmotion || undefined, streamingSender.avatar)}
+                src={streamingSender.avatar}
                 alt={streamingSender.name}
                 className="w-full h-full object-cover"
               />
@@ -1295,35 +1365,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* 3. Bottom Chat Input Bar */}
       <div className="relative z-20 p-3 bg-silk-900/90 backdrop-blur-xl border-t border-silk-800/80">
-        {/* Group Chat: Quick Bot Invocation Row */}
-        {type === 'group' && (() => {
-          const availableBots = allCharacters.filter(
-            (c) => group?.characterIds.includes(c.id) && c.id !== session?.personaId
-          );
-          if (availableBots.length === 0) return null;
-          return (
-            <div className="flex items-center gap-2 pb-2.5 overflow-x-auto no-scrollbar max-w-xl mx-auto">
-              <span className="text-[11px] font-semibold text-violet-300 shrink-0">
-                {language === 'ru' ? 'Вызвать бота:' : 'Call bot:'}
-              </span>
-              {availableBots.map((botChar) => (
-                <button
-                  key={botChar.id}
-                  onClick={() => runBotGeneration(botChar)}
-                  disabled={isGenerating}
-                  type="button"
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-silk-800 hover:bg-violet-600/30 border border-silk-700 hover:border-violet-500/60 text-xs text-slate-200 shrink-0 transition-all active:scale-95 disabled:opacity-50 shadow-sm"
-                >
-                  <div className="w-4 h-4 rounded-full overflow-hidden shrink-0">
-                    <AvatarImage src={botChar.avatar} alt={botChar.name} className="w-full h-full object-cover" />
-                  </div>
-                  <span className="font-medium text-[11px] truncate max-w-[90px]">{botChar.name}</span>
-                </button>
-              ))}
-            </div>
-          );
-        })()}
-
         <div className="flex items-center gap-2 max-w-xl mx-auto">
           {/* Photo attach button */}
           <label className="p-2.5 text-slate-400 hover:text-white rounded-xl hover:bg-silk-800 cursor-pointer shrink-0">
@@ -1439,7 +1480,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </button>
               <button
                 onClick={handleExecuteUserWand}
-                disabled={isWandGenerating || !userWandPrompt.trim()}
+                disabled={isWandGenerating}
                 type="button"
                 className="flex items-center gap-1.5 px-4 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-md"
               >
@@ -1493,7 +1534,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   }
                   setGuidedRegenTargetMsgId(null);
                 }}
-                disabled={!guidedRegenPrompt.trim()}
                 type="button"
                 className="px-4 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-md"
               >
