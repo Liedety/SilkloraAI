@@ -51,6 +51,13 @@ npm run dev
 
 ---
 
+## Авторы
+
+- **[Liedety](https://github.com/Liedety)** — автор проекта, концепт, дизайн и тестирование
+- **Gemini** (Google DeepMind / Antigravity) — разработка кода и архитектуры
+
+---
+
 ## Лицензия
 
 [MIT](LICENSE) © 2026 Liedety
