@@ -134,3 +134,56 @@ test('i18n: full parity between Russian and English translation dictionaries', (
   assert.deepStrictEqual(missingInEn, [], `Missing keys in English translations: ${missingInEn.join(', ')}`);
   assert.strictEqual(enKeys.length, ruKeys.length, 'English and Russian key counts must match exactly');
 });
+
+test('cleanArtifacts: strips leaked emotion tags and bilingual translation parentheticals', () => {
+  const sample1 = '<emotion>happy</emotion> *смеется* Привет!';
+  assert.strictEqual(cleanArtifacts(sample1), '*смеется* Привет!');
+
+  const sample2 = '[эмоция: радость] *улыбнулась* Рада встрече!';
+  assert.strictEqual(cleanArtifacts(sample2), '*улыбнулась* Рада встрече!');
+
+  const sample3 = 'Она почувствовала облегчение (relief) и вздохнула.';
+  assert.strictEqual(cleanArtifacts(sample3), 'Она почувствовала облегчение и вздохнула.');
+});
+
+test('buildSystemPrompt: enforces language purity & defaults thoughtsEnabled to false', () => {
+  const speaker: Character = {
+    id: 'char-1',
+    name: 'Эльвира',
+    description: 'Маг огня.',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+
+  const defaultPrompt = buildSystemPrompt({
+    character: speaker,
+  });
+
+  assert.match(defaultPrompt, /STRICT LANGUAGE PURITY/, 'Should instruct on language consistency');
+  assert.strictEqual(defaultPrompt.includes('### INNER THOUGHTS MONOLOGUE'), false, 'Thoughts must be disabled by default');
+});
+
+test('Group chat persona filtering: user persona is excluded from available bot speakers', () => {
+  const allChars: Character[] = [
+    { id: 'char-1', name: 'Персонаж 1', description: 'Бот 1', createdAt: 0, updatedAt: 0 },
+    { id: 'char-2', name: 'Персона Пользователя', description: 'Игрок', createdAt: 0, updatedAt: 0 },
+    { id: 'char-3', name: 'Персонаж 3', description: 'Бот 3', createdAt: 0, updatedAt: 0 },
+  ];
+  const group: Group = {
+    id: 'grp-1',
+    name: 'Группа',
+    description: 'Тестовая группа',
+    characterIds: ['char-1', 'char-2', 'char-3'],
+    createdAt: 0,
+    updatedAt: 0,
+  };
+  const sessionPersonaId = 'char-2'; // User chosen persona
+
+  const availableBotSpeakers = allChars.filter(
+    (c) => group.characterIds.includes(c.id) && c.id !== sessionPersonaId
+  );
+
+  assert.strictEqual(availableBotSpeakers.length, 2, 'Should only have 2 bot speakers');
+  assert.strictEqual(availableBotSpeakers.some((c) => c.id === 'char-2'), false, 'Persona must not be among bot speakers');
+  assert.deepStrictEqual(availableBotSpeakers.map((c) => c.id), ['char-1', 'char-3']);
+});

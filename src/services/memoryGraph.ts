@@ -20,12 +20,34 @@ export async function extractMemoryAndAffinity(
 
   const userText = lastUserMsg.variants[lastUserMsg.activeVariantIndex]?.text || '';
   const botText = lastBotMsg.variants[lastBotMsg.activeVariantIndex]?.text || '';
+  const isDialogueRu = /[а-яА-ЯёЁ]/.test(userText + botText);
 
   // If API key is available, use LLM to extract accurate memory node & affinity delta
   if (apiKeyConfig && apiKeyConfig.key.trim()) {
     let rawResponse = '';
     try {
-      const extractionPrompt = `Analyze this roleplay dialogue turn between USER and CHARACTER.
+      const extractionPrompt = isDialogueRu
+        ? `Проанализируй данный раунд ролевого диалога между ПОЛЬЗОВАТЕЛЕМ и ПЕРСОНАЖЕМ.
+1. Определи изменение расположения/симпатии персонажа к пользователю (от -10 до +10).
+2. Выдели 1 или 2 ключевых факта, события, тайны или изменения в отношениях для графа долговременной памяти.
+ВАЖНО: Поля "label" и "detail" пиши СТРОГО НА РУССКОМ ЯЗЫКЕ!
+
+ПОЛЬЗОВАТЕЛЬ: ${userText}
+ПЕРСОНАЖ: ${botText}
+
+Ответь СТРОГО в формате JSON без markdown:
+{
+  "affinityDelta": 3,
+  "nodes": [
+    {
+      "label": "Краткий заголовок (2-4 слова на русском)",
+      "type": "event" | "fact" | "relationship" | "location" | "secret",
+      "detail": "Одно четкое предложение с описанием воспоминания на русском."
+    }
+  ]
+}
+Только чистый JSON.`
+        : `Analyze this roleplay dialogue turn between USER and CHARACTER.
 1. Determine how user's actions affect character's affinity (-10 to +10 change).
 2. Extract 1 or 2 new significant facts, events, bond shifts, or secrets to store in long-term memory graph.
 
@@ -92,7 +114,7 @@ No markdown wrappers, raw JSON only.`;
                 chatId,
                 source: prev.id,
                 target: node.id,
-                label: 'leads to',
+                label: isDialogueRu ? 'приводит к' : 'leads to',
               };
               await db.memoryEdges.put(edge);
             }
@@ -158,7 +180,9 @@ No markdown wrappers, raw JSON only.`;
     chatId,
     label: userText.slice(0, 24) + '...',
     type: delta !== 0 ? 'relationship' : 'event',
-    detail: `User said: "${userText.slice(0, 80)}" | Character responded: "${botText.slice(0, 80)}"`,
+    detail: isDialogueRu
+      ? `Пользователь: "${userText.slice(0, 80)}" | Персонаж: "${botText.slice(0, 80)}"`
+      : `User said: "${userText.slice(0, 80)}" | Character responded: "${botText.slice(0, 80)}"`,
     createdAt: Date.now(),
   };
   await db.memoryNodes.put(node);
@@ -171,7 +195,7 @@ No markdown wrappers, raw JSON only.`;
       chatId,
       source: prev.id,
       target: node.id,
-      label: 'relates to',
+      label: isDialogueRu ? 'связано с' : 'relates to',
     };
     await db.memoryEdges.put(edge);
   }

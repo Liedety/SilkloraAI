@@ -19,6 +19,7 @@ import {
   Eye,
   EyeOff,
   CornerDownRight,
+  Smile,
 } from 'lucide-react';
 import { db, DEFAULT_THEME } from '../db';
 import type {
@@ -182,6 +183,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // Folded thoughts state
   const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({});
 
+  // Bot message manual emotion sprite picker
+  const [emotionPickerMsgId, setEmotionPickerMsgId] = useState<string | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const currentTheme = settings?.theme || DEFAULT_THEME;
 
@@ -256,6 +260,54 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return char.avatar || fallbackAvatar || '';
   };
 
+  // Dedicated helper to retrieve emotion sprite illustrations
+  const getEmotionSprite = (
+    senderId: string,
+    emotion?: string
+  ): { avatar: string; name: string } | null => {
+    const char = allCharacters.find((c) => c.id === senderId) || (type === 'character' ? character : undefined);
+    if (!char || !char.emotions || char.emotions.length === 0) return null;
+
+    if (emotion && emotion.trim()) {
+      const emLower = emotion.trim().toLowerCase();
+      // 1. Direct match on name or label
+      const direct = char.emotions.find(
+        (e) => e.name.toLowerCase() === emLower || e.label?.toLowerCase() === emLower
+      );
+      if (direct?.avatar) return { avatar: direct.avatar, name: direct.label || direct.name };
+
+      // 2. Fuzzy synonym match (Russian & English)
+      const synonymGroups: Record<string, string[]> = {
+        happy: ['happy', 'joy', 'smile', 'радость', 'улыбка', 'веселье', 'счастье'],
+        sad: ['sad', 'sorrow', 'crying', 'грусть', 'печаль', 'слезы', 'тоска'],
+        angry: ['angry', 'furious', 'rage', 'гнев', 'злость', 'ярость', 'раздражение'],
+        blushing: ['blushing', 'shy', 'embarrassed', 'смущение', 'стыд', 'румянец'],
+        smirk: ['smirk', 'tease', 'playful', 'усмешка', 'сарказм', 'ухмылка'],
+        surprised: ['surprised', 'shocked', 'удивление', 'шок', 'испуг'],
+        thoughtful: ['thoughtful', 'pensive', 'задумчивость', 'размышление'],
+        neutral: ['neutral', 'calm', 'нейтральный', 'спокойствие'],
+      };
+
+      for (const [, words] of Object.entries(synonymGroups)) {
+        if (words.some((w) => emLower.includes(w))) {
+          const match = char.emotions.find((e) => {
+            const eName = (e.name + ' ' + (e.label || '')).toLowerCase();
+            return words.some((w) => eName.includes(w));
+          });
+          if (match?.avatar) return { avatar: match.avatar, name: match.label || match.name };
+        }
+      }
+    }
+
+    // 3. Fallback: if character has neutral sprite with avatar or first sprite with avatar
+    const fallback = char.emotions.find((e) => e.name === 'neutral' && e.avatar) || char.emotions.find((e) => e.avatar);
+    if (fallback?.avatar) {
+      return { avatar: fallback.avatar, name: fallback.label || fallback.name };
+    }
+
+    return null;
+  };
+
   // Build current dialogue context string for AI
   const buildContextHistory = (msgList: ChatMessage[]): string => {
     return msgList
@@ -273,6 +325,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     guidancePrompt?: string,
     existingBotMsgToVariant?: ChatMessage
   ) => {
+    if (!session) return;
     if (!activeApiKey || !activeApiKey.key.trim()) {
       alert(language === 'ru' ? 'Пожалуйста, настройте активный API ключ в Настройках.' : 'Please configure an active API key in Settings.');
       return;
@@ -287,13 +340,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
       if (targetSpeaker) {
         speaker = targetSpeaker;
       } else {
-        // Pick character from group
-        const groupChars = allCharacters.filter((c) => group?.characterIds.includes(c.id));
-        speaker = groupChars[Math.floor(Math.random() * groupChars.length)] || allCharacters[0];
+        // Pick character from group, strictly excluding user persona!
+        const groupChars = allCharacters.filter(
+          (c) => group?.characterIds.includes(c.id) && c.id !== session.personaId
+        );
+        if (groupChars.length === 0) return;
+        speaker = groupChars[Math.floor(Math.random() * groupChars.length)];
       }
     }
 
-    if (!speaker || !session) return;
+    // Safety guard: User's persona must NEVER speak as a bot
+    if (session.personaId && speaker.id === session.personaId) {
+      console.warn('Blocked user persona from speaking as bot');
+      return;
+    }
+
+    if (!speaker) return;
 
     setIsGenerating(true);
     setStreamingText('');
@@ -321,7 +383,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       userPersona,
       textStyle: activeStyle,
       chatDirectives: session.chatDirectives,
-      thoughtsEnabled: session.thoughtsEnabled,
+      thoughtsEnabled: session.thoughtsEnabled === true,
       memoryNodes,
       relationshipScore: affinity,
       speakerCharacter: speaker,
@@ -404,10 +466,42 @@ export const ChatView: React.FC<ChatViewProps> = ({
           finalText = completed.replace(/<thought>[\s\S]*?<\/thought>/, '').trim();
         }
 
-        const emotionMatch = finalText.match(/<emotion>([^<]+)<\/emotion>/i);
-        if (emotionMatch) {
-          finalEmotion = emotionMatch[1].trim().toLowerCase();
+        // 1. Match <emotion>...</emotion>
+        const emTagMatch = finalText.match(/<emotion>([\s\S]*?)<\/emotion>/i);
+        if (emTagMatch) {
+          finalEmotion = emTagMatch[1].trim().toLowerCase();
           finalText = finalText.replace(/<emotion>[\s\S]*?<\/emotion>/gi, '').trim();
+        }
+
+        // 2. Match [emotion: ...] or [эмоция: ...]
+        if (!finalEmotion) {
+          const emBracketMatch = finalText.match(/\[(?:эмоция|emotion):\s*([^\]]+)\]/i);
+          if (emBracketMatch) {
+            finalEmotion = emBracketMatch[1].trim().toLowerCase();
+            finalText = finalText.replace(/\[(?:эмоция|emotion):\s*[^\]]+\]/gi, '').trim();
+          }
+        }
+
+        // 3. Match standalone emotion brackets
+        if (!finalEmotion) {
+          const emWordMatch = finalText.match(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/i);
+          if (emWordMatch) {
+            finalEmotion = emWordMatch[1].trim().toLowerCase();
+            finalText = finalText.replace(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/gi, '').trim();
+          }
+        }
+
+        // 4. Fallback from actions if character has emotions configured
+        if (!finalEmotion && speaker.emotions && speaker.emotions.length > 0) {
+          const lower = finalText.toLowerCase();
+          if (/\*(?:.*)(?:улыб|сме|радост|счаст|smile|laugh|happy)(?:.*)\*/.test(lower)) finalEmotion = 'happy';
+          else if (/\*(?:.*)(?:плач|слез|груст|печал|вздох|sad|cry)(?:.*)\*/.test(lower)) finalEmotion = 'sad';
+          else if (/\*(?:.*)(?:гнев|злос|ярост|хмур|рыч|angry|rage)(?:.*)\*/.test(lower)) finalEmotion = 'angry';
+          else if (/\*(?:.*)(?:смущ|красне|румян|shy|blush)(?:.*)\*/.test(lower)) finalEmotion = 'blushing';
+          else if (/\*(?:.*)(?:ухмыл|усмеш|сарказм|smirk)(?:.*)\*/.test(lower)) finalEmotion = 'smirk';
+          else if (/\*(?:.*)(?:вздраг|удивл|шок|surpris|shock)(?:.*)\*/.test(lower)) finalEmotion = 'surprised';
+          else if (/\*(?:.*)(?:задум|размышл|pensive|thought)(?:.*)\*/.test(lower)) finalEmotion = 'thoughtful';
+          else finalEmotion = 'neutral';
         }
 
         finalText = cleanArtifacts(finalText);
@@ -510,8 +604,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
       textareaRef.current.style.height = 'auto';
     }
 
-    // Trigger bot reply
-    runBotGeneration();
+    // Trigger bot reply: only in 1-on-1 chat!
+    // In group chats, characters ONLY respond when invoked explicitly by the user!
+    if (type === 'character') {
+      runBotGeneration();
+    }
   };
 
   // Rollback and Fork chat session
@@ -790,15 +887,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
               )}
 
               <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} max-w-[85%] space-y-1`}>
-                {/* Sender Name & Active Emotion Badge */}
-                {!isUser && (
+                {/* Sender Name in group chat */}
+                {!isUser && type === 'group' && (
                   <div className="flex items-center gap-1.5 text-[11px] font-semibold text-violet-300 ml-1">
-                    {type === 'group' && <span>{msg.senderName}</span>}
-                    {(activeVariant.emotion || msg.emotion) && (
-                      <span className="px-2 py-0.5 rounded-full bg-violet-950/60 border border-violet-700/50 text-[10px] text-violet-300 font-medium">
-                        {activeVariant.emotion || msg.emotion}
-                      </span>
-                    )}
+                    <span>{msg.senderName}</span>
                   </div>
                 )}
 
@@ -893,6 +985,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
                       {formatMessageText(activeVariant.text)}
                     </div>
                   )}
+
+                  {/* Emotion Sprite Image (displayed below message text without raw emotion text) */}
+                  {!isUser && (() => {
+                    const sprite = getEmotionSprite(msg.senderId, activeVariant.emotion || msg.emotion);
+                    if (!sprite || !sprite.avatar) return null;
+                    return (
+                      <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center">
+                        <div className="relative rounded-2xl overflow-hidden border border-violet-500/30 bg-black/40 shadow-lg transition-transform hover:scale-105">
+                          <img
+                            src={sprite.avatar}
+                            alt=""
+                            className="max-h-48 max-w-[200px] w-auto h-auto object-contain rounded-xl block"
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Message Action Bar (Rollback, Edit, Copy, Wand, Carousel) */}
@@ -973,6 +1082,71 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         <Wand2 className="w-3.5 h-3.5" />
                       </button>
 
+                      {/* Manual Emotion Sprite Selector */}
+                      {(() => {
+                        const botChar = allCharacters.find((c) => c.id === msg.senderId) || (type === 'character' ? character : undefined);
+                        if (!botChar?.emotions || botChar.emotions.length === 0) return null;
+                        return (
+                          <div className="relative">
+                            <button
+                              onClick={() => setEmotionPickerMsgId(emotionPickerMsgId === msg.id ? null : msg.id)}
+                              type="button"
+                              className={`p-1 rounded transition-colors ${
+                                emotionPickerMsgId === msg.id ? 'text-violet-400 bg-silk-800' : 'hover:text-violet-400 hover:bg-silk-800'
+                              }`}
+                              title={language === 'ru' ? 'Выбрать эмоцию' : 'Choose Emotion'}
+                            >
+                              <Smile className="w-3.5 h-3.5" />
+                            </button>
+
+                            {emotionPickerMsgId === msg.id && (
+                              <div className="absolute left-0 bottom-full mb-2 z-30 p-2 bg-silk-900 border border-silk-700 rounded-xl shadow-2xl flex items-center gap-2 animate-fade-in max-w-xs overflow-x-auto no-scrollbar">
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    const updatedVariants = [...msg.variants];
+                                    updatedVariants[msg.activeVariantIndex] = {
+                                      ...updatedVariants[msg.activeVariantIndex],
+                                      emotion: undefined,
+                                    };
+                                    await db.messages.update(msg.id, {
+                                      variants: updatedVariants,
+                                      emotion: undefined,
+                                    });
+                                    setEmotionPickerMsgId(null);
+                                  }}
+                                  className="px-2 py-1 rounded-lg bg-silk-800 text-[10px] text-slate-400 hover:text-white shrink-0"
+                                >
+                                  {language === 'ru' ? 'Без картинки' : 'None'}
+                                </button>
+                                {botChar.emotions.filter((e) => e.avatar).map((e) => (
+                                  <button
+                                    key={e.id}
+                                    type="button"
+                                    onClick={async () => {
+                                      const updatedVariants = [...msg.variants];
+                                      updatedVariants[msg.activeVariantIndex] = {
+                                        ...updatedVariants[msg.activeVariantIndex],
+                                        emotion: e.name,
+                                      };
+                                      await db.messages.update(msg.id, {
+                                        variants: updatedVariants,
+                                        emotion: e.name,
+                                      });
+                                      setEmotionPickerMsgId(null);
+                                    }}
+                                    className="relative w-8 h-8 rounded-lg overflow-hidden border border-silk-700 hover:border-violet-500 shrink-0 bg-silk-800 transition-transform active:scale-90"
+                                    title={e.label || e.name}
+                                  >
+                                    <img src={e.avatar} alt={e.label || e.name} className="w-full h-full object-cover" />
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+
                       <button
                         onClick={() => handleRegenerate(msg)}
                         type="button"
@@ -1000,14 +1174,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
               />
             </div>
             <div className="flex flex-col items-start max-w-[85%] space-y-1">
-              <div className="flex items-center gap-1.5 text-[11px] font-semibold text-violet-300 ml-1">
-                {type === 'group' && <span>{streamingSender.name}</span>}
-                {streamingEmotion && (
-                  <span className="px-2 py-0.5 rounded-full bg-violet-950/60 border border-violet-700/50 text-[10px] text-violet-300 font-medium">
-                    {streamingEmotion}
-                  </span>
-                )}
-              </div>
+              {type === 'group' && (
+                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-violet-300 ml-1">
+                  <span>{streamingSender.name}</span>
+                </div>
+              )}
               <div
                 className="p-3.5 shadow-xl text-slate-200"
                 style={{
@@ -1033,6 +1204,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   {formatMessageText(streamingText || '...')}
                   <span className="inline-block w-1.5 h-4 ml-0.5 bg-violet-400 animate-pulse align-middle" />
                 </div>
+
+                {/* Streaming Emotion Sprite */}
+                {(() => {
+                  const sprite = getEmotionSprite(streamingSender.id, streamingEmotion || undefined);
+                  if (!sprite || !sprite.avatar) return null;
+                  return (
+                    <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center">
+                      <div className="relative rounded-2xl overflow-hidden border border-violet-500/30 bg-black/40 shadow-lg">
+                        <img
+                          src={sprite.avatar}
+                          alt=""
+                          className="max-h-48 max-w-[200px] w-auto h-auto object-contain rounded-xl block animate-pulse"
+                        />
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           </div>
@@ -1107,6 +1295,35 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* 3. Bottom Chat Input Bar */}
       <div className="relative z-20 p-3 bg-silk-900/90 backdrop-blur-xl border-t border-silk-800/80">
+        {/* Group Chat: Quick Bot Invocation Row */}
+        {type === 'group' && (() => {
+          const availableBots = allCharacters.filter(
+            (c) => group?.characterIds.includes(c.id) && c.id !== session?.personaId
+          );
+          if (availableBots.length === 0) return null;
+          return (
+            <div className="flex items-center gap-2 pb-2.5 overflow-x-auto no-scrollbar max-w-xl mx-auto">
+              <span className="text-[11px] font-semibold text-violet-300 shrink-0">
+                {language === 'ru' ? 'Вызвать бота:' : 'Call bot:'}
+              </span>
+              {availableBots.map((botChar) => (
+                <button
+                  key={botChar.id}
+                  onClick={() => runBotGeneration(botChar)}
+                  disabled={isGenerating}
+                  type="button"
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-silk-800 hover:bg-violet-600/30 border border-silk-700 hover:border-violet-500/60 text-xs text-slate-200 shrink-0 transition-all active:scale-95 disabled:opacity-50 shadow-sm"
+                >
+                  <div className="w-4 h-4 rounded-full overflow-hidden shrink-0">
+                    <AvatarImage src={botChar.avatar} alt={botChar.name} className="w-full h-full object-cover" />
+                  </div>
+                  <span className="font-medium text-[11px] truncate max-w-[90px]">{botChar.name}</span>
+                </button>
+              ))}
+            </div>
+          );
+        })()}
+
         <div className="flex items-center gap-2 max-w-xl mx-auto">
           {/* Photo attach button */}
           <label className="p-2.5 text-slate-400 hover:text-white rounded-xl hover:bg-silk-800 cursor-pointer shrink-0">
@@ -1303,7 +1520,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
             <div className="space-y-1.5 max-h-56 overflow-y-auto">
               {allCharacters
-                .filter((c) => group?.characterIds.includes(c.id))
+                .filter((c) => group?.characterIds.includes(c.id) && c.id !== session?.personaId)
                 .map((c) => (
                   <button
                     key={c.id}
@@ -1321,6 +1538,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     <CornerDownRight className="w-3.5 h-3.5 text-slate-500" />
                   </button>
                 ))}
+              {allCharacters.filter((c) => group?.characterIds.includes(c.id) && c.id !== session?.personaId).length === 0 && (
+                <div className="text-center py-4 text-xs text-slate-400">
+                  {language === 'ru' ? 'Все персонажи группы выбраны как персона' : 'All group members are chosen as persona'}
+                </div>
+              )}
             </div>
           </div>
         </div>

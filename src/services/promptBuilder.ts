@@ -21,7 +21,7 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
     userPersona,
     textStyle,
     chatDirectives,
-    thoughtsEnabled,
+    thoughtsEnabled = false,
     memoryNodes = [],
     relationshipScore = 0,
     speakerCharacter,
@@ -43,6 +43,11 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
 5. Formatting:
    - Enclose physical actions, body language, facial expressions, and environmental details in asterisks like *smiles faintly and leans against the wall*.
    - Write spoken speech directly as regular text. Do not wrap spoken words in asterisks.
+6. STRICT LANGUAGE PURITY & MONOLINGUAL CONSISTENCY:
+   - You MUST reply 100% strictly in the language of the conversation. When user or characters communicate in Russian, generate pure, high-quality literary Russian.
+   - NEVER switch to English mid-sentence or mid-dialogue.
+   - NEVER insert English words, translations, or parenthetical annotations (e.g. NEVER write words like "relief (облегчение)", "anger", "feeling" inside Russian prose).
+   - Maintain seamless narrative immersion without code-switching.
 `;
 
   // Writing style with highest priority

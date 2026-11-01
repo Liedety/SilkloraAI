@@ -72,13 +72,13 @@ export const ChatSettingsModal: React.FC<ChatSettingsModalProps> = ({
 
   // Roleplay settings form state
   const [personaId, setPersonaId] = useState<string | null>(session.personaId || null);
-  const [thoughtsEnabled, setThoughtsEnabled] = useState(session.thoughtsEnabled);
+  const [thoughtsEnabled, setThoughtsEnabled] = useState(session.thoughtsEnabled === true);
   const [chatDirectives, setChatDirectives] = useState(session.chatDirectives || '');
   const [relationships, setRelationships] = useState<Record<string, number>>(session.relationships || {});
 
   useEffect(() => {
     setPersonaId(session.personaId || null);
-    setThoughtsEnabled(session.thoughtsEnabled);
+    setThoughtsEnabled(session.thoughtsEnabled === true);
     setChatDirectives(session.chatDirectives || '');
     setRelationships(session.relationships || {});
   }, [session.id, session.personaId, session.thoughtsEnabled, session.chatDirectives, session.relationships]);

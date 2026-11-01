@@ -851,38 +851,48 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
 
                 {/* Emotion Sprites List */}
                 {emotions.length > 0 && (
-                  <div className="space-y-2 pt-2">
+                  <div className="space-y-2.5 pt-2">
                     {emotions.map((em) => (
                       <div
                         key={em.id}
-                        className="flex items-center gap-3 p-2.5 rounded-xl bg-silk-850 border border-silk-800"
+                        className="p-3 rounded-xl bg-silk-850 border border-silk-800 space-y-2.5 shadow-sm"
                       >
-                        {/* Avatar preview */}
-                        <div className="relative w-12 h-12 rounded-xl overflow-hidden bg-silk-800 border border-silk-700 shrink-0">
-                          {em.avatar ? (
-                            <img src={em.avatar} alt={em.label || em.name} className="w-full h-full object-cover" />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center text-slate-500">
-                              <Smile className="w-5 h-5 text-slate-600" />
-                            </div>
-                          )}
+                        {/* Top row: Avatar + Details + Delete */}
+                        <div className="flex items-center gap-3">
+                          <div className="relative w-12 h-12 rounded-xl overflow-hidden bg-silk-800 border border-silk-700 shrink-0">
+                            {em.avatar ? (
+                              <img src={em.avatar} alt={em.label || em.name} className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center text-slate-500">
+                                <Smile className="w-5 h-5 text-slate-600" />
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex-1 min-w-0">
+                            <span className="text-xs font-bold text-white truncate block">
+                              {em.label || em.name}
+                            </span>
+                            <span className="text-[10px] text-violet-400 font-mono truncate block mt-0.5">
+                              &lt;emotion&gt;{em.name}&lt;/emotion&gt;
+                            </span>
+                          </div>
+
+                          <button
+                            onClick={() => handleRemoveEmotion(em.id)}
+                            type="button"
+                            className="p-2 text-slate-400 hover:text-rose-400 rounded-lg hover:bg-silk-800 shrink-0 transition-colors"
+                            title={t.removeEmotion}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
                         </div>
 
-                        {/* Emotion details */}
-                        <div className="flex-1 min-w-0">
-                          <span className="text-xs font-semibold text-white truncate block">
-                            {em.label || em.name}
-                          </span>
-                          <span className="text-[10px] text-slate-500 font-mono">
-                            &lt;emotion&gt;{em.name}&lt;/emotion&gt;
-                          </span>
-                        </div>
-
-                        {/* Upload sprite button */}
-                        <div className="flex items-center gap-1 shrink-0">
-                          <label className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-violet-400 font-medium cursor-pointer">
+                        {/* Bottom action row: Upload / Change & Reposition buttons */}
+                        <div className="flex items-center gap-2 pt-1 border-t border-silk-800/80">
+                          <label className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-silk-800 hover:bg-silk-700 border border-silk-700/80 text-xs text-violet-300 font-medium cursor-pointer transition-all active:scale-95">
                             <Camera className="w-3.5 h-3.5" />
-                            <span>{em.avatar ? (language === 'ru' ? 'Сменить' : 'Change') : t.uploadEmotionAvatar}</span>
+                            <span>{em.avatar ? (language === 'ru' ? 'Сменить фото' : 'Change Image') : t.uploadEmotionAvatar}</span>
                             <input
                               type="file"
                               accept="image/*"
@@ -894,22 +904,12 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                             <button
                               type="button"
                               onClick={() => handleRepositionEmotion(em)}
-                              className="px-2 py-1.5 rounded-lg bg-silk-800 hover:bg-silk-700 text-[11px] text-slate-300 font-medium"
+                              className="px-3 py-2 rounded-xl bg-silk-800 hover:bg-silk-700 border border-silk-700/80 text-xs text-slate-300 font-medium transition-all active:scale-95 shrink-0"
                             >
                               {t.reposition}
                             </button>
                           )}
                         </div>
-
-                        {/* Remove button */}
-                        <button
-                          onClick={() => handleRemoveEmotion(em.id)}
-                          type="button"
-                          className="p-1.5 text-slate-400 hover:text-rose-400 rounded-lg hover:bg-silk-800"
-                          title={t.removeEmotion}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
                       </div>
                     ))}
                   </div>

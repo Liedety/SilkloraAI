@@ -402,6 +402,12 @@ export function cleanArtifacts(str: string): string {
     .replace(/^\s*User:[:\s]*/i, '')
     .replace(/^\s*Bot:[:\s]*/i, '')
     .replace(/^\s*Assistant:[:\s]*/i, '')
+    // Strip raw emotion tags from visible chat text
+    .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
+    .replace(/\[(?:эмоция|emotion):\s*[^\]]+\]/gi, '')
+    // Clean accidental bilingual translation parentheticals (e.g. "слово (word)")
+    .replace(/([а-яА-ЯёЁ]{2,30})\s*\([a-zA-Z\s]{2,30}\)/g, '$1')
+    .replace(/([a-zA-Z]{2,30})\s*\(([а-яА-ЯёЁ\s]{2,30})\)/g, '$2')
     .replace(/\\"/g, '"')
     .replace(/\\n/g, '\n')
     .replace(/\\r/g, '')

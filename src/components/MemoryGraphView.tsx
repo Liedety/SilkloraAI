@@ -59,6 +59,32 @@ const TYPE_CONFIG: Record<
   },
 };
 
+const translateEdgeLabel = (label: string, isRu: boolean): string => {
+  if (!isRu || !label) return label;
+  const l = label.toLowerCase().trim();
+  const ruMap: Record<string, string> = {
+    'leads to': 'приводит к',
+    'relates to': 'связано с',
+    'related to': 'связано с',
+    'connected to': 'связано с',
+    'causes': 'вызывает',
+    'caused': 'вызвало',
+    'knows': 'знает',
+    'trusts': 'доверяет',
+    'loves': 'любит',
+    'fears': 'боится',
+    'hates': 'ненавидит',
+    'allied with': 'в союзе с',
+    'hostile to': 'враждебен к',
+    'friend': 'друг',
+    'enemy': 'враг',
+    'bond': 'связь',
+    'relationship': 'отношения',
+    'secret': 'тайна',
+  };
+  return ruMap[l] || label;
+};
+
 export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
   nodes,
   edges,
@@ -263,6 +289,26 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
           ctx.arc(mx, my, 2.5, 0, Math.PI * 2);
           ctx.fillStyle = '#a78bfa';
           ctx.fill();
+
+          // Localized edge label badge
+          if (edge.label) {
+            const edgeText = translateEdgeLabel(edge.label, isRu);
+            ctx.font = '9px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            const tm = ctx.measureText(edgeText);
+            const pw = tm.width + 8;
+            const ph = 14;
+
+            ctx.fillStyle = 'rgba(12, 10, 26, 0.9)';
+            ctx.fillRect(mx - pw / 2, my - ph / 2, pw, ph);
+            ctx.strokeStyle = 'rgba(139, 92, 246, 0.4)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(mx - pw / 2, my - ph / 2, pw, ph);
+
+            ctx.fillStyle = '#ddd6fe';
+            ctx.fillText(edgeText, mx, my);
+          }
         }
       }
 
@@ -409,19 +455,19 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
           <button
             type="button"
             onClick={() => setViewMode('graph')}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
               viewMode === 'graph'
                 ? 'bg-violet-600 text-white shadow'
                 : 'text-slate-400 hover:text-white'
             }`}
           >
             <Network className="w-3.5 h-3.5" />
-            <span>{isRu ? 'Граф связей' : 'Graph'}</span>
+            <span>{isRu ? 'Граф' : 'Graph'}</span>
           </button>
           <button
             type="button"
             onClick={() => setViewMode('cards')}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
               viewMode === 'cards'
                 ? 'bg-violet-600 text-white shadow'
                 : 'text-slate-400 hover:text-white'
@@ -432,8 +478,8 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
           </button>
         </div>
 
-        <div className="text-[11px] font-mono text-slate-400">
-          {nodes.length} {isRu ? 'элементов' : 'items'}
+        <div className="text-[11px] font-mono text-slate-400 bg-silk-850 px-2.5 py-1 rounded-lg border border-silk-800">
+          {nodes.length} {isRu ? 'воспоминаний' : 'items'}
         </div>
       </div>
 
@@ -443,7 +489,7 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
           className="relative w-full h-[360px] bg-silk-950 rounded-2xl overflow-hidden border border-silk-800 shadow-inner select-none flex flex-col"
         >
           {/* Floating View Controls */}
-          <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5 bg-silk-900/90 backdrop-blur-md p-1.5 rounded-xl border border-silk-700/60 shadow-lg">
+          <div className="absolute top-3 right-3 z-10 flex items-center gap-1 bg-silk-900/90 backdrop-blur-md p-1.5 rounded-xl border border-silk-700/60 shadow-lg">
             <button
               onClick={() => setZoom((z) => Math.min(2.5, z * 1.2))}
               type="button"
@@ -477,11 +523,11 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
           </div>
 
           {/* Localized Legend */}
-          <div className="absolute bottom-3 left-3 z-10 flex flex-wrap gap-2 text-[10px] text-slate-400 bg-silk-900/85 backdrop-blur-sm px-3 py-1.5 rounded-lg border border-silk-800">
+          <div className="absolute bottom-3 left-3 z-10 max-w-[80%] flex flex-wrap gap-2 text-[10px] text-slate-300 bg-silk-900/90 backdrop-blur-md px-3 py-1.5 rounded-xl border border-silk-700/70 shadow-lg">
             {Object.entries(TYPE_CONFIG).map(([type, conf]) => (
-              <span key={type} className="flex items-center gap-1">
+              <span key={type} className="flex items-center gap-1.5 font-medium">
                 <span
-                  className="w-2 h-2 rounded-full inline-block"
+                  className="w-2 h-2 rounded-full inline-block shrink-0"
                   style={{ backgroundColor: conf.border }}
                 />
                 <span>{isRu ? conf.labelRu : conf.labelEn}</span>
@@ -501,24 +547,24 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
 
           {/* Node Detail Sheet */}
           {selectedNode && (
-            <div className="absolute inset-x-3 bottom-12 z-20 bg-silk-900/95 backdrop-blur-md border border-silk-700/80 rounded-xl p-3 shadow-2xl animate-fade-in text-xs">
+            <div className="absolute inset-x-3 bottom-14 z-20 bg-silk-900/95 backdrop-blur-md border border-violet-500/40 rounded-2xl p-3.5 shadow-2xl animate-fade-in text-xs space-y-2">
               <div className="flex items-start justify-between gap-2">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 min-w-0">
                   <span
-                    className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase text-white tracking-wider"
+                    className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase text-white tracking-wider shrink-0"
                     style={{ backgroundColor: TYPE_CONFIG[selectedNode.type]?.bg || '#0284c7' }}
                   >
                     {isRu
                       ? TYPE_CONFIG[selectedNode.type]?.labelRu || selectedNode.type
                       : TYPE_CONFIG[selectedNode.type]?.labelEn || selectedNode.type}
                   </span>
-                  <h4 className="font-semibold text-slate-200 text-sm">{selectedNode.label}</h4>
+                  <h4 className="font-semibold text-slate-200 text-xs sm:text-sm truncate">{selectedNode.label}</h4>
                 </div>
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1 shrink-0">
                   <button
                     onClick={() => handleDeleteNode(selectedNode.id)}
                     type="button"
-                    className="text-slate-400 hover:text-rose-400 p-1 rounded hover:bg-silk-800"
+                    className="text-slate-400 hover:text-rose-400 p-1.5 rounded-lg hover:bg-silk-800"
                     title={isRu ? 'Удалить узел' : 'Delete node'}
                   >
                     <Trash2 className="w-3.5 h-3.5" />
@@ -526,22 +572,41 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
                   <button
                     onClick={() => setSelectedNode(null)}
                     type="button"
-                    className="text-slate-400 hover:text-white p-1 rounded hover:bg-silk-800"
+                    className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-silk-800"
                   >
                     <X className="w-4 h-4" />
                   </button>
                 </div>
               </div>
-              <p className="mt-1.5 text-slate-300 leading-relaxed">{selectedNode.detail}</p>
+              <p className="text-slate-300 text-xs leading-relaxed break-words">{selectedNode.detail}</p>
+              <div className="text-[10px] text-slate-500">
+                {new Date(selectedNode.createdAt).toLocaleString(isRu ? 'ru-RU' : 'en-US', {
+                  day: '2-digit',
+                  month: '2-digit',
+                  year: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })}
+              </div>
             </div>
           )}
         </div>
       ) : (
         /* Cards View for comfortable inspection without squishing */
-        <div className="space-y-2 max-h-[360px] overflow-y-auto pr-1">
+        <div className="space-y-2.5 max-h-[380px] overflow-y-auto pr-1">
           {nodes.length === 0 ? (
-            <div className="text-center py-8 text-xs text-slate-500 italic">
-              {isRu ? 'Узлы памяти пока не сформированы' : 'No memory nodes formed yet'}
+            <div className="text-center py-10 px-4 space-y-2">
+              <div className="w-10 h-10 rounded-2xl bg-silk-850 border border-silk-800 mx-auto flex items-center justify-center text-slate-500">
+                <Network className="w-5 h-5 text-violet-400" />
+              </div>
+              <p className="text-xs font-semibold text-slate-300">
+                {isRu ? 'Узлы памяти пока не сформированы' : 'No memory nodes formed yet'}
+              </p>
+              <p className="text-[11px] text-slate-500 max-w-xs mx-auto leading-relaxed">
+                {isRu
+                  ? 'По мере диалога бот будет автоматически сохранять важные факты, события и отношения в этот граф.'
+                  : 'As you converse, the bot will automatically extract important facts, events, and bonds here.'}
+              </p>
             </div>
           ) : (
             nodes.map((node) => {
@@ -549,10 +614,11 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
               return (
                 <div
                   key={node.id}
-                  className="p-3 rounded-xl bg-silk-850 border border-silk-800 space-y-1.5 shadow-sm hover:border-silk-700 transition-all"
+                  className="p-3.5 rounded-xl bg-silk-850 border border-silk-800 space-y-2 shadow-sm hover:border-silk-700 transition-all border-l-4"
+                  style={{ borderLeftColor: conf.border }}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
                       <span
                         className="px-2 py-0.5 rounded text-[10px] font-semibold text-white uppercase tracking-wider shrink-0"
                         style={{ backgroundColor: conf.bg }}
@@ -570,9 +636,15 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
-                  <p className="text-xs text-slate-300 leading-relaxed">{node.detail}</p>
+                  <p className="text-xs text-slate-300 leading-relaxed break-words">{node.detail}</p>
                   <span className="text-[10px] text-slate-500 block">
-                    {new Date(node.createdAt).toLocaleString(isRu ? 'ru-RU' : 'en-US')}
+                    {new Date(node.createdAt).toLocaleString(isRu ? 'ru-RU' : 'en-US', {
+                      day: '2-digit',
+                      month: '2-digit',
+                      year: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
                   </span>
                 </div>
               );
