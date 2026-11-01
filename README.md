@@ -1,63 +1,63 @@
 # SilkloraAI
 
-Удобное приложение для ролевого общения и текстовых ролевок с ИИ-персонажами на Android (и в веб-браузере).
+A clean, local-first mobile client for roleplaying and chatting with AI characters on Android (and modern web browsers).
 
-Работает через любой OpenAI-совместимый бэкенд: локальный (Ollama, LM Studio, KoboldCpp, vLLM) или облачный (OpenRouter, Groq, Together и др.).
-
----
-
-## Что внутри
-
-- **Персонажи и группы:** Создание карточек персонажей с лором, приветственными репликами, аватарками и динамическими спрайтами эмоций. Можно собирать персонажей в групповые чаты с общими правилами мира.
-- **Интерактивный граф памяти:** Визуальная карта отношений и фактов с возможностью перемещать узлы и просматривать детали каждого события.
-- **Полная приватность:** Все персонажи, чаты, настройки и история хранятся локально на устройстве (IndexedDB). Данные уходят только на тот сервер ИИ, который вы сами указали в настройках.
-- **Темы оформления:** Настройка акцентных цветов интерфейса и отдельных тем чата.
-- **Генерация и кастомизация:** Встроенные инструменты для быстрой генерации персонажей, миров и форматирования текста под удобный стиль (диалоги, книжный стиль и т.д.).
-- **Локализация:** Полная поддержка русского и английского языков.
+SilkloraAI connects to any OpenAI-compatible API backend:
+- **Local:** Ollama, LM Studio, KoboldCpp, vLLM, text-generation-webui
+- **Cloud:** OpenRouter, Groq, Together AI, Mistral, OpenAI, etc.
 
 ---
 
-## Установка на Android
+## Features
 
-1. Перейдите во вкладку [Releases](../../releases) и скачайте `silklora-ai.apk` последней версии.
-2. Установите APK на свой телефон (разрешите установку из неизвестных источников, если система попросит).
-3. В настройках приложения введите адрес вашего API (например, `http://192.168.1.X:11434/v1` для Ollama или ключ OpenRouter) и выберите модель.
+- **Characters & Group Chats:** Create rich character cards with lore, custom greetings, avatars, and dynamic emotion sprites. Bring multiple characters into group chats with shared world rules and manual speaker invocation.
+- **Interactive Memory Graph:** Visual graph of memories, facts, and relationships with draggable nodes and detailed inspection.
+- **100% Local & Private:** All characters, personas, messages, and lorebooks stay stored directly on your device via IndexedDB. No external servers or telemetry — your data only talks to the AI endpoint you configure.
+- **Customizable Themes:** Personalize the interface with custom accent colors and dedicated chat theme presets.
+- **Text Styles:** Configure bot writing style constraints (novelist style, dialogue focus, paragraph limits, etc.).
+- **Bilingual:** Native support for both English and Russian.
 
 ---
 
-## Локальная сборка проекта
+## Installation (Android)
 
-Если хотите запустить или собрать приложение самостоятельно:
+1. Go to the [Releases](../../releases) tab and download `silklora-ai.apk`.
+2. Install the APK on your Android device (enable "Install from unknown sources" if prompted).
+3. In the app settings, enter your API base URL (for example, `http://192.168.1.5:11434/v1` for local Ollama, or `https://openrouter.ai/api/v1` with your API key), pick a model, and you are ready to chat.
 
-### Требования
+---
+
+## Local Development & Building
+
+### Requirements
 - Node.js 18+
 - JDK 17
-- Android SDK (платформа android-34)
+- Android SDK (platform `android-34`)
 
-### Запуск в браузере
+### Run in Browser
 ```bash
-# Установка зависимостей
+# Install dependencies
 npm install
 
-# Запуск dev-сервера
+# Start Vite dev server
 npm run dev
 ```
 
-### Сборка Android APK
+### Build Android APK
 ```bash
 ./build-apk.sh
 ```
-Собранный файл появится в корне проекта (`silklora-ai.apk`).
+The compiled APK will be output to `silklora-ai.apk` in the root directory.
 
 ---
 
-## Авторы
+## Authors
 
-- **[Liedety](https://github.com/Liedety)** — автор проекта, концепт, дизайн и тестирование
-- **Gemini** (Google DeepMind / Antigravity) — разработка кода и архитектуры
+- **[Liedety](https://github.com/Liedety)** — project creator, concept, design & testing
+- **Gemini** (Google DeepMind / Antigravity) — code architecture & development
 
 ---
 
-## Лицензия
+## License
 
 [MIT](LICENSE) © 2026 Liedety
