@@ -274,6 +274,32 @@ export async function extractMemoryAndAffinity(
         .toArray();
 
       for (const sn of staleNodes) {
+        if (sn.isPinned) continue; // Pinned memories are permanent and must never be deleted!
+
+        // Bridge edges around deleted stale node to keep memory graph connected
+        const incoming = await db.memoryEdges.where('target').equals(sn.id).toArray();
+        const outgoing = await db.memoryEdges.where('source').equals(sn.id).toArray();
+        for (const inc of incoming) {
+          for (const out of outgoing) {
+            if (inc.source !== out.target) {
+              const exists = await db.memoryEdges
+                .where('chatId')
+                .equals(chatId)
+                .filter((e) => e.source === inc.source && e.target === out.target)
+                .first();
+              if (!exists) {
+                await db.memoryEdges.put({
+                  id: 'edge-' + Math.random().toString(36).substring(2, 10),
+                  chatId,
+                  source: inc.source,
+                  target: out.target,
+                  label: inc.label || out.label,
+                });
+              }
+            }
+          }
+        }
+
         await db.memoryEdges.where('source').equals(sn.id).delete();
         await db.memoryEdges.where('target').equals(sn.id).delete();
         await db.memoryNodes.delete(sn.id);
@@ -283,15 +309,29 @@ export async function extractMemoryAndAffinity(
     }
   }
 
-  const lastUserMsg = [...recentMessages].reverse().find((m) => m.senderId === 'user');
-  const lastBotMsg = [...recentMessages].reverse().find((m) => m.senderId !== 'user');
+  let targetBotMsg = messageId
+    ? recentMessages.find((m) => m.id === messageId)
+    : undefined;
+  if (!targetBotMsg) {
+    targetBotMsg = [...recentMessages].reverse().find((m) => m.senderId !== 'user');
+  }
 
-  if (!lastUserMsg || !lastBotMsg) {
+  if (!targetBotMsg) {
+    return { newAffinity: currentAffinity, newNodes: [] };
+  }
+
+  const botIdx = recentMessages.findIndex((m) => m.id === targetBotMsg!.id);
+  const prevUser = botIdx !== -1
+    ? [...recentMessages.slice(0, botIdx)].reverse().find((m) => m.senderId === 'user')
+    : undefined;
+  const lastUserMsg = prevUser || [...recentMessages].reverse().find((m) => m.senderId === 'user');
+
+  if (!lastUserMsg) {
     return { newAffinity: currentAffinity, newNodes: [] };
   }
 
   const userText = lastUserMsg.variants[lastUserMsg.activeVariantIndex]?.text || '';
-  const botText = lastBotMsg.variants[lastBotMsg.activeVariantIndex]?.text || '';
+  const botText = targetBotMsg.variants[targetBotMsg.activeVariantIndex]?.text || '';
   const isDialogueRu = /[а-яА-ЯёЁ]/.test(userText + botText);
 
   // If API key is available, use LLM to extract accurate memory node & affinity delta
@@ -369,17 +409,18 @@ No markdown wrappers, raw JSON only.`;
         for (const item of parsed.nodes) {
           if (item.label && item.detail) {
             const norm = normalizeLabel(item.label);
-            const existingInChat = await db.memoryNodes.where('chatId').equals(chatId).toArray();
+            const existingInChat = await db.memoryNodes.where('chatId').equals(chatId).sortBy('createdAt');
             const duplicate = existingInChat.find((n) => normalizeLabel(n.label) === norm);
 
             if (duplicate) {
-              // Update existing node rather than creating duplicate
+              // Update existing node rather than creating duplicate; preserve previous turn's messageId
+              const finalMessageId = duplicate.messageId || messageId;
               await db.memoryNodes.update(duplicate.id, {
-                messageId: messageId || duplicate.messageId,
+                messageId: finalMessageId,
                 detail: item.detail.length > duplicate.detail.length ? item.detail : duplicate.detail,
                 createdAt: Date.now(),
               });
-              createdNodes.push({ ...duplicate, messageId, detail: item.detail });
+              createdNodes.push({ ...duplicate, messageId: finalMessageId, detail: item.detail });
             } else {
               const node: MemoryNode = {
                 id: 'node-' + Math.random().toString(36).substring(2, 10),
@@ -393,8 +434,8 @@ No markdown wrappers, raw JSON only.`;
               await db.memoryNodes.put(node);
               createdNodes.push(node);
 
-              // Connect to previous node if any
-              const updatedNodes = await db.memoryNodes.where('chatId').equals(chatId).toArray();
+              // Connect to previous chronological node if any
+              const updatedNodes = await db.memoryNodes.where('chatId').equals(chatId).sortBy('createdAt');
               if (updatedNodes.length > 1) {
                 const prev = updatedNodes[updatedNodes.length - 2];
                 const edge: MemoryEdge = {
@@ -463,16 +504,17 @@ No markdown wrappers, raw JSON only.`;
   // Check if label already exists
   const candidateLabel = userText.slice(0, 24) + '...';
   const norm = normalizeLabel(candidateLabel);
-  const existingInChat = await db.memoryNodes.where('chatId').equals(chatId).toArray();
+  const existingInChat = await db.memoryNodes.where('chatId').equals(chatId).sortBy('createdAt');
   const duplicate = existingInChat.find((n) => normalizeLabel(n.label) === norm);
 
   let node: MemoryNode;
   if (duplicate) {
+    const finalMessageId = duplicate.messageId || messageId;
     await db.memoryNodes.update(duplicate.id, {
-      messageId: messageId || duplicate.messageId,
+      messageId: finalMessageId,
       createdAt: Date.now(),
     });
-    node = { ...duplicate, messageId };
+    node = { ...duplicate, messageId: finalMessageId };
   } else {
     node = {
       id: 'node-' + Math.random().toString(36).substring(2, 10),

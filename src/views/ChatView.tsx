@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   ArrowLeft,
@@ -197,11 +197,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
   const hasInitialScrolledRef = useRef(false);
   const isLoadingOlderRef = useRef(false);
+  const prevScrollHeightRef = useRef<number>(0);
+  const prevScrollTopRef = useRef<number>(0);
+  const isSmoothScrollingToBottomRef = useRef(false);
 
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
     hasInitialScrolledRef.current = false;
     setShowScrollBottom(false);
+    isSmoothScrollingToBottomRef.current = false;
   }, [currentSessionId]);
 
   const totalMessagesCount = messages.length;
@@ -212,6 +216,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   const scrollToBottom = (smooth = true) => {
     if (chatContainerRef.current) {
+      if (smooth) {
+        isSmoothScrollingToBottomRef.current = true;
+      }
       chatContainerRef.current.scrollTo({
         top: chatContainerRef.current.scrollHeight,
         behavior: smooth ? 'smooth' : 'auto',
@@ -222,12 +229,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
   };
 
   // Immediate jump to bottom when session opens or messages first load
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!hasInitialScrolledRef.current && displayedMessages.length > 0 && chatContainerRef.current) {
       chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
       hasInitialScrolledRef.current = true;
     }
   }, [displayedMessages.length, currentSessionId]);
+
+  // Adjust scroll position synchronously after loading older messages (avoids flicker and multiple triggers)
+  useLayoutEffect(() => {
+    if (isLoadingOlderRef.current && chatContainerRef.current) {
+      const newScrollHeight = chatContainerRef.current.scrollHeight;
+      chatContainerRef.current.scrollTop = newScrollHeight - prevScrollHeightRef.current + prevScrollTopRef.current;
+      isLoadingOlderRef.current = false;
+    }
+  }, [visibleCount]);
 
   // Keep pinned to bottom during generation / new message ONLY if user hasn't scrolled up
   useEffect(() => {
@@ -236,31 +252,34 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   }, [totalMessagesCount, streamingText]);
 
+  const triggerLoadOlderMessages = () => {
+    if (!hasMoreMessages || isLoadingOlderRef.current || !chatContainerRef.current) return;
+    isLoadingOlderRef.current = true;
+    prevScrollHeightRef.current = chatContainerRef.current.scrollHeight;
+    prevScrollTopRef.current = chatContainerRef.current.scrollTop;
+    setVisibleCount((prev) => Math.min(prev + PAGE_SIZE, totalMessagesCount));
+  };
+
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget;
     const { scrollTop, scrollHeight, clientHeight } = target;
 
     // Check if scrolled away from bottom (> 140px)
     const isAway = scrollHeight - scrollTop - clientHeight > 140;
+
+    if (isSmoothScrollingToBottomRef.current) {
+      if (!isAway) {
+        isSmoothScrollingToBottomRef.current = false;
+      }
+      setShowScrollBottom(false);
+      return;
+    }
+
     setShowScrollBottom(isAway);
 
     // Progressive lazy loading when user scrolls near top (< 60px)
     if (scrollTop < 60 && hasMoreMessages && !isLoadingOlderRef.current) {
-      isLoadingOlderRef.current = true;
-      const prevScrollHeight = scrollHeight;
-      const prevScrollTop = scrollTop;
-
-      setVisibleCount((prev) => {
-        const next = Math.min(prev + PAGE_SIZE, totalMessagesCount);
-        requestAnimationFrame(() => {
-          if (chatContainerRef.current) {
-            const newScrollHeight = chatContainerRef.current.scrollHeight;
-            chatContainerRef.current.scrollTop = newScrollHeight - prevScrollHeight + prevScrollTop;
-          }
-          isLoadingOlderRef.current = false;
-        });
-        return next;
-      });
+      triggerLoadOlderMessages();
     }
   };
 
@@ -472,7 +491,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
     // Context sliding window (query fresh messages directly from DB)
     const freshDbMsgs = await db.messages.where('chatId').equals(session.id).sortBy('createdAt');
-    const contextMsgs = freshDbMsgs.slice(-16);
+    let msgsForContext = freshDbMsgs;
+    if (existingBotMsgToVariant) {
+      const targetIdx = freshDbMsgs.findIndex((m) => m.id === existingBotMsgToVariant.id);
+      if (targetIdx !== -1) {
+        msgsForContext = freshDbMsgs.slice(0, targetIdx);
+      }
+    }
+    const contextMsgs = msgsForContext.slice(-16);
 
     // Process raw dialogue turns with clear speaker attribution
     const rawTurns: Array<{ role: 'user' | 'assistant'; text: string; image?: string }> = [];
@@ -746,6 +772,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
+
+    setShowScrollBottom(false);
+    isSmoothScrollingToBottomRef.current = false;
+    requestAnimationFrame(() => {
+      scrollToBottom(false);
+    });
 
     // Trigger bot reply: only in 1-on-1 chat!
     // In group chats, characters ONLY respond when invoked explicitly by the user!
@@ -1025,23 +1057,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <div className="flex justify-center pt-1 pb-2">
             <button
               type="button"
-              onClick={() => {
-                if (isLoadingOlderRef.current) return;
-                isLoadingOlderRef.current = true;
-                const prevScrollHeight = chatContainerRef.current?.scrollHeight || 0;
-                const prevScrollTop = chatContainerRef.current?.scrollTop || 0;
-                setVisibleCount((prev) => {
-                  const next = Math.min(prev + PAGE_SIZE, totalMessagesCount);
-                  requestAnimationFrame(() => {
-                    if (chatContainerRef.current) {
-                      const newScrollHeight = chatContainerRef.current.scrollHeight;
-                      chatContainerRef.current.scrollTop = newScrollHeight - prevScrollHeight + prevScrollTop;
-                    }
-                    isLoadingOlderRef.current = false;
-                  });
-                  return next;
-                });
-              }}
+              onClick={triggerLoadOlderMessages}
               className="px-3.5 py-1.5 rounded-full bg-silk-850/90 hover:bg-silk-800 text-[11px] font-medium text-slate-400 hover:text-violet-300 border border-silk-700/80 transition-colors shadow-sm"
             >
               {t.loadOlderMessages} ({totalMessagesCount - displayedMessages.length})

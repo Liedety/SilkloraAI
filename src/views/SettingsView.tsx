@@ -123,13 +123,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setTimeout(() => setPromptFeedback(null), 2000);
   };
 
+  const handleLoadDefaultPrompt = () => {
+    setCustomPrompt(DEFAULT_CORE_SYSTEM_PROMPT);
+    setPromptFeedback(language === 'ru' ? 'Базовый шаблон загружен в редактор' : 'Default template loaded into editor');
+    setTimeout(() => setPromptFeedback(null), 2000);
+  };
+
   const handleExportPrompt = () => {
     const content = customPrompt || DEFAULT_CORE_SYSTEM_PROMPT;
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const payload = JSON.stringify(
+      {
+        customSystemPrompt: content,
+        customSystemPromptMode: customPromptMode,
+        exportedAt: new Date().toISOString(),
+      },
+      null,
+      2
+    );
+    const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `silklora-system-prompt-${customPromptMode}.txt`;
+    a.download = `silklora-system-prompt-${customPromptMode}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -142,30 +157,40 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
+    reader.onerror = () => {
+      setPromptFeedback(language === 'ru' ? 'Ошибка чтения файла' : 'Failed to read file');
+      setTimeout(() => setPromptFeedback(null), 2500);
+    };
     reader.onload = async (ev) => {
-      const text = ev.target?.result as string;
+      const text = ev.target?.result;
       if (typeof text === 'string') {
+        let contentToUse = text;
+        let modeToUse = customPromptMode;
+
         try {
           const parsed = JSON.parse(text);
-          if (parsed.customSystemPrompt !== undefined) {
-            setCustomPrompt(parsed.customSystemPrompt);
-            const mode = parsed.customSystemPromptMode === 'override' ? 'override' : 'augment';
-            setCustomPromptMode(mode);
-            await db.settings.update('default', {
-              customSystemPrompt: parsed.customSystemPrompt,
-              customSystemPromptMode: mode,
-            });
-            setPromptFeedback(t.promptImported);
-            setTimeout(() => setPromptFeedback(null), 2000);
-            return;
+          if (parsed && typeof parsed === 'object') {
+            if (typeof parsed.customSystemPrompt === 'string') {
+              contentToUse = parsed.customSystemPrompt;
+              if (parsed.customSystemPromptMode === 'override' || parsed.customSystemPromptMode === 'augment') {
+                modeToUse = parsed.customSystemPromptMode;
+              }
+            } else if (typeof parsed.prompt === 'string') {
+              contentToUse = parsed.prompt;
+              if (parsed.mode === 'override' || parsed.mode === 'augment') {
+                modeToUse = parsed.mode;
+              }
+            }
           }
         } catch {
           // Plain text format
         }
-        setCustomPrompt(text);
+
+        setCustomPrompt(contentToUse);
+        setCustomPromptMode(modeToUse);
         await db.settings.update('default', {
-          customSystemPrompt: text,
-          customSystemPromptMode: customPromptMode,
+          customSystemPrompt: contentToUse,
+          customSystemPromptMode: modeToUse,
         });
         setPromptFeedback(t.promptImported);
         setTimeout(() => setPromptFeedback(null), 2000);
@@ -904,6 +929,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               >
                 <RotateCcw className="w-3.5 h-3.5" />
                 <span>{t.resetPromptDefault}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleLoadDefaultPrompt}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-silk-850 hover:bg-silk-800 text-slate-300 hover:text-white rounded-xl text-xs font-medium border border-silk-750 active:scale-95 transition-all"
+                title={t.loadDefaultPrompt}
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>{t.loadDefaultPrompt}</span>
               </button>
             </div>
 

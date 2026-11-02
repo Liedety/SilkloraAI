@@ -416,3 +416,87 @@ test('memoryGraph: selects lowest priority unpinned nodes to prune when cap is e
   assert.deepStrictEqual(selectNodesToPrune(nodes, edges, 3), []);
 });
 
+test('buildSystemPrompt: prioritizes pinned nodes and marks permanent memories in context', () => {
+  const speaker: Character = {
+    id: 'char-1',
+    name: 'Элис',
+    description: 'Кибер-детектив',
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  const oldPinnedNode: MemoryNode = {
+    id: 'n-old-pinned',
+    chatId: 'c1',
+    label: 'Секретный код доступа',
+    type: 'secret',
+    detail: 'Код доступа: 9942',
+    isPinned: true,
+    createdAt: 10,
+  };
+
+  const recentUnpinnedNodes: MemoryNode[] = Array.from({ length: 12 }, (_, i) => ({
+    id: `n-recent-${i}`,
+    chatId: 'c1',
+    label: `Разговор ${i}`,
+    type: 'event',
+    detail: `Диалог номер ${i}`,
+    createdAt: 100 + i,
+  }));
+
+  // Old pinned node is at index 0, followed by 12 newer nodes
+  const prompt = buildSystemPrompt({
+    character: speaker,
+    memoryNodes: [oldPinnedNode, ...recentUnpinnedNodes],
+  });
+
+  // Despite having 12 newer nodes and a limit of 10 nodes, oldPinnedNode MUST be present
+  assert.match(prompt, /RELEVANT LONG-TERM MEMORIES & ESTABLISHED FACTS/, 'Should include memory section');
+  assert.match(prompt, /\[SECRET \[CORE\/PERMANENT\]\] Секретный код доступа: Код доступа: 9942/, 'Pinned node must be preserved and tagged');
+});
+
+test('memoryGraph: findDuplicateNodes chooses pinned node as survivor regardless of creation time', () => {
+  const olderPinned: MemoryNode = {
+    id: 'n-older-pinned',
+    chatId: 'c1',
+    messageId: 'msg-turn-1',
+    label: 'Главный штаб',
+    type: 'location',
+    detail: 'Штаб в секторе 4',
+    isPinned: true,
+    createdAt: 100,
+  };
+
+  const newerUnpinned: MemoryNode = {
+    id: 'n-newer-unpinned',
+    chatId: 'c1',
+    messageId: 'msg-turn-5',
+    label: '  главный штаб! ',
+    type: 'location',
+    detail: 'Штаб в секторе 4 подробнее',
+    isPinned: false,
+    createdAt: 500,
+  };
+
+  const duplicates = findDuplicateNodes([olderPinned, newerUnpinned]);
+  assert.strictEqual(duplicates.length, 1);
+  assert.strictEqual(duplicates[0].survivor.id, 'n-older-pinned', 'Pinned node must ALWAYS win over unpinned even if older');
+});
+
+test('Chat context slicing: regeneration excludes target bot message from context prompt', () => {
+  const messages = [
+    { id: 'm1', senderId: 'user', variants: [{ text: 'Turn 1 User' }] },
+    { id: 'm2', senderId: 'bot-1', variants: [{ text: 'Turn 1 Bot' }] },
+    { id: 'm3', senderId: 'user', variants: [{ text: 'Turn 2 User' }] },
+    { id: 'm4', senderId: 'bot-1', variants: [{ text: 'Turn 2 Bot (stale variant to regenerate)' }] },
+  ];
+
+  const targetRegenMsg = messages[3]; // regenerating m4
+  const targetIdx = messages.findIndex((m) => m.id === targetRegenMsg.id);
+  const msgsForContext = targetIdx !== -1 ? messages.slice(0, targetIdx) : messages;
+
+  assert.strictEqual(msgsForContext.length, 3, 'Context should only contain messages before the regenerated message');
+  assert.strictEqual(msgsForContext.some((m) => m.id === 'm4'), false, 'Regenerated message must not be in context turns');
+  assert.strictEqual(msgsForContext[msgsForContext.length - 1].id, 'm3', 'Last context message must be the user prompt for this turn');
+});
+

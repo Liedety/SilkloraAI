@@ -172,8 +172,14 @@ Example:
   // Memory Graph Injections
   if (memoryNodes.length > 0) {
     prompt += `\n### RELEVANT LONG-TERM MEMORIES & ESTABLISHED FACTS:\n`;
-    for (const node of memoryNodes.slice(-10)) {
-      prompt += `- [${node.type.toUpperCase()}] ${node.label}: ${node.detail}\n`;
+    const sortedNodes = [...memoryNodes].sort((a, b) => {
+      if (a.isPinned && !b.isPinned) return -1;
+      if (!a.isPinned && b.isPinned) return 1;
+      return b.createdAt - a.createdAt;
+    });
+    for (const node of sortedNodes.slice(0, 10)) {
+      const pinTag = node.isPinned ? ' [CORE/PERMANENT]' : '';
+      prompt += `- [${node.type.toUpperCase()}${pinTag}] ${node.label}: ${node.detail}\n`;
     }
     prompt += `Maintain consistency with these established facts.\n`;
   }
