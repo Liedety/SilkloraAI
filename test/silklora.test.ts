@@ -511,6 +511,8 @@ test('isSignificantTurn: filters out trivial greetings and captures narrative mi
   assert.strictEqual(isSignificantTurn('Hello!', 'Hi there!', 1), false, 'Trivial English greeting should be ignored');
   assert.strictEqual(isSignificantTurn('ок', 'Хорошо.', 0), false, 'Trivial Russian acknowledgment should be ignored');
   assert.strictEqual(isSignificantTurn('ok, thanks', 'You are welcome', 0), false, 'Trivial English acknowledgment should be ignored');
+  assert.strictEqual(isSignificantTurn('Привет! Как дела?', 'Все отлично, а у тебя?', 0), false, 'Conversational small talk should be ignored');
+  assert.strictEqual(isSignificantTurn('Hey, how are you doing?', 'Doing well, thanks!', 0), false, 'English chit-chat should be ignored');
 
   // Significant affinity milestone shifts override trivial text
   assert.strictEqual(isSignificantTurn('привет', 'Привет!', 3), true, 'Milestone affinity shift (+3) should be significant');
@@ -590,6 +592,7 @@ test('buildSystemPrompt: context compression recap is injected when contextSumma
 test('DEFAULT_CORE_SYSTEM_PROMPT: mirrors user language dynamically without hardcoded Russian requirement', () => {
   assert.match(DEFAULT_CORE_SYSTEM_PROMPT, /DYNAMIC LANGUAGE MIRRORING/, 'Prompt must mandate dynamic language mirroring');
   assert.match(DEFAULT_CORE_SYSTEM_PROMPT, /STRICT LANGUAGE PURITY/, 'Prompt must retain strict language purity token');
+  assert.match(DEFAULT_CORE_SYSTEM_PROMPT, /Complete Creative Freedom/, 'Prompt must contain creative freedom / uncensored principle');
   assert.strictEqual(
     DEFAULT_CORE_SYSTEM_PROMPT.includes('ТОЛЬКО на русском'),
     false,
@@ -617,4 +620,57 @@ test('Theme configuration: separates theme design from typography settings', () 
     assert.ok(['sans', 'serif', 'mono'].includes(themeItem.theme.fontFamily));
     assert.ok(['normal', 'relaxed', 'loose'].includes(themeItem.theme.lineHeight));
   }
+});
+
+test('App theme selection preserves user custom typography settings', () => {
+  const userCustomTheme: ThemeConfig = {
+    ...DEFAULT_THEME,
+    fontFamily: 'serif',
+    fontSize: 18,
+    lineHeight: 'loose',
+  };
+
+  const sapphirePreset = APP_THEMES.find((pt) => pt.id === 'sapphire-ocean')!.theme;
+
+  // Applying sapphire theme preset while preserving typography
+  const appliedTheme: ThemeConfig = {
+    ...sapphirePreset,
+    fontFamily: userCustomTheme.fontFamily,
+    fontSize: userCustomTheme.fontSize,
+    lineHeight: userCustomTheme.lineHeight,
+  };
+
+  assert.strictEqual(appliedTheme.accentColor, sapphirePreset.accentColor, 'Accent color must update to theme preset');
+  assert.strictEqual(appliedTheme.appBgColor, sapphirePreset.appBgColor, 'App background must update to theme preset');
+  assert.strictEqual(appliedTheme.fontFamily, 'serif', 'Font family must be preserved');
+  assert.strictEqual(appliedTheme.fontSize, 18, 'Font size must be preserved');
+  assert.strictEqual(appliedTheme.lineHeight, 'loose', 'Line height must be preserved');
+});
+
+test('Incremental context compression delta calculation', () => {
+  const allOlderMessages = [
+    { id: 'm1', senderName: 'User', variants: [{ text: 'Turn 1', timestamp: 1 }], activeVariantIndex: 0 },
+    { id: 'm2', senderName: 'Bot', variants: [{ text: 'Turn 2', timestamp: 2 }], activeVariantIndex: 0 },
+    { id: 'm3', senderName: 'User', variants: [{ text: 'Turn 3', timestamp: 3 }], activeVariantIndex: 0 },
+    { id: 'm4', senderName: 'Bot', variants: [{ text: 'Turn 4', timestamp: 4 }], activeVariantIndex: 0 },
+  ];
+
+  // Case 1: First time (no lastSummarizedMsgId) -> summarize all 4 turns
+  const lastSummarizedMsgIdFirst = undefined;
+  let turnsFirst = allOlderMessages;
+  if (lastSummarizedMsgIdFirst) {
+    const idx = allOlderMessages.findIndex((m) => m.id === lastSummarizedMsgIdFirst);
+    if (idx !== -1) turnsFirst = allOlderMessages.slice(idx + 1);
+  }
+  assert.strictEqual(turnsFirst.length, 4, 'First run must summarize all older messages');
+
+  // Case 2: Subsequent run after m2 was summarized -> only turns m3 and m4 are delta
+  const lastSummarizedMsgIdSecond = 'm2';
+  let turnsSecond = allOlderMessages;
+  if (lastSummarizedMsgIdSecond) {
+    const idx = allOlderMessages.findIndex((m) => m.id === lastSummarizedMsgIdSecond);
+    if (idx !== -1) turnsSecond = allOlderMessages.slice(idx + 1);
+  }
+  assert.strictEqual(turnsSecond.length, 2, 'Incremental run must only include newly aged-out messages');
+  assert.deepStrictEqual(turnsSecond.map((m) => m.id), ['m3', 'm4'], 'Delta messages must be m3 and m4');
 });

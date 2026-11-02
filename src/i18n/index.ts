@@ -218,7 +218,7 @@ export const translations = {
     searchVisionPlaceholder: 'Search vision models by name or ID...',
     fetchVisionModels: 'Fetch Vision Models',
 
-    sectionStyles: 'Text & RP Styles',
+    sectionStyles: 'Roleplay Narrative Styles',
     createStyle: 'New Custom Style',
     editStyle: 'Edit Style',
     styleName: 'Style Name',
@@ -513,7 +513,7 @@ export const translations = {
     searchVisionPlaceholder: 'Поиск vision-моделей по имени или ID...',
     fetchVisionModels: 'Обновить список Vision-моделей',
 
-    sectionStyles: 'Стили текста RP',
+    sectionStyles: 'Стили ролевого отыгрыша (RP)',
     createStyle: 'Создать свой стиль',
     editStyle: 'Редактировать стиль',
     styleName: 'Название стиля',

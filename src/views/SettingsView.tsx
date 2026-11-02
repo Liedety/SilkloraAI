@@ -112,6 +112,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleUploadPromptFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (file.size > 1024 * 1024) {
+      alert(language === 'ru' ? 'Файл слишком большой (максимум 1 МБ)' : 'File is too large (maximum 1 MB)');
+      e.target.value = '';
+      return;
+    }
+
     const reader = new FileReader();
     reader.onerror = () => {
       setPromptFeedback(language === 'ru' ? 'Ошибка чтения файла' : 'Failed to read file');
@@ -163,6 +170,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleUpdateTheme = async (updates: Partial<ThemeConfig>) => {
     if (!settings) return;
     const updatedTheme = { ...currentTheme, ...updates };
+    await db.settings.update('default', { theme: updatedTheme });
+  };
+
+  // Select App Theme preset while strictly preserving user's typography settings (font family, size, line height)
+  const handleSelectAppTheme = async (themePreset: ThemeConfig) => {
+    if (!settings) return;
+    const current = currentTheme;
+    const updatedTheme: ThemeConfig = {
+      ...themePreset,
+      fontSize: current.fontSize,
+      fontFamily: current.fontFamily,
+      lineHeight: current.lineHeight,
+    };
     await db.settings.update('default', { theme: updatedTheme });
   };
 
@@ -819,40 +839,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             )}
           </div>
 
-          <p className="text-[11px] text-slate-400 leading-relaxed">
-            {t.sectionSystemPromptDesc}
-          </p>
-
-          {/* Standard .txt File Representation Card */}
-          <div className="p-3 bg-silk-950 rounded-xl border border-silk-800 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="w-10 h-10 rounded-xl bg-violet-600/20 border border-violet-500/40 flex items-center justify-center shrink-0">
-                <FileText className="w-5 h-5 text-violet-400" />
+          {/* Standard .txt File Viewer with Base Censorship Bypass Template */}
+          <div className="rounded-xl border border-silk-750 bg-silk-950 overflow-hidden shadow-inner">
+            <div className="px-3 py-2 bg-silk-900/90 border-b border-silk-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <FileText className="w-3.5 h-3.5 text-violet-400" />
+                <span className="text-xs font-mono font-medium text-slate-200">silklora-system-prompt.txt</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 font-mono">
+                  {customPrompt ? (language === 'ru' ? 'пользовательский' : 'custom') : (language === 'ru' ? 'базовый' : 'standard')}
+                </span>
               </div>
-              <div className="min-w-0">
-                <div className="text-xs font-semibold text-white flex items-center gap-1.5 truncate">
-                  <span>silklora-system-prompt.txt</span>
-                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 font-mono">
-                    {customPrompt ? (language === 'ru' ? 'пользовательский' : 'custom') : (language === 'ru' ? 'базовый' : 'standard')}
-                  </span>
-                </div>
-                <p className="text-[11px] text-slate-400 truncate mt-0.5">
-                  {customPrompt ? t.customPromptActiveBadge : t.basePromptTxtBadge}
-                </p>
-              </div>
+              {customPrompt && (
+                <button
+                  type="button"
+                  onClick={handleResetPromptToDefault}
+                  className="px-2 py-0.5 text-[10px] text-slate-400 hover:text-white bg-silk-850 hover:bg-silk-800 rounded border border-silk-750 transition-all flex items-center gap-1"
+                  title={t.resetToDefaultPrompt}
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>{language === 'ru' ? 'Вернуть базовый' : 'Reset'}</span>
+                </button>
+              )}
             </div>
-
-            {customPrompt && (
-              <button
-                type="button"
-                onClick={handleResetPromptToDefault}
-                className="px-2.5 py-1 text-[11px] text-slate-400 hover:text-white bg-silk-850 hover:bg-silk-800 rounded-lg border border-silk-750 shrink-0 ml-2 transition-all flex items-center gap-1"
-                title={t.resetToDefaultPrompt}
-              >
-                <RotateCcw className="w-3 h-3" />
-                <span>{language === 'ru' ? 'Сбросить' : 'Reset'}</span>
-              </button>
-            )}
+            <div className="p-3 max-h-40 overflow-y-auto text-[11px] font-mono text-slate-300 whitespace-pre-wrap leading-relaxed select-text select-all">
+              {customPrompt || DEFAULT_CORE_SYSTEM_PROMPT}
+            </div>
           </div>
 
           {/* Download & Upload Buttons */}
@@ -897,7 +908,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               return (
                 <button
                   key={pt.id}
-                  onClick={() => handleUpdateTheme(pt.theme)}
+                  onClick={() => handleSelectAppTheme(pt.theme)}
                   type="button"
                   className={`p-2.5 rounded-xl border text-left transition-all ${
                     isSelected

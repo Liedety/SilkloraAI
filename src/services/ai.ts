@@ -770,13 +770,17 @@ Provide a clear, atmospheric 2-3 paragraph summary of:
 3. Active conflicts or unspoken intentions.
 Respond in English.`;
 
+  const userContent = isRu
+    ? `Диалог и события сцены для составления сводки:\n\n${recentHistory}\n\nСоставь выразительную сводку на русском языке.`
+    : `Scene dialogue and events to summarize:\n\n${recentHistory}\n\nProvide the scene summary in English.`;
+
   let out = '';
   await streamChatCompletion({
     apiKeyConfig,
     model: model || 'deepseek/deepseek-chat',
     messages: [
       { role: 'system', content: system },
-      { role: 'user', content: recentHistory },
+      { role: 'user', content: userContent },
     ],
     temperature: 0.7,
     onToken: (t) => { out += t; },

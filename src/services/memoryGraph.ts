@@ -259,10 +259,12 @@ export function isSignificantTurn(userText: string, botText: string, affinityDel
   const trimmedUser = userText.trim();
   if (!trimmedUser) return false;
 
-  // Trivial everyday greetings or short affirmations/acknowledgments
+  // Trivial everyday greetings or short affirmations/acknowledgments/chit-chat
   const isTrivial =
     /^(?:привет|здравствуй(?:те)?|добрый (?:день|вечер|утро)|хай|ку|салют|hello|hi|hey|howdy|sup|good (?:morning|evening|day))[\s.!?,]*$/i.test(trimmedUser) ||
-    /^(?:да|нет|ок|окей|хорошо|ладно|понял|понятно|ясно|ага|угу|спасибо|yes|no|ok|okay|sure|fine|yep|nope|thanks|thank you)[\s.!?,]*$/i.test(trimmedUser);
+    /^(?:да|нет|ок|окей|хорошо|ладно|понял|понятно|ясно|ага|угу|спасибо|yes|no|ok|okay|sure|fine|yep|nope|thanks|thank you)[\s.!?,]*$/i.test(trimmedUser) ||
+    /^(?:как дела|как твои дела|как поживаешь|что делаешь|что новенького|how are you|how is it going|how are things|what are you doing|what's up)[\s.!?]*$/i.test(trimmedUser) ||
+    /^(?:привет|здравствуй|хай|hello|hi)[\s\S]{0,25}(?:как (?:дела|ты|поживаешь)|how are you|how'?s it going)[\s.!?]*$/i.test(trimmedUser);
 
   if (isTrivial && Math.abs(affinityDelta) < 3) {
     return false;
@@ -369,6 +371,12 @@ export async function extractMemoryAndAffinity(
   const botText = targetBotMsg.variants[targetBotMsg.activeVariantIndex]?.text || '';
   const isDialogueRu = /[а-яА-ЯёЁ]/.test(userText + botText);
 
+  // Fast-path: if this turn is completely trivial small talk with 0 affinity delta,
+  // skip memory extraction entirely to avoid polluting memory or wasting tokens.
+  if (!isSignificantTurn(userText, botText, 0) && userText.trim().length < 60) {
+    return { newAffinity: currentAffinity, newNodes: [] };
+  }
+
   // If API key is available, use LLM to extract accurate memory node & affinity delta
   if (apiKeyConfig && apiKeyConfig.key.trim()) {
     let rawResponse = '';
@@ -449,7 +457,8 @@ No markdown wrappers, raw JSON only.`;
       const newAffinity = Math.max(-100, Math.min(100, currentAffinity + delta));
 
       const createdNodes: MemoryNode[] = [];
-      if (Array.isArray(parsed.nodes)) {
+      const isSignificant = isSignificantTurn(userText, botText, delta);
+      if (isSignificant && Array.isArray(parsed.nodes)) {
         for (const item of parsed.nodes) {
           if (item.label && item.detail) {
             const norm = normalizeLabel(item.label);
