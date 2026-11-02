@@ -89,6 +89,7 @@ export interface ChatSession {
 export interface MemoryNode {
   id: string;
   chatId: string;
+  messageId?: string; // Associated bot message ID for turn tracking
   label: string;
   type: 'event' | 'relationship' | 'fact' | 'location' | 'secret';
   detail: string;
@@ -157,4 +158,6 @@ export interface AppSettings {
   textStyleId: string;
   theme: ThemeConfig;
   contextWindowSize: number;
+  customSystemPrompt?: string;
+  customSystemPromptMode?: 'override' | 'augment';
 }

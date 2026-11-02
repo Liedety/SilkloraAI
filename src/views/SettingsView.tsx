@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   Key,
@@ -14,6 +14,10 @@ import {
   Edit2,
   X,
   Search,
+  FileText,
+  Download,
+  Upload,
+  RotateCcw,
 } from 'lucide-react';
 import { db, DEFAULT_THEME, APP_THEMES } from '../db';
 import type {
@@ -26,6 +30,7 @@ import type {
 } from '../types';
 import { translations } from '../i18n';
 import { fetchAvailableModels, fetchVisionModels } from '../services/ai';
+import { DEFAULT_CORE_SYSTEM_PROMPT } from '../services/promptBuilder';
 import { ChatPreviewCard } from '../components/ChatPreviewCard';
 
 interface SettingsViewProps {
@@ -77,6 +82,98 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [styleName, setStyleName] = useState('');
   const [styleDesc, setStyleDesc] = useState('');
   const [styleInstruction, setStyleInstruction] = useState('');
+
+  // System Prompt Customization State
+  const [customPrompt, setCustomPrompt] = useState(settings?.customSystemPrompt ?? '');
+  const [customPromptMode, setCustomPromptMode] = useState<'override' | 'augment'>(
+    settings?.customSystemPromptMode ?? 'augment'
+  );
+  const [isPromptSaved, setIsPromptSaved] = useState(false);
+  const [promptFeedback, setPromptFeedback] = useState<string | null>(null);
+  const promptFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (settings) {
+      setCustomPrompt(settings.customSystemPrompt || '');
+      setCustomPromptMode(settings.customSystemPromptMode || 'augment');
+    }
+  }, [settings?.customSystemPrompt, settings?.customSystemPromptMode]);
+
+  const handleSavePrompt = async () => {
+    await db.settings.update('default', {
+      customSystemPrompt: customPrompt,
+      customSystemPromptMode: customPromptMode,
+    });
+    setIsPromptSaved(true);
+    setPromptFeedback(t.saveSuccessful);
+    setTimeout(() => {
+      setIsPromptSaved(false);
+      setPromptFeedback(null);
+    }, 2000);
+  };
+
+  const handleResetPrompt = async () => {
+    setCustomPrompt('');
+    setCustomPromptMode('augment');
+    await db.settings.update('default', {
+      customSystemPrompt: '',
+      customSystemPromptMode: 'augment',
+    });
+    setPromptFeedback(t.promptResetSuccess);
+    setTimeout(() => setPromptFeedback(null), 2000);
+  };
+
+  const handleExportPrompt = () => {
+    const content = customPrompt || DEFAULT_CORE_SYSTEM_PROMPT;
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `silklora-system-prompt-${customPromptMode}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setPromptFeedback(t.promptExported);
+    setTimeout(() => setPromptFeedback(null), 2000);
+  };
+
+  const handleImportPromptFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      const text = ev.target?.result as string;
+      if (typeof text === 'string') {
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed.customSystemPrompt !== undefined) {
+            setCustomPrompt(parsed.customSystemPrompt);
+            const mode = parsed.customSystemPromptMode === 'override' ? 'override' : 'augment';
+            setCustomPromptMode(mode);
+            await db.settings.update('default', {
+              customSystemPrompt: parsed.customSystemPrompt,
+              customSystemPromptMode: mode,
+            });
+            setPromptFeedback(t.promptImported);
+            setTimeout(() => setPromptFeedback(null), 2000);
+            return;
+          }
+        } catch {
+          // Plain text format
+        }
+        setCustomPrompt(text);
+        await db.settings.update('default', {
+          customSystemPrompt: text,
+          customSystemPromptMode: customPromptMode,
+        });
+        setPromptFeedback(t.promptImported);
+        setTimeout(() => setPromptFeedback(null), 2000);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
 
   // Theme settings local state
   const currentTheme = settings?.theme || DEFAULT_THEME;
@@ -724,7 +821,119 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
-        {/* 6. Application Theme & Palette */}
+        {/* 6. System Prompt Template */}
+        <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+              <FileText className="w-4 h-4 text-violet-400" />
+              <span>{t.sectionSystemPrompt}</span>
+            </div>
+            {promptFeedback && (
+              <span className="text-[11px] font-medium text-emerald-400 animate-fade-in flex items-center gap-1">
+                <Check className="w-3.5 h-3.5" />
+                <span>{promptFeedback}</span>
+              </span>
+            )}
+          </div>
+
+          <p className="text-[11px] text-slate-400 leading-relaxed">
+            {t.sectionSystemPromptDesc}
+          </p>
+
+          {/* Mode Selector */}
+          <div className="flex items-center gap-2 pt-1">
+            <span className="text-xs text-slate-400 font-medium">{t.promptModeLabel}:</span>
+            <div className="flex bg-silk-950 p-0.5 rounded-xl border border-silk-800">
+              <button
+                type="button"
+                onClick={() => setCustomPromptMode('augment')}
+                className={`px-3 py-1 rounded-lg text-xs font-medium transition-all ${
+                  customPromptMode === 'augment'
+                    ? 'bg-violet-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                {t.promptModeAugment}
+              </button>
+              <button
+                type="button"
+                onClick={() => setCustomPromptMode('override')}
+                className={`px-3 py-1 rounded-lg text-xs font-medium transition-all ${
+                  customPromptMode === 'override'
+                    ? 'bg-rose-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                {t.promptModeOverride}
+              </button>
+            </div>
+          </div>
+
+          {/* Prompt Editor */}
+          <div className="space-y-1.5">
+            <textarea
+              rows={8}
+              value={customPrompt}
+              onChange={(e) => setCustomPrompt(e.target.value)}
+              placeholder={customPromptMode === 'override' ? DEFAULT_CORE_SYSTEM_PROMPT : t.promptTemplatePlaceholder}
+              className="w-full p-3 bg-silk-950 border border-silk-700/80 rounded-xl text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-violet-500 leading-relaxed resize-y"
+            />
+            <div className="flex items-center justify-between text-[10px] text-slate-500 px-1">
+              <span>{language === 'ru' ? 'Переменные: {{char}} — персонаж, {{user}} — игрок' : 'Placeholders: {{char}} = Character, {{user}} = User'}</span>
+              <span>{customPrompt.length} chars</span>
+            </div>
+          </div>
+
+          {/* Action Buttons: Save, Reset, Export, Import */}
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSavePrompt}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-md active:scale-95 transition-all"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>{t.savePrompt}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleResetPrompt}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-silk-850 hover:bg-silk-800 text-slate-300 hover:text-white rounded-xl text-xs font-medium border border-silk-750 active:scale-95 transition-all"
+                title={t.resetPromptDefault}
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>{t.resetPromptDefault}</span>
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleExportPrompt}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 bg-silk-850 hover:bg-silk-800 text-slate-300 hover:text-white rounded-xl text-xs font-medium border border-silk-750 active:scale-95 transition-all"
+                title={t.exportPrompt}
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>{t.exportPrompt}</span>
+              </button>
+
+              <label className="flex items-center gap-1.5 px-2.5 py-1.5 bg-silk-850 hover:bg-silk-800 text-slate-300 hover:text-white rounded-xl text-xs font-medium border border-silk-750 cursor-pointer active:scale-95 transition-all">
+                <Upload className="w-3.5 h-3.5" />
+                <span>{t.importPrompt}</span>
+                <input
+                  ref={promptFileInputRef}
+                  type="file"
+                  accept=".txt,.json"
+                  onChange={handleImportPromptFile}
+                  className="hidden"
+                />
+              </label>
+            </div>
+          </div>
+        </div>
+
+        {/* 7. Application Theme & Palette */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4">
           <div>
             <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">

@@ -246,6 +246,23 @@ export const translations = {
     fontSize: 'Font Size',
     backgroundTint: 'Background Dimming',
     liveChatPreview: 'Live Chat Preview',
+    // System Prompt Template
+    sectionSystemPrompt: 'System Prompt Template',
+    sectionSystemPromptDesc: 'Customize or augment the core AI system prompt instructions, dialogue rules, and character behavior.',
+    promptModeLabel: 'Application Mode',
+    promptModeAugment: 'Augment Default Prompt',
+    promptModeOverride: 'Override Core Prompt',
+    promptTemplatePlaceholder: 'Enter custom system prompt directives...\nAvailable placeholders: {{char}} = character name, {{user}} = user persona name',
+    savePrompt: 'Save Template',
+    resetPromptDefault: 'Reset to Default',
+    exportPrompt: 'Export Template',
+    importPrompt: 'Import Template',
+    promptExported: 'Prompt exported successfully',
+    promptImported: 'Prompt imported successfully',
+    promptResetSuccess: 'System prompt reset to default',
+    scrollToBottomLabel: 'To latest message',
+    loadOlderMessages: 'Load older messages',
+    loadingOlderMessages: 'Loading older messages...',
 
     // Common
     save: 'Save Changes',
@@ -503,6 +520,24 @@ export const translations = {
     fontSize: 'Размер шрифта',
     backgroundTint: 'Затемнение фона',
     liveChatPreview: 'Живое превью чата',
+
+    // System Prompt Template
+    sectionSystemPrompt: 'Шаблон системного промпта',
+    sectionSystemPromptDesc: 'Настройка или дополнение базовых системных инструкций ИИ, правил диалога и поведения персонажей.',
+    promptModeLabel: 'Режим применения',
+    promptModeAugment: 'Дополнить базовый промпт',
+    promptModeOverride: 'Переопределить базовый промпт',
+    promptTemplatePlaceholder: 'Введите дополнительные инструкции системного промпта...\nДоступные переменные: {{char}} = имя персонажа, {{user}} = персона пользователя',
+    savePrompt: 'Сохранить шаблон',
+    resetPromptDefault: 'Сбросить к базовому',
+    exportPrompt: 'Экспорт шаблона',
+    importPrompt: 'Импорт шаблона',
+    promptExported: 'Промпт успешно экспортирован',
+    promptImported: 'Промпт успешно импортирован',
+    promptResetSuccess: 'Системный промпт сброшен к базовому',
+    scrollToBottomLabel: 'К последнему сообщению',
+    loadOlderMessages: 'Загрузить предыдущие сообщения',
+    loadingOlderMessages: 'Загрузка предыдущих сообщений...',
 
     // Common
     save: 'Сохранить',

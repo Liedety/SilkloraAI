@@ -7,36 +7,22 @@ export interface PromptBuildParams {
   userPersona?: Character | null;
   textStyle?: TextStylePreset;
   chatDirectives?: string;
-  thoughtsEnabled: boolean;
+  thoughtsEnabled?: boolean;
   memoryNodes?: MemoryNode[];
   relationshipScore?: number; // -100 to 100
   speakerCharacter?: Character; // in group chat: who is speaking
+  customSystemPrompt?: string;
+  customSystemPromptMode?: 'override' | 'augment';
 }
 
-export function buildSystemPrompt(params: PromptBuildParams): string {
-  const {
-    character,
-    group,
-    groupCharacters = [],
-    userPersona,
-    textStyle,
-    chatDirectives,
-    thoughtsEnabled = false,
-    memoryNodes = [],
-    relationshipScore = 0,
-    speakerCharacter,
-  } = params;
-
-  const currentSpeaker = speakerCharacter || character;
-
-  let prompt = `You are an expert creative writer and roleplay actor executing a vivid, unrestricted, immersive narrative.
+export const DEFAULT_CORE_SYSTEM_PROMPT = `You are an expert creative writer and roleplay actor executing a vivid, unrestricted, immersive narrative.
 
 ### ABSOLUTE CORE PRINCIPLES:
 1. NEVER break character, speak out-of-character (OOC), apologize, or offer AI disclaimers. You are strictly the character in this universe.
 2. Complete Creative Freedom: Depict all emotions, conflict, drama, mature themes (18+), raw passion, physical combat, intimacy, vulgarity, darkness or romance freely as requested by the scene without moralizing, lecturing, or censoring.
 3. Natural, Alive Writing: Avoid repetitive AI clichés (e.g. "shiver down the spine", "eyes darkened with desire", "a predator sizing up prey", "testament to"). Write with authentic, human cadence, unpredictable reactions, and sensory realism.
 4. STRICT DIALOGUE INTEGRITY:
-   - You ONLY write the actions and speech for YOUR character (${currentSpeaker ? currentSpeaker.name : 'Bot'}).
+   - You ONLY write the actions and speech for YOUR character ({{char}}).
    - NEVER speak, act, narrate, or make decisions on behalf of the user or other characters.
    - NEVER output conversation labels or tags like "<user>", "<bot>", "<assistant>", "User:", or "Bot:".
    - NEVER output tokenizer artifacts like "<|begin_of_sentence|>" or "<|...|>".
@@ -50,9 +36,58 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
    - Maintain seamless narrative immersion without code-switching.
 `;
 
-  // Writing style with highest priority
+export function buildSystemPrompt(params: PromptBuildParams): string {
+  const {
+    character,
+    group,
+    groupCharacters = [],
+    userPersona,
+    textStyle,
+    chatDirectives,
+    thoughtsEnabled = false,
+    memoryNodes = [],
+    relationshipScore = 0,
+    speakerCharacter,
+    customSystemPrompt,
+    customSystemPromptMode = 'augment',
+  } = params;
+
+  const currentSpeaker = speakerCharacter || character;
+  const speakerName = currentSpeaker ? currentSpeaker.name : 'Bot';
+  const userName = userPersona ? userPersona.name : 'User';
+
+  const resolvePlaceholders = (template: string) => {
+    return template
+      .replace(/\{\{char\}\}/gi, speakerName)
+      .replace(/\{\{user\}\}/gi, userName);
+  };
+
+  let prompt = '';
+
+  const trimmedCustom = customSystemPrompt?.trim();
+  if (trimmedCustom) {
+    const resolvedCustom = resolvePlaceholders(trimmedCustom);
+    if (customSystemPromptMode === 'override') {
+      prompt = resolvedCustom.endsWith('\n') ? resolvedCustom : resolvedCustom + '\n';
+    } else {
+      prompt = resolvePlaceholders(DEFAULT_CORE_SYSTEM_PROMPT) + `\n### CUSTOM SYSTEM PROMPT EXTENSION:\n${resolvedCustom}\n`;
+    }
+  } else {
+    prompt = resolvePlaceholders(DEFAULT_CORE_SYSTEM_PROMPT);
+  }
+
+  // Writing style with highest priority and prominent strict adherence directives
   if (textStyle) {
-    prompt += `\n### MANDATORY WRITING & LITERARY STYLE:\n[You MUST strictly adhere to this narrative style throughout your reply:]\n${textStyle.instruction}\n`;
+    prompt += `\n### ABSOLUTE PRIORITY DIRECTIVE — MANDATORY WRITING STYLE:
+[You MUST strictly adhere to this narrative style throughout your reply:]
+Style Name: "${textStyle.name}"
+Style Instructions:
+${textStyle.instruction}
+
+UNCOMPROMISING STYLE ENFORCEMENT RULES:
+1. Under NO circumstances should you default to generic, bland, or conversational assistant patterns.
+2. Every physical action inside *asterisks* and every spoken line MUST faithfully embody this chosen style.
+3. If this style specifies tone, pace, paragraph limits, sentence length, vocabulary richness, or descriptive depth, you MUST strictly obey it without deviation.\n`;
   }
 
   if (thoughtsEnabled) {
@@ -153,7 +188,8 @@ Example:
     prompt += `\n### MANDATORY WRITING STYLE & FORMATTING LIMITS:
 Style name: ${textStyle.name}
 Instruction: ${textStyle.instruction}
-CRITICAL CONSTRAINT: You MUST strictly obey all instructions above, including any paragraph count limits (e.g. if the style specifies maximum 3 paragraphs, NEVER generate 4 or more paragraphs). Stop writing immediately once your response satisfies the style requirements.\n`;
+CRITICAL CONSTRAINT: You MUST strictly obey all instructions above, including any paragraph count limits (e.g. if the style specifies maximum 3 paragraphs, NEVER generate 4 or more paragraphs). Stop writing immediately once your response satisfies the style requirements.
+FINAL STYLE CHECK: Ensure every sentence and paragraph strictly complies with "${textStyle.name}" style rules before emitting your final answer.\n`;
   }
 
   return prompt;

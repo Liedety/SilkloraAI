@@ -20,6 +20,7 @@ import {
   EyeOff,
   CornerDownRight,
   Smile,
+  ArrowDown,
 } from 'lucide-react';
 import { db, DEFAULT_THEME } from '../db';
 import type {
@@ -189,13 +190,79 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const currentTheme = settings?.theme || DEFAULT_THEME;
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  // Pagination & Scroll navigation state
+  const PAGE_SIZE = 25;
+  const [visibleCount, setVisibleCount] = useState<number>(PAGE_SIZE);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
+  const chatContainerRef = useRef<HTMLDivElement | null>(null);
+  const hasInitialScrolledRef = useRef(false);
+  const isLoadingOlderRef = useRef(false);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages, streamingText]);
+    setVisibleCount(PAGE_SIZE);
+    hasInitialScrolledRef.current = false;
+    setShowScrollBottom(false);
+  }, [currentSessionId]);
+
+  const totalMessagesCount = messages.length;
+  const hasMoreMessages = totalMessagesCount > visibleCount;
+  const displayedMessages = hasMoreMessages
+    ? messages.slice(totalMessagesCount - visibleCount)
+    : messages;
+
+  const scrollToBottom = (smooth = true) => {
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollTo({
+        top: chatContainerRef.current.scrollHeight,
+        behavior: smooth ? 'smooth' : 'auto',
+      });
+    } else {
+      messagesEndRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto' });
+    }
+  };
+
+  // Immediate jump to bottom when session opens or messages first load
+  useEffect(() => {
+    if (!hasInitialScrolledRef.current && displayedMessages.length > 0 && chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+      hasInitialScrolledRef.current = true;
+    }
+  }, [displayedMessages.length, currentSessionId]);
+
+  // Keep pinned to bottom during generation / new message ONLY if user hasn't scrolled up
+  useEffect(() => {
+    if (hasInitialScrolledRef.current && !showScrollBottom && chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+    }
+  }, [totalMessagesCount, streamingText]);
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const target = e.currentTarget;
+    const { scrollTop, scrollHeight, clientHeight } = target;
+
+    // Check if scrolled away from bottom (> 140px)
+    const isAway = scrollHeight - scrollTop - clientHeight > 140;
+    setShowScrollBottom(isAway);
+
+    // Progressive lazy loading when user scrolls near top (< 60px)
+    if (scrollTop < 60 && hasMoreMessages && !isLoadingOlderRef.current) {
+      isLoadingOlderRef.current = true;
+      const prevScrollHeight = scrollHeight;
+      const prevScrollTop = scrollTop;
+
+      setVisibleCount((prev) => {
+        const next = Math.min(prev + PAGE_SIZE, totalMessagesCount);
+        requestAnimationFrame(() => {
+          if (chatContainerRef.current) {
+            const newScrollHeight = chatContainerRef.current.scrollHeight;
+            chatContainerRef.current.scrollTop = newScrollHeight - prevScrollHeight + prevScrollTop;
+          }
+          isLoadingOlderRef.current = false;
+        });
+        return next;
+      });
+    }
+  };
 
   const adjustTextareaHeight = () => {
     if (textareaRef.current) {
@@ -375,7 +442,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const affinity = session.relationships?.[speaker.id] || 0;
 
     // Query fresh settings & text style from database
-    const freshSettings = await db.settings.get('app_settings');
+    const freshSettings = await db.settings.get('default');
     const styleId = session.textStyleId || freshSettings?.textStyleId || 'literary';
     const textStyleToUse = (await db.textStyles.get(styleId)) || activeStyle;
 
@@ -392,6 +459,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
       memoryNodes,
       relationshipScore: affinity,
       speakerCharacter: speaker,
+      customSystemPrompt: freshSettings?.customSystemPrompt,
+      customSystemPromptMode: freshSettings?.customSystemPromptMode,
     });
 
     if (guidancePrompt && guidancePrompt.trim()) {
@@ -611,6 +680,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
         await db.chats.update(session.id, { updatedAt: Date.now() });
 
+        const targetTurnMsgId = existingBotMsgToVariant
+          ? existingBotMsgToVariant.id
+          : updatedMsgList[updatedMsgList.length - 1]?.id;
+
         // Run automated memory graph extraction and affinity change in background with fresh DB messages
         const freshHistory = await db.messages.where('chatId').equals(session.id).sortBy('createdAt');
         extractMemoryAndAffinity(
@@ -619,7 +692,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
           affinity,
           freshHistory,
           activeApiKey,
-          settings?.textModel
+          settings?.textModel,
+          targetTurnMsgId
         ).then(async ({ newAffinity }) => {
           if (newAffinity !== affinity) {
             const currentLatest = await db.chats.get(session.id);
@@ -743,6 +817,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
         const toDelete = messages.slice(msgIndex + 1);
         for (const d of toDelete) {
           await db.messages.delete(d.id);
+          try {
+            const staleNodes = await db.memoryNodes
+              .where('chatId')
+              .equals(msg.chatId)
+              .filter((n) => n.messageId === d.id)
+              .toArray();
+            for (const sn of staleNodes) {
+              await db.memoryEdges.where('source').equals(sn.id).delete();
+              await db.memoryEdges.where('target').equals(sn.id).delete();
+              await db.memoryNodes.delete(sn.id);
+            }
+          } catch {
+            // ignore
+          }
         }
       }
       runBotGeneration();
@@ -927,24 +1015,60 @@ export const ChatView: React.FC<ChatViewProps> = ({
       </div>
 
       {/* 2. Messages Scroll Area */}
-      <div className="relative z-10 flex-1 overflow-y-auto p-4 space-y-4 pb-4">
-        {messages.map((msg) => {
-          const isUser = msg.senderId === 'user';
-          const activeVariant = msg.variants[msg.activeVariantIndex] || { text: '' };
-          const isEditing = editingMsgId === msg.id;
-          const hasVariants = msg.variants.length > 1;
-          const isThoughtExpanded = !!expandedThoughts[msg.id];
-
-          const botChar = !isUser ? allCharacters.find((c) => c.id === msg.senderId) || (type === 'character' ? character : undefined) : undefined;
-          const botAvatar = !isUser
-            ? (botChar?.avatar || msg.senderAvatar || '')
-            : undefined;
-
-          return (
-            <div
-              key={msg.id}
-              className={`flex ${isUser ? 'justify-end' : 'justify-start'} items-end gap-2.5 group`}
+      <div
+        ref={chatContainerRef}
+        onScroll={handleScroll}
+        className="relative z-10 flex-1 overflow-y-auto p-4 space-y-4 pb-4"
+      >
+        {/* Load older messages button */}
+        {hasMoreMessages && (
+          <div className="flex justify-center pt-1 pb-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (isLoadingOlderRef.current) return;
+                isLoadingOlderRef.current = true;
+                const prevScrollHeight = chatContainerRef.current?.scrollHeight || 0;
+                const prevScrollTop = chatContainerRef.current?.scrollTop || 0;
+                setVisibleCount((prev) => {
+                  const next = Math.min(prev + PAGE_SIZE, totalMessagesCount);
+                  requestAnimationFrame(() => {
+                    if (chatContainerRef.current) {
+                      const newScrollHeight = chatContainerRef.current.scrollHeight;
+                      chatContainerRef.current.scrollTop = newScrollHeight - prevScrollHeight + prevScrollTop;
+                    }
+                    isLoadingOlderRef.current = false;
+                  });
+                  return next;
+                });
+              }}
+              className="px-3.5 py-1.5 rounded-full bg-silk-850/90 hover:bg-silk-800 text-[11px] font-medium text-slate-400 hover:text-violet-300 border border-silk-700/80 transition-colors shadow-sm"
             >
+              {t.loadOlderMessages} ({totalMessagesCount - displayedMessages.length})
+            </button>
+          </div>
+        )}
+
+        {(() => {
+          const latestBotMsg = [...messages].reverse().find((m) => m.senderId !== 'user');
+          return displayedMessages.map((msg) => {
+            const isUser = msg.senderId === 'user';
+            const isLatestBotMsg = !isUser && latestBotMsg?.id === msg.id;
+            const activeVariant = msg.variants[msg.activeVariantIndex] || { text: '' };
+            const isEditing = editingMsgId === msg.id;
+            const hasVariants = msg.variants.length > 1;
+            const isThoughtExpanded = !!expandedThoughts[msg.id];
+
+            const botChar = !isUser ? allCharacters.find((c) => c.id === msg.senderId) || (type === 'character' ? character : undefined) : undefined;
+            const botAvatar = !isUser
+              ? (botChar?.avatar || msg.senderAvatar || '')
+              : undefined;
+
+            return (
+              <div
+                key={msg.id}
+                className={`flex ${isUser ? 'justify-end' : 'justify-start'} items-end gap-2.5 group`}
+              >
               {/* Bot Avatar with Emotion Sprite */}
               {!isUser && (
                 <div className="relative w-8 h-8 rounded-xl overflow-hidden shrink-0 border border-silk-700 bg-silk-800 mb-1">
@@ -1113,15 +1237,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     <RotateCcw className="w-3.5 h-3.5" />
                   </button>
 
-                  {/* Edit */}
-                  <button
-                    onClick={() => handleStartEdit(msg)}
-                    type="button"
-                    className="p-1 hover:text-violet-400 rounded hover:bg-silk-800"
-                    title={t.editMessage}
-                  >
-                    <Edit3 className="w-3.5 h-3.5" />
-                  </button>
+                  {/* Edit: Available for user message or ONLY the very latest bot message */}
+                  {(isUser || isLatestBotMsg) && (
+                    <button
+                      onClick={() => handleStartEdit(msg)}
+                      type="button"
+                      className="p-1 hover:text-violet-400 rounded hover:bg-silk-800"
+                      title={t.editMessage}
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
 
                   {/* Copy */}
                   <button
@@ -1137,20 +1263,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     )}
                   </button>
 
-                  {/* Bot-specific actions: Wand & Regenerate */}
+                  {/* Bot-specific actions: Wand & Regenerate (ONLY on latest bot message) */}
                   {!isUser && (
                     <>
-                      <button
-                        onClick={() => {
-                          setGuidedRegenTargetMsgId(msg.id);
-                          setGuidedRegenPrompt('');
-                        }}
-                        type="button"
-                        className="p-1 hover:text-violet-400 rounded hover:bg-silk-800"
-                        title={t.magicWandBot}
-                      >
-                        <Wand2 className="w-3.5 h-3.5" />
-                      </button>
+                      {isLatestBotMsg && (
+                        <button
+                          onClick={() => {
+                            setGuidedRegenTargetMsgId(msg.id);
+                            setGuidedRegenPrompt('');
+                          }}
+                          type="button"
+                          className="p-1 hover:text-violet-400 rounded hover:bg-silk-800"
+                          title={t.magicWandBot}
+                        >
+                          <Wand2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
 
                       {/* Manual Emotion Sprite Selector */}
                       {(() => {
@@ -1217,21 +1345,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         );
                       })()}
 
-                      <button
-                        onClick={() => handleRegenerate(msg)}
-                        type="button"
-                        className="p-1 hover:text-white rounded hover:bg-silk-800"
-                        title={t.regenerate}
-                      >
-                        <RefreshCw className="w-3.5 h-3.5" />
-                      </button>
+                      {isLatestBotMsg && (
+                        <button
+                          onClick={() => handleRegenerate(msg)}
+                          type="button"
+                          className="p-1 hover:text-white rounded hover:bg-silk-800"
+                          title={t.regenerate}
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </>
                   )}
                 </div>
               </div>
             </div>
           );
-        })}
+        });
+      })()}
 
         {/* Live Streaming Bubble */}
         {isGenerating && streamingSender && (
@@ -1298,6 +1429,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
         <div ref={messagesEndRef} />
       </div>
+
+      {/* Floating Scroll-to-Bottom Arrow Button */}
+      {showScrollBottom && (
+        <button
+          onClick={() => {
+            scrollToBottom(true);
+            setShowScrollBottom(false);
+          }}
+          type="button"
+          className="absolute right-5 bottom-20 z-30 p-2.5 rounded-full bg-silk-850/95 hover:bg-silk-800 text-violet-400 hover:text-white border border-silk-700/90 shadow-2xl backdrop-blur-md transition-all duration-200 animate-fade-in hover:scale-110 active:scale-95 flex items-center justify-center group"
+          title={t.scrollToBottomLabel}
+        >
+          <ArrowDown className="w-4 h-4 group-hover:translate-y-0.5 transition-transform" />
+        </button>
+      )}
 
       {/* Slash Command Autocomplete Menu */}
       {showSlashMenu && (

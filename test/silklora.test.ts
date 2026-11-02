@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { cleanArtifacts } from '../src/services/ai.ts';
-import { buildSystemPrompt } from '../src/services/promptBuilder.ts';
+import { buildSystemPrompt, DEFAULT_CORE_SYSTEM_PROMPT } from '../src/services/promptBuilder.ts';
 import { translations } from '../src/i18n/index.ts';
-import type { Character, Group, MemoryNode } from '../src/types/index.ts';
+import { normalizeLabel, calculateNodeScore, findDuplicateNodes, selectNodesToPrune } from '../src/services/memoryGraph.ts';
+import type { Character, Group, MemoryNode, MemoryEdge } from '../src/types/index.ts';
 
 test('cleanArtifacts: strips empty {} brackets and Tavern tokens', () => {
   const dirty = 'Привет! {} Как твои дела? { ... } {{user}} смотрит на {{char}}. }';
@@ -232,3 +233,186 @@ test('buildSystemPrompt: enforces group speaker identity and style paragraph lim
   assert.match(prompt, /MANDATORY WRITING STYLE & FORMATTING LIMITS/, 'Should enforce style limits at end of prompt');
   assert.match(prompt, /Максимум 3 абзаца/, 'Should include paragraph limit instruction');
 });
+
+test('buildSystemPrompt: supports custom system prompt template (augment and override modes)', () => {
+  const speaker: Character = {
+    id: 'char-elena',
+    name: 'Елена',
+    description: 'Опытная наемница.',
+    createdAt: 0,
+    updatedAt: 0,
+  };
+  const userPersona: Character = {
+    id: 'char-user',
+    name: 'Командир Марк',
+    description: 'Лидер сопротивления.',
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  // 1. Augment mode: retains default core principles and adds custom extension
+  const augmentPrompt = buildSystemPrompt({
+    character: speaker,
+    userPersona,
+    customSystemPrompt: 'ВНИМАНИЕ: Всегда обращайся к {{user}} уважительно, отвечая от лица {{char}}.',
+    customSystemPromptMode: 'augment',
+  });
+
+  assert.match(augmentPrompt, /ABSOLUTE CORE PRINCIPLES/, 'Augment mode must keep base principles');
+  assert.match(augmentPrompt, /CUSTOM SYSTEM PROMPT EXTENSION/, 'Augment mode must append extension section');
+  assert.match(augmentPrompt, /Всегда обращайся к Командир Марк уважительно, отвечая от лица Елена/, 'Placeholders must be resolved');
+
+  // 2. Override mode: replaces base principles with custom prompt
+  const overridePrompt = buildSystemPrompt({
+    character: speaker,
+    userPersona,
+    customSystemPrompt: 'CUSTOM CORE PROMPT: {{char}} is in an active tactical stealth simulation with {{user}}.',
+    customSystemPromptMode: 'override',
+  });
+
+  assert.strictEqual(overridePrompt.includes('ABSOLUTE CORE PRINCIPLES'), false, 'Override mode must replace base principles');
+  assert.match(overridePrompt, /CUSTOM CORE PROMPT: Елена is in an active tactical stealth simulation with Командир Марк/, 'Override prompt must resolve placeholders');
+  assert.match(overridePrompt, /YOUR CURRENT ROLE: ЕЛЕНА/, 'Dynamic character role should still be appended');
+});
+
+test('buildSystemPrompt: enforces strict text style adherence with prominent and recency directives', () => {
+  const speaker: Character = {
+    id: 'char-1',
+    name: 'Роланд',
+    description: 'Рыцарь ордена.',
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  const prompt = buildSystemPrompt({
+    character: speaker,
+    textStyle: {
+      id: 'style-gothic',
+      name: 'Готический Нуар',
+      description: 'Мрачная атмосфера',
+      instruction: 'Используй архаичные обороты, мрачные описания и тяжелые тени.',
+      isCustom: false,
+    },
+  });
+
+  assert.match(prompt, /ABSOLUTE PRIORITY DIRECTIVE — MANDATORY WRITING STYLE/, 'Must have prominent directive at top');
+  assert.match(prompt, /UNCOMPROMISING STYLE ENFORCEMENT RULES/, 'Must have uncompromising enforcement rules');
+  assert.match(prompt, /Every physical action inside \*asterisks\* and every spoken line MUST faithfully embody this chosen style/, 'Must enforce style on actions and speech');
+  assert.match(prompt, /FINAL STYLE CHECK: Ensure every sentence and paragraph strictly complies with "Готический Нуар"/, 'Must enforce final style check');
+});
+
+test('memoryGraph: normalizes labels and scores node priority (pinned nodes never pruned)', () => {
+  assert.strictEqual(normalizeLabel('  Взлом Терминала! ... '), 'взлом терминала');
+
+  const pinnedNode: MemoryNode = {
+    id: 'n-pinned',
+    chatId: 'c1',
+    label: 'Главный заговор',
+    type: 'secret',
+    detail: 'Секретная операция синдиката',
+    isPinned: true,
+    createdAt: 1000,
+  };
+  assert.strictEqual(calculateNodeScore(pinnedNode), Infinity, 'Pinned node must have Infinite priority');
+
+  const secretNode: MemoryNode = {
+    id: 'n-secret',
+    chatId: 'c1',
+    label: 'Тайна базы',
+    type: 'secret',
+    detail: 'Координаты бункера',
+    createdAt: 2000,
+  };
+  const fallbackEventNode: MemoryNode = {
+    id: 'n-event',
+    chatId: 'c1',
+    label: 'Привет...',
+    type: 'event',
+    detail: 'User said: "Привет" | Character responded: "Здравствуй"',
+    createdAt: 1000,
+  };
+
+  const secretScore = calculateNodeScore(secretNode, 3, 1000, 2000);
+  const eventScore = calculateNodeScore(fallbackEventNode, 0, 1000, 2000);
+
+  assert.ok(secretScore > eventScore, `Secret node score (${secretScore}) should be much higher than dialogue fallback event score (${eventScore})`);
+});
+
+test('memoryGraph: detects duplicate nodes and selects optimal survivor', () => {
+  const nodes: MemoryNode[] = [
+    {
+      id: 'n-1',
+      chatId: 'c1',
+      label: 'Взлом сейфа',
+      type: 'event',
+      detail: 'Краткое описание',
+      createdAt: 100,
+    },
+    {
+      id: 'n-2',
+      chatId: 'c1',
+      label: '  взлом сейфа!  ',
+      type: 'fact',
+      detail: 'Подробное описание: взломали сейф с шифром 9481 и забрали данные',
+      createdAt: 200,
+    },
+    {
+      id: 'n-3',
+      chatId: 'c1',
+      label: 'Другая локация',
+      type: 'location',
+      detail: 'Заброшенный склад',
+      createdAt: 150,
+    },
+  ];
+
+  const duplicates = findDuplicateNodes(nodes);
+  assert.strictEqual(duplicates.length, 1, 'Should find 1 duplicate group');
+  assert.strictEqual(duplicates[0].survivor.id, 'n-2', 'Survivor should be n-2 due to richer detail');
+  assert.strictEqual(duplicates[0].duplicates.length, 1);
+  assert.strictEqual(duplicates[0].duplicates[0].id, 'n-1');
+});
+
+test('memoryGraph: selects lowest priority unpinned nodes to prune when cap is exceeded', () => {
+  const nodes: MemoryNode[] = [
+    {
+      id: 'n-pinned',
+      chatId: 'c1',
+      label: 'Ключевой союз',
+      type: 'relationship',
+      detail: 'Вечная клятва верности',
+      isPinned: true,
+      createdAt: 100,
+    },
+    {
+      id: 'n-high-secret',
+      chatId: 'c1',
+      label: 'Шпион в штабе',
+      type: 'secret',
+      detail: 'Секретная личность шпиона',
+      createdAt: 200,
+    },
+    {
+      id: 'n-low-old',
+      chatId: 'c1',
+      label: 'Приветствие...',
+      type: 'event',
+      detail: 'User said: "Привет" | Character responded: "Хай"',
+      createdAt: 50,
+    },
+  ];
+
+  const edges: MemoryEdge[] = [
+    { id: 'e-1', chatId: 'c1', source: 'n-pinned', target: 'n-high-secret' },
+  ];
+
+  // If maxNodes is 2, one node must be pruned
+  const toPrune = selectNodesToPrune(nodes, edges, 2);
+  assert.strictEqual(toPrune.length, 1, 'Should prune exactly 1 node');
+  assert.strictEqual(toPrune[0].id, 'n-low-old', 'Should prune the lowest priority dialogue quote');
+  assert.strictEqual(toPrune.some((n) => n.isPinned), false, 'Must NEVER prune pinned node');
+
+  // If maxNodes is 3 or more, nothing to prune
+  assert.deepStrictEqual(selectNodesToPrune(nodes, edges, 3), []);
+});
+

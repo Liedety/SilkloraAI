@@ -39,6 +39,9 @@ export class SilkloraDatabase extends Dexie {
       textStyles: 'id, isCustom',
       settings: 'id',
     });
+    this.version(2).stores({
+      memoryNodes: 'id, chatId, messageId, type, createdAt',
+    });
   }
 }
 
@@ -234,6 +237,8 @@ export async function initDatabaseDefaults() {
       textStyleId: 'immersive',
       theme: DEFAULT_THEME,
       contextWindowSize: 20,
+      customSystemPrompt: '',
+      customSystemPromptMode: 'augment',
     });
   }
 
