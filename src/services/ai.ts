@@ -192,7 +192,11 @@ async function streamGemini(options: StreamOptions): Promise<void> {
       throw new Error(`Gemini Error (${res.status}): ${errText}`);
     }
 
-    const reader = res.body!.getReader();
+    if (!res.body) {
+      throw new Error('ReadableStream not supported by Gemini network response.');
+    }
+
+    const reader = res.body.getReader();
     const decoder = new TextDecoder('utf-8');
     let fullText = '';
     let buffer = '';
@@ -265,7 +269,11 @@ async function streamAnthropic(options: StreamOptions): Promise<void> {
       throw new Error(`Anthropic Error (${res.status}): ${errText}`);
     }
 
-    const reader = res.body!.getReader();
+    if (!res.body) {
+      throw new Error('ReadableStream not supported by Anthropic network response.');
+    }
+
+    const reader = res.body.getReader();
     const decoder = new TextDecoder('utf-8');
     let fullText = '';
     let buffer = '';
@@ -670,6 +678,7 @@ export async function suggestUserReply(
 
   const system = `You are a creative roleplay ghostwriter.
 Based on the current ongoing scene and dialogue context, formulate what the user's persona should say and do next.
+Match the language of the dialogue dynamically (if the conversation is in Russian, formulate in pure Russian; if in English, formulate in English, etc.).
 Write actions and body language in *asterisks* and spoken dialogue in plain text.
 Keep it natural, evocative, and strictly in character. Output ONLY the resulting action/speech with no meta explanation or quotation marks.`;
 
@@ -691,16 +700,75 @@ Keep it natural, evocative, and strictly in character. Output ONLY the resulting
   return out.trim();
 }
 
+export async function compressChatHistory(
+  apiKeyConfig: ApiKeyConfig,
+  model: string,
+  messagesToCompress: Array<{ senderName: string; text: string }>,
+  previousSummary?: string
+): Promise<string> {
+  const turns = messagesToCompress
+    .filter((m) => m.text && m.text.trim().length > 0)
+    .map((m) => `${m.senderName}: ${m.text.trim()}`)
+    .join('\n');
+
+  if (!turns) return previousSummary || '';
+
+  const isRu = /[а-яА-ЯёЁ]/.test(turns + (previousSummary || ''));
+
+  const system = isRu
+    ? `Ты — литературный архивариус и летописец ролевой истории.
+Твоя задача: составить краткий, емкий и связный пересказ (1-2 абзаца) предшествующих диалогов и событий сюжета.
+Отрази ключевые решения, действия, смену отношений, тайны и факты, необходимые для сохранения контекста в долгих диалогах.
+Пиши на чистом русском языке без мета-вступлений. Выводи ТОЛЬКО текст краткого пересказа.`
+    : `You are an expert narrative chronicler for a roleplay story.
+Your task: produce a concise, coherent summary (1-2 paragraphs) of earlier dialogue turns and story developments.
+Highlight pivotal plot events, character decisions, secrets revealed, and relationship shifts needed to preserve long-term context in extended chats.
+Output ONLY the concise narrative recap with no meta introductions or disclaimers.`;
+
+  const userContent = previousSummary
+    ? (isRu
+        ? `Предыдущий краткий пересказ:\n${previousSummary}\n\nНовые предшествующие реплики для включения в пересказ:\n${turns}`
+        : `Previous context summary:\n${previousSummary}\n\nNew dialogue turns to incorporate into summary:\n${turns}`)
+    : (isRu
+        ? `Диалог для краткого пересказа:\n${turns}`
+        : `Dialogue to summarize into concise context recap:\n${turns}`);
+
+  let out = '';
+  await streamChatCompletion({
+    apiKeyConfig,
+    model: model || 'deepseek/deepseek-chat',
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: userContent },
+    ],
+    temperature: 0.4,
+    onToken: (t) => { out += t; },
+    onError: (e) => { throw e; },
+  });
+
+  return out.trim();
+}
+
 export async function summarizeScene(
   apiKeyConfig: ApiKeyConfig,
   model: string,
-  recentHistory: string
+  recentHistory: string,
+  language: 'en' | 'ru' = 'ru'
 ): Promise<string> {
-  const system = `You are an impartial narrator summarizing the current roleplay scene.
+  const isRu = language === 'ru' || /[а-яА-ЯёЁ]/.test(recentHistory);
+  const system = isRu
+    ? `Ты — беспристрастный литературный рассказчик, подводящий итоги текущей ролевой сцены.
+Напиши выразительную, атмосферную сводку из 2-3 абзацев на русском языке:
+1. Текущее место действия и обстановка.
+2. Что только что произошло и какое эмоциональное напряжение возникло между персонажами.
+3. Активные конфликты, цели или невысказанные намерения.
+Отвечай ТОЛЬКО на чистом литературном русском языке.`
+    : `You are an impartial narrator summarizing the current roleplay scene.
 Provide a clear, atmospheric 2-3 paragraph summary of:
 1. Current location and situation.
 2. What just happened and emotional tension between characters.
-3. Active conflicts or unspoken intentions.`;
+3. Active conflicts or unspoken intentions.
+Respond in English.`;
 
   let out = '';
   await streamChatCompletion({

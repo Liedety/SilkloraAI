@@ -25,6 +25,20 @@ export const ChatPreviewCard: React.FC<ChatPreviewCardProps> = ({ theme }) => {
     });
   };
 
+  const fontFamilyStyle =
+    theme.fontFamily === 'serif'
+      ? 'Georgia, Cambria, "Times New Roman", serif'
+      : theme.fontFamily === 'mono'
+      ? 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
+      : 'inherit';
+
+  const lineHeightStyle =
+    theme.lineHeight === 'loose'
+      ? 1.8
+      : theme.lineHeight === 'relaxed'
+      ? 1.6
+      : 1.45;
+
   return (
     <div
       className="relative w-full rounded-2xl overflow-hidden border border-silk-700/80 p-4 shadow-xl select-none"
@@ -36,7 +50,7 @@ export const ChatPreviewCard: React.FC<ChatPreviewCardProps> = ({ theme }) => {
         Live Chat Preview
       </div>
 
-      <div className="space-y-3" style={{ fontSize: `${theme.fontSize}px` }}>
+      <div className="space-y-3" style={{ fontSize: `${theme.fontSize}px`, fontFamily: fontFamilyStyle }}>
         {/* User Message */}
         <div className="flex justify-end">
           <div
@@ -47,7 +61,7 @@ export const ChatPreviewCard: React.FC<ChatPreviewCardProps> = ({ theme }) => {
               opacity: theme.bubbleOpacity,
             }}
           >
-            <p className="leading-snug">
+            <p style={{ lineHeight: lineHeightStyle }}>
               {formatText('*Gently touches the ancient tome* We should proceed with caution.')}
             </p>
           </div>
@@ -64,7 +78,7 @@ export const ChatPreviewCard: React.FC<ChatPreviewCardProps> = ({ theme }) => {
             }}
           >
             <div className="text-[10px] text-violet-400 font-semibold mb-1">Evelyn Vance</div>
-            <p className="leading-snug">
+            <p style={{ lineHeight: lineHeightStyle }}>
               {formatText(
                 '*Leans closer, her eyes flashing with curiosity.* Caution is a luxury we lost the moment we stepped into this archive.'
               )}

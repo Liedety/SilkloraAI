@@ -255,6 +255,41 @@ export async function pruneAndConsolidateMemories(
   return { prunedCount, consolidatedCount };
 }
 
+export function isSignificantTurn(userText: string, botText: string, affinityDelta: number = 0): boolean {
+  const trimmedUser = userText.trim();
+  if (!trimmedUser) return false;
+
+  // Trivial everyday greetings or short affirmations/acknowledgments
+  const isTrivial =
+    /^(?:привет|здравствуй(?:те)?|добрый (?:день|вечер|утро)|хай|ку|салют|hello|hi|hey|howdy|sup|good (?:morning|evening|day))[\s.!?,]*$/i.test(trimmedUser) ||
+    /^(?:да|нет|ок|окей|хорошо|ладно|понял|понятно|ясно|ага|угу|спасибо|yes|no|ok|okay|sure|fine|yep|nope|thanks|thank you)[\s.!?,]*$/i.test(trimmedUser);
+
+  if (isTrivial && Math.abs(affinityDelta) < 3) {
+    return false;
+  }
+
+  // Strong affinity or relationship milestone shift
+  if (Math.abs(affinityDelta) >= 3) {
+    return true;
+  }
+
+  const combined = (userText + ' ' + botText).toLowerCase();
+  const significantKeywords = [
+    'секрет', 'тайна', 'клятв', 'обеща', 'люблю', 'ненавиж', 'убью', 'удар', 'выстрел',
+    'погиб', 'смерт', 'опасн', 'предател', 'союз', 'брак', 'артефакт', 'кровь', 'враг',
+    'правд', 'ложь', 'заговор', 'secret', 'promise', 'swear', 'confess', 'danger', 'betray',
+    'kill', 'death', 'love', 'hate', 'weapon', 'alliance', 'blood', 'enemy', 'artifact',
+    'truth', 'mystery', 'reveal',
+  ];
+
+  if (significantKeywords.some((w) => combined.includes(w)) && trimmedUser.length >= 20) {
+    return true;
+  }
+
+  // Significant descriptive development with emotional weight
+  return trimmedUser.length >= 75 && Math.abs(affinityDelta) >= 1;
+}
+
 export async function extractMemoryAndAffinity(
   chatId: string,
   characterId: string,
@@ -341,42 +376,51 @@ export async function extractMemoryAndAffinity(
       const extractionPrompt = isDialogueRu
         ? `Проанализируй данный раунд ролевого диалога между ПОЛЬЗОВАТЕЛЕМ и ПЕРСОНАЖЕМ.
 1. Определи изменение расположения/симпатии персонажа к пользователю (от -10 до +10).
-2. Выдели 1 или 2 ключевых факта, события, тайны или изменения в отношениях для графа долговременной памяти.
-ВАЖНО: Поля "label" и "detail" пиши СТРОГО НА РУССКОМ ЯЗЫКЕ!
+2. Оцени, произошло ли в этой реплике что-то ДЕЙСТВИТЕЛЬНО ВАЖНОЕ (раскрытие тайны, клятва, обещание, признание, критический факт, крупный конфликт или сближение).
+КРИТИЧЕСКИ ВАЖНОЕ ПРАВИЛО ЗНАЧИМОСТИ:
+- Если диалог тривиальный, повседневный, обычное приветствие, простая болтовня или мелкое действие — НЕ создавай узлов памяти (верни "nodes": []).
+- Сохраняй в "nodes" ТОЛЬКО по-настоящему важные и памятные события/факты/тайны (максимум 1-2 узла).
+- Поля "label" и "detail" пиши на том же языке, на котором говорят участники (русский).
 
 ПОЛЬЗОВАТЕЛЬ: ${userText}
 ПЕРСОНАЖ: ${botText}
 
 Ответь СТРОГО в формате JSON без markdown:
 {
-  "affinityDelta": 3,
+  "affinityDelta": 0,
   "nodes": [
     {
-      "label": "Краткий заголовок (2-4 слова на русском)",
+      "label": "Краткий заголовок (2-4 слова)",
       "type": "event" | "fact" | "relationship" | "location" | "secret",
-      "detail": "Одно четкое предложение с описанием воспоминания на русском."
+      "detail": "Одно четкое предложение с описанием важного воспоминания."
     }
   ]
 }
+Если ничего важного не произошло, поле "nodes" ОБЯЗАТЕЛЬНО должно быть пустым массивом: "nodes": [].
 Только чистый JSON.`
         : `Analyze this roleplay dialogue turn between USER and CHARACTER.
 1. Determine how user's actions affect character's affinity (-10 to +10 change).
-2. Extract 1 or 2 new significant facts, events, bond shifts, or secrets to store in long-term memory graph.
+2. Evaluate if something GENUINELY IMPORTANT occurred in this exchange (a secret revealed, an oath or promise, confession of feelings, critical lore fact, major conflict or alliance).
+CRITICAL SIGNIFICANCE RULE:
+- If the dialogue is routine small talk, everyday greeting, casual banter, or minor actions — DO NOT create memory nodes (return "nodes": []).
+- Only add to "nodes" if the turn represents a truly memorable, plot-relevant milestone (max 1-2 nodes).
+- Write "label" and "detail" strictly in the same language as the dialogue.
 
 USER: ${userText}
 CHARACTER: ${botText}
 
 Respond STRICTLY with valid JSON:
 {
-  "affinityDelta": 3,
+  "affinityDelta": 0,
   "nodes": [
     {
       "label": "Short Title (3-5 words)",
       "type": "event" | "fact" | "relationship" | "location" | "secret",
-      "detail": "One concise sentence describing the memory."
+      "detail": "One concise sentence describing the significant memory."
     }
   ]
 }
+If nothing important occurred, "nodes" MUST be an empty array: "nodes": [].
 No markdown wrappers, raw JSON only.`;
 
       await streamChatCompletion({
@@ -500,6 +544,11 @@ No markdown wrappers, raw JSON only.`;
   }
 
   const newAffinity = Math.max(-100, Math.min(100, currentAffinity + delta));
+
+  // Significance filter: only store important turns into memory
+  if (!isSignificantTurn(userText, botText, delta)) {
+    return { newAffinity, newNodes: [] };
+  }
 
   // Check if label already exists
   const candidateLabel = userText.slice(0, 24) + '...';

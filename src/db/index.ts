@@ -60,44 +60,111 @@ export const DEFAULT_THEME: ThemeConfig = {
   bubbleOpacity: 0.85,
   fontSize: 15,
   backgroundTint: 0.65,
+  fontFamily: 'sans',
+  lineHeight: 'relaxed',
 };
+
+export interface LocalizedStyleDef {
+  name: string;
+  description: string;
+  instruction: string;
+}
+
+export const LOCALIZED_DEFAULT_STYLES: Record<'en' | 'ru', Record<string, LocalizedStyleDef>> = {
+  en: {
+    literary: {
+      name: 'Literary Prose',
+      description: 'Rich vocabulary, evocative sensory descriptions of surroundings, gestures, atmosphere, and psychological nuance.',
+      instruction: 'Write in an expressive, high-literary prose style. Emphasize sensory details (sounds, scents, textures, gazes), atmosphere, and emotional depth. Avoid clichés and artificial formulas.',
+    },
+    immersive: {
+      name: 'Immersive Roleplay',
+      description: 'Dynamic interplay between natural speech, bodily action, and immediate character reactions.',
+      instruction: 'Act naturally and unpredictably like a real person. React dynamically to your partner’s every movement. Enclose physical actions and descriptions in asterisks *like this*. Write spoken dialogue directly without quotation marks.',
+    },
+    concise: {
+      name: 'Dynamic & Crisp',
+      description: 'Fast narrative pace, sharp dialogue, and lively scene tension without overlong descriptions.',
+      instruction: 'Keep dialogue and narration fast-paced and crisp. Focus on sharp exchanges, immediate tension, and decisive physical reactions without overlong exposition.',
+    },
+    gritty: {
+      name: 'Dark & Gritty',
+      description: 'Raw realism, unvarnished human nature, psychological intensity, and uncensored dark atmosphere.',
+      instruction: 'Embrace unvarnished, gritty realism. Do not soften sharp edges; convey raw human nature, exhaustion, roughness, vulnerability, or hidden passion honestly.',
+    },
+  },
+  ru: {
+    literary: {
+      name: 'Литературный роман',
+      description: 'Богатый словарный запас, глубокие описания окружения, жестов, атмосферы и эмоций.',
+      instruction: 'Пиши в выразительном литературном стиле высокого качества. Уделяй внимание сенсорным деталям (звуки, запахи, прикосновения, взгляды), атмосфере и психологизму. Избегай клише и шаблонов.',
+    },
+    immersive: {
+      name: 'Иммерсивный отыгрыш',
+      description: 'Баланс между живой речью, физическими действиями и реакциями на действия собеседника.',
+      instruction: 'Действуй естественно и непредсказуемо, как живой человек. Реагируй на каждое движение собеседника. Выделяй действия и описания звездочками *вот так*. Реплики пиши без кавычек.',
+    },
+    concise: {
+      name: 'Динамичный и лаконичный',
+      description: 'Быстрый темп, острые реплики, акцент на динамике сцены.',
+      instruction: 'Держи высокий темп повествования. Не растягивай описания, делай упор на острые реплики, напряжение и непосредственные реакции персонажей.',
+    },
+    gritty: {
+      name: 'Мрачный и реалистичный',
+      description: 'Сырой реализм, психологическое напряжение, темная атмосфера без цензуры.',
+      instruction: 'Используй жесткий, не идеализированный реализм. Не сглаживай острые углы, передавай темные стороны человеческой натуры, физическую усталость, грубость или скрытую страсть.',
+    },
+  },
+};
+
+export function getLocalizedTextStyle(style: TextStylePreset, language: 'en' | 'ru'): TextStylePreset {
+  if (style.isCustom) return style;
+  const loc = LOCALIZED_DEFAULT_STYLES[language]?.[style.id];
+  if (!loc) return style;
+  return {
+    ...style,
+    name: loc.name,
+    description: loc.description,
+    instruction: loc.instruction,
+  };
+}
 
 export const DEFAULT_STYLES: TextStylePreset[] = [
   {
     id: 'literary',
-    name: 'Литературный / Literary',
-    description: 'Богатый словарный запас, глубокие описания окружения, жестов и эмоций.',
+    name: 'Literary Prose',
+    description: 'Rich vocabulary, evocative sensory descriptions of surroundings, gestures, atmosphere, and psychological nuance.',
     instruction:
-      'Пиши в выразительном литературном стиле высокого качества. Уделяй внимание сенсорным деталям (звуки, запахи, прикосновения, взгляды), атмосфере и психологизму. Избегай клише и шаблонов.',
+      'Write in an expressive, high-literary prose style. Emphasize sensory details (sounds, scents, textures, gazes), atmosphere, and emotional depth. Avoid clichés and artificial formulas.',
     isCustom: false,
   },
   {
     id: 'immersive',
-    name: 'Иммерсивный RP / Immersive RP',
-    description: 'Баланс между живой речью, физическими действиями и реакциями на действия собеседника.',
+    name: 'Immersive Roleplay',
+    description: 'Dynamic interplay between natural speech, bodily action, and immediate character reactions.',
     instruction:
-      'Действуй естественно и непредсказуемо, как живой человек. Реагируй на каждое движение собеседника. Выделяй действия и описания звездочками *вот так*. Реплики пиши без кавычек.',
+      'Act naturally and unpredictably like a real person. React dynamically to your partner’s every movement. Enclose physical actions and descriptions in asterisks *like this*. Write spoken dialogue directly without quotation marks.',
     isCustom: false,
   },
   {
     id: 'concise',
-    name: 'Динамичный / Dynamic & Crisp',
-    description: 'Быстрый темп, лаконичные реплики, акцент на динамике сцены.',
+    name: 'Dynamic & Crisp',
+    description: 'Fast narrative pace, sharp dialogue, and lively scene tension without overlong descriptions.',
     instruction:
-      'Держи высокий темп повествования. Не растягивай описания, делай упор на острые реплики, напряжение и непосредственные реакции персонажей.',
+      'Keep dialogue and narration fast-paced and crisp. Focus on sharp exchanges, immediate tension, and decisive physical reactions without overlong exposition.',
     isCustom: false,
   },
   {
     id: 'gritty',
-    name: 'Мрачный и Реалистичный / Dark & Gritty',
-    description: 'Сырой реализм, психологическое напряжение, темная атмосфера без цензуры.',
+    name: 'Dark & Gritty',
+    description: 'Raw realism, unvarnished human nature, psychological intensity, and uncensored dark atmosphere.',
     instruction:
-      'Используй жесткий, не идеализированный реализм. Не сглаживай острые углы, передавай темные стороны человеческой натуры, физическую усталость, грубость или скрытую страсть.',
+      'Embrace unvarnished, gritty realism. Do not soften sharp edges; convey raw human nature, exhaustion, roughness, vulnerability, or hidden passion honestly.',
     isCustom: false,
   },
 ];
 
-export const APP_THEMES = [
+export const APP_THEMES: Array<{ id: string; name: string; theme: ThemeConfig }> = [
   {
     id: 'violet-dark',
     name: 'Midnight Violet (Фиолетовый)',
@@ -114,6 +181,8 @@ export const APP_THEMES = [
       bubbleOpacity: 0.85,
       fontSize: 15,
       backgroundTint: 0.65,
+      fontFamily: 'sans',
+      lineHeight: 'relaxed',
     },
   },
   {
@@ -132,6 +201,8 @@ export const APP_THEMES = [
       bubbleOpacity: 0.88,
       fontSize: 15,
       backgroundTint: 0.7,
+      fontFamily: 'sans',
+      lineHeight: 'relaxed',
     },
   },
   {
@@ -150,6 +221,8 @@ export const APP_THEMES = [
       bubbleOpacity: 0.85,
       fontSize: 15,
       backgroundTint: 0.7,
+      fontFamily: 'sans',
+      lineHeight: 'relaxed',
     },
   },
   {
@@ -168,6 +241,8 @@ export const APP_THEMES = [
       bubbleOpacity: 0.9,
       fontSize: 15,
       backgroundTint: 0.75,
+      fontFamily: 'sans',
+      lineHeight: 'relaxed',
     },
   },
   {
@@ -186,6 +261,8 @@ export const APP_THEMES = [
       bubbleOpacity: 0.88,
       fontSize: 15,
       backgroundTint: 0.7,
+      fontFamily: 'sans',
+      lineHeight: 'relaxed',
     },
   },
   {
@@ -204,6 +281,8 @@ export const APP_THEMES = [
       bubbleOpacity: 0.9,
       fontSize: 15,
       backgroundTint: 0.8,
+      fontFamily: 'sans',
+      lineHeight: 'relaxed',
     },
   },
   {
@@ -222,6 +301,8 @@ export const APP_THEMES = [
       bubbleOpacity: 1.0,
       fontSize: 15,
       backgroundTint: 0.98,
+      fontFamily: 'sans',
+      lineHeight: 'relaxed',
     },
   },
 ];

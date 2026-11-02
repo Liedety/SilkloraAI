@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { cleanArtifacts } from '../src/services/ai.ts';
 import { buildSystemPrompt, DEFAULT_CORE_SYSTEM_PROMPT } from '../src/services/promptBuilder.ts';
 import { translations } from '../src/i18n/index.ts';
-import { normalizeLabel, calculateNodeScore, findDuplicateNodes, selectNodesToPrune } from '../src/services/memoryGraph.ts';
-import type { Character, Group, MemoryNode, MemoryEdge } from '../src/types/index.ts';
+import { normalizeLabel, calculateNodeScore, findDuplicateNodes, selectNodesToPrune, isSignificantTurn } from '../src/services/memoryGraph.ts';
+import { getLocalizedTextStyle, DEFAULT_STYLES, DEFAULT_THEME, APP_THEMES } from '../src/db/index.ts';
+import type { Character, Group, MemoryNode, MemoryEdge, TextStylePreset } from '../src/types/index.ts';
 
 test('cleanArtifacts: strips empty {} brackets and Tavern tokens', () => {
   const dirty = 'Привет! {} Как твои дела? { ... } {{user}} смотрит на {{char}}. }';
@@ -500,3 +501,120 @@ test('Chat context slicing: regeneration excludes target bot message from contex
   assert.strictEqual(msgsForContext[msgsForContext.length - 1].id, 'm3', 'Last context message must be the user prompt for this turn');
 });
 
+test('isSignificantTurn: filters out trivial greetings and captures narrative milestones', () => {
+  // Empty input
+  assert.strictEqual(isSignificantTurn('', 'Hello', 0), false, 'Empty user text is never significant');
+  assert.strictEqual(isSignificantTurn('   ', 'Hello', 0), false, 'Whitespace-only user text is never significant');
+
+  // Trivial greetings without strong affinity shifts
+  assert.strictEqual(isSignificantTurn('привет', 'Привет!', 0), false, 'Trivial Russian greeting should be ignored');
+  assert.strictEqual(isSignificantTurn('Hello!', 'Hi there!', 1), false, 'Trivial English greeting should be ignored');
+  assert.strictEqual(isSignificantTurn('ок', 'Хорошо.', 0), false, 'Trivial Russian acknowledgment should be ignored');
+  assert.strictEqual(isSignificantTurn('ok, thanks', 'You are welcome', 0), false, 'Trivial English acknowledgment should be ignored');
+
+  // Significant affinity milestone shifts override trivial text
+  assert.strictEqual(isSignificantTurn('привет', 'Привет!', 3), true, 'Milestone affinity shift (+3) should be significant');
+  assert.strictEqual(isSignificantTurn('ок', 'Ладно...', -3), true, 'Milestone affinity penalty (-3) should be significant');
+
+  // Narrative keywords with sufficient context length (>= 20 chars)
+  assert.strictEqual(
+    isSignificantTurn('Я обещаю, что мы найдем этот древний артефакт в руинах.', 'Я верю тебе всем сердцем.', 0),
+    true,
+    'Russian narrative promise and artifact should be significant'
+  );
+  assert.strictEqual(
+    isSignificantTurn('I swear to protect this secret alliance until the very end.', 'We will stand together.', 0),
+    true,
+    'English narrative oath and secret alliance should be significant'
+  );
+});
+
+test('getLocalizedTextStyle: translates RP styles based on active language', () => {
+  const literaryStyle = DEFAULT_STYLES.find((s) => s.id === 'literary')!;
+  assert.ok(literaryStyle, 'Default literary style must exist');
+
+  // Localized to Russian
+  const ruStyle = getLocalizedTextStyle(literaryStyle, 'ru');
+  assert.strictEqual(ruStyle.name, 'Литературный роман');
+  assert.match(ruStyle.instruction, /литературном стиле высокого качества/);
+
+  // Localized to English
+  const enStyle = getLocalizedTextStyle(literaryStyle, 'en');
+  assert.strictEqual(enStyle.name, 'Literary Prose');
+  assert.match(enStyle.instruction, /high-literary prose style/);
+
+  // Custom style presets remain unchanged regardless of language
+  const customPreset: TextStylePreset = {
+    id: 'user-custom-style-1',
+    name: 'Мой уникальный стиль',
+    description: 'Описание стиля',
+    instruction: 'Инструкция для нейросети',
+    isCustom: true,
+  };
+  const localizedCustom = getLocalizedTextStyle(customPreset, 'en');
+  assert.strictEqual(localizedCustom.name, 'Мой уникальный стиль');
+  assert.strictEqual(localizedCustom.instruction, 'Инструкция для нейросети');
+});
+
+test('buildSystemPrompt: context compression recap is injected when contextSummary is provided', () => {
+  const speaker: Character = {
+    id: 'char-1',
+    name: 'Амалия',
+    description: 'Верховный чародей.',
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  const promptWithSummary = buildSystemPrompt({
+    character: speaker,
+    contextSummary: 'Герои сбежали из темницы цитадели и укрылись в старом квартале алхимиков.',
+  });
+
+  assert.match(promptWithSummary, /CONTEXT COMPRESSION — SUMMARY OF EARLIER EVENTS/, 'Prompt must include compression section header');
+  assert.match(
+    promptWithSummary,
+    /Герои сбежали из темницы цитадели и укрылись в старом квартале алхимиков\./,
+    'Prompt must contain the rolling summary text'
+  );
+
+  const promptWithoutSummary = buildSystemPrompt({
+    character: speaker,
+  });
+  assert.strictEqual(
+    promptWithoutSummary.includes('CONTEXT COMPRESSION'),
+    false,
+    'Prompt without contextSummary must not include compression section'
+  );
+});
+
+test('DEFAULT_CORE_SYSTEM_PROMPT: mirrors user language dynamically without hardcoded Russian requirement', () => {
+  assert.match(DEFAULT_CORE_SYSTEM_PROMPT, /DYNAMIC LANGUAGE MIRRORING/, 'Prompt must mandate dynamic language mirroring');
+  assert.match(DEFAULT_CORE_SYSTEM_PROMPT, /STRICT LANGUAGE PURITY/, 'Prompt must retain strict language purity token');
+  assert.strictEqual(
+    DEFAULT_CORE_SYSTEM_PROMPT.includes('ТОЛЬКО на русском'),
+    false,
+    'Core system prompt must not force Russian on all conversations'
+  );
+  assert.strictEqual(
+    DEFAULT_CORE_SYSTEM_PROMPT.includes('всегда отвечай на русском'),
+    false,
+    'Core system prompt must not mandate Russian replies unconditionally'
+  );
+});
+
+test('Theme configuration: separates theme design from typography settings', () => {
+  // DEFAULT_THEME
+  assert.ok(DEFAULT_THEME.fontFamily, 'DEFAULT_THEME must specify fontFamily');
+  assert.ok(DEFAULT_THEME.lineHeight, 'DEFAULT_THEME must specify lineHeight');
+  assert.ok(['sans', 'serif', 'mono'].includes(DEFAULT_THEME.fontFamily));
+  assert.ok(['normal', 'relaxed', 'loose'].includes(DEFAULT_THEME.lineHeight));
+
+  // APP_THEMES
+  assert.ok(APP_THEMES.length >= 3, 'Must have at least 3 pre-built app themes');
+  for (const themeItem of APP_THEMES) {
+    assert.ok(themeItem.theme.fontFamily, `Theme ${themeItem.id} must define fontFamily`);
+    assert.ok(themeItem.theme.lineHeight, `Theme ${themeItem.id} must define lineHeight`);
+    assert.ok(['sans', 'serif', 'mono'].includes(themeItem.theme.fontFamily));
+    assert.ok(['normal', 'relaxed', 'loose'].includes(themeItem.theme.lineHeight));
+  }
+});

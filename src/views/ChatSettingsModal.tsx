@@ -13,7 +13,7 @@ import {
   Eye,
   Sliders,
 } from 'lucide-react';
-import { db } from '../db';
+import { db, getLocalizedTextStyle } from '../db';
 import type {
   Character,
   ChatSession,
@@ -266,14 +266,17 @@ export const ChatSettingsModal: React.FC<ChatSettingsModalProps> = ({
                 >
                   <option value="">
                     {language === 'ru'
-                      ? `Общий из настроек (${activeDefaultStyle?.name || 'Иммерсивный'})`
-                      : `Global Setting (${activeDefaultStyle?.name || 'Immersive'})`}
+                      ? `Общий из настроек (${activeDefaultStyle ? getLocalizedTextStyle(activeDefaultStyle, language).name : 'Иммерсивный'})`
+                      : `Global Setting (${activeDefaultStyle ? getLocalizedTextStyle(activeDefaultStyle, language).name : 'Immersive'})`}
                   </option>
-                  {textStyles.map((st) => (
-                    <option key={st.id} value={st.id}>
-                      {st.name}
-                    </option>
-                  ))}
+                  {textStyles.map((st) => {
+                    const loc = getLocalizedTextStyle(st, language);
+                    return (
+                      <option key={st.id} value={st.id}>
+                        {loc.name}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
 

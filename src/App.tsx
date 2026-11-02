@@ -56,6 +56,13 @@ export const App: React.FC = () => {
       root.style.setProperty('--theme-accent-rgb', hexToRgb(accent));
       root.style.setProperty('--app-bg', bg);
       root.style.setProperty('--app-surface', surface);
+      const fontFamily =
+        settings.theme.fontFamily === 'serif'
+          ? 'Georgia, Cambria, "Times New Roman", serif'
+          : settings.theme.fontFamily === 'mono'
+          ? 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
+          : 'inherit';
+      root.style.setProperty('--chat-font-family', fontFamily);
     }
   }, [settings?.theme]);
 

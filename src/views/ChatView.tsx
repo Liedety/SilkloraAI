@@ -22,7 +22,7 @@ import {
   Smile,
   ArrowDown,
 } from 'lucide-react';
-import { db, DEFAULT_THEME } from '../db';
+import { db, DEFAULT_THEME, getLocalizedTextStyle } from '../db';
 import type {
   Character,
   ChatMessage,
@@ -32,7 +32,7 @@ import type {
   MessageVariant,
 } from '../types';
 import { translations } from '../i18n';
-import { streamChatCompletion, suggestUserReply, summarizeScene, cleanArtifacts } from '../services/ai';
+import { streamChatCompletion, suggestUserReply, summarizeScene, compressChatHistory, cleanArtifacts } from '../services/ai';
 import { buildSystemPrompt } from '../services/promptBuilder';
 import { extractMemoryAndAffinity } from '../services/memoryGraph';
 import { ChatSettingsModal } from './ChatSettingsModal';
@@ -189,6 +189,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const currentTheme = settings?.theme || DEFAULT_THEME;
+
+  const fontFamilyStyle =
+    currentTheme.fontFamily === 'serif'
+      ? 'Georgia, Cambria, "Times New Roman", serif'
+      : currentTheme.fontFamily === 'mono'
+      ? 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
+      : 'inherit';
+
+  const lineHeightStyle =
+    currentTheme.lineHeight === 'loose'
+      ? 1.8
+      : currentTheme.lineHeight === 'relaxed'
+      ? 1.6
+      : 1.45;
 
   // Pagination & Scroll navigation state
   const PAGE_SIZE = 25;
@@ -452,290 +466,355 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
 
-    // Retrieve user persona
-    const userPersona = session.personaId
-      ? allCharacters.find((c) => c.id === session.personaId) || null
-      : null;
+    try {
+      // Retrieve user persona
+      const userPersona = session.personaId
+        ? allCharacters.find((c) => c.id === session.personaId) || null
+        : null;
 
-    // Retrieve affinity score
-    const affinity = session.relationships?.[speaker.id] || 0;
+      // Retrieve affinity score
+      const affinity = session.relationships?.[speaker.id] || 0;
 
-    // Query fresh settings & text style from database
-    const freshSettings = await db.settings.get('default');
-    const styleId = session.textStyleId || freshSettings?.textStyleId || 'literary';
-    const textStyleToUse = (await db.textStyles.get(styleId)) || activeStyle;
+      // Query fresh settings & text style from database
+      const freshSettings = await db.settings.get('default');
+      const styleId = session.textStyleId || freshSettings?.textStyleId || 'literary';
+      const rawStyle = (await db.textStyles.get(styleId)) || activeStyle;
+      const textStyleToUse = rawStyle ? getLocalizedTextStyle(rawStyle, language) : undefined;
 
-    // Build system prompt
-    const groupMembers = type === 'group' ? allCharacters.filter((c) => group?.characterIds.includes(c.id)) : [];
-    let systemPrompt = buildSystemPrompt({
-      character: speaker,
-      group: group || undefined,
-      groupCharacters: groupMembers,
-      userPersona,
-      textStyle: textStyleToUse,
-      chatDirectives: session.chatDirectives,
-      thoughtsEnabled: session.thoughtsEnabled === true,
-      memoryNodes,
-      relationshipScore: affinity,
-      speakerCharacter: speaker,
-      customSystemPrompt: freshSettings?.customSystemPrompt,
-      customSystemPromptMode: freshSettings?.customSystemPromptMode,
-    });
-
-    if (guidancePrompt && guidancePrompt.trim()) {
-      systemPrompt += `\n### USER GUIDED GENERATION INSTRUCTION FOR THIS TURN:\n${guidancePrompt.trim()}\n`;
-    }
-
-    // Build message array for API
-    const apiMessages: any[] = [{ role: 'system', content: systemPrompt }];
-
-    // Context sliding window (query fresh messages directly from DB)
-    const freshDbMsgs = await db.messages.where('chatId').equals(session.id).sortBy('createdAt');
-    let msgsForContext = freshDbMsgs;
-    if (existingBotMsgToVariant) {
-      const targetIdx = freshDbMsgs.findIndex((m) => m.id === existingBotMsgToVariant.id);
-      if (targetIdx !== -1) {
-        msgsForContext = freshDbMsgs.slice(0, targetIdx);
-      }
-    }
-    const contextMsgs = msgsForContext.slice(-16);
-
-    // Process raw dialogue turns with clear speaker attribution
-    const rawTurns: Array<{ role: 'user' | 'assistant'; text: string; image?: string }> = [];
-    for (const msg of contextMsgs) {
-      const activeVariant = msg.variants[msg.activeVariantIndex];
-      if (!activeVariant || !activeVariant.text?.trim()) continue;
-
-      // In 1-on-1: speaker is assistant, user is user.
-      // In group: ONLY this specific speaker's past messages are assistant! All other bots & user are user inputs!
-      const isMe = type === 'group' ? msg.senderId === speaker.id : msg.senderId !== 'user';
-      const role: 'user' | 'assistant' = isMe ? 'assistant' : 'user';
-
-      let textContent = activeVariant.text.trim();
-      if (type === 'group' && !isMe) {
-        // Tag speaker name so the LLM knows with 100% certainty who spoke!
-        textContent = `[${msg.senderName}]: ${textContent}`;
-      }
-      if (isMe && activeVariant.thought && session.thoughtsEnabled) {
-        textContent = `<thought>${activeVariant.thought}</thought>\n${textContent}`;
-      }
-
-      rawTurns.push({
-        role,
-        text: textContent,
-        image: msg.image && msg.senderId === 'user' ? msg.image : undefined,
-      });
-    }
-
-    // Merge adjacent turns of the same role so LLM API receives perfectly alternating turns!
-    // This prevents Anthropic/Gemini/OpenRouter 400 errors, timeouts, and empty message bugs.
-    const alternatingTurns: any[] = [];
-    for (const turn of rawTurns) {
-      const last = alternatingTurns[alternatingTurns.length - 1];
-      if (last && last.role === turn.role) {
-        if (typeof last.content === 'string') {
-          last.content += `\n\n${turn.text}`;
-        } else if (Array.isArray(last.content)) {
-          last.content[0].text += `\n\n${turn.text}`;
+      // Context sliding window with context compression
+      const freshDbMsgs = await db.messages.where('chatId').equals(session.id).sortBy('createdAt');
+      let msgsForContext = freshDbMsgs;
+      if (existingBotMsgToVariant) {
+        const targetIdx = freshDbMsgs.findIndex((m) => m.id === existingBotMsgToVariant.id);
+        if (targetIdx !== -1) {
+          msgsForContext = freshDbMsgs.slice(0, targetIdx);
         }
-        if (turn.image) {
+      }
+
+      // Keep recent 12 dialogue turns verbatim; compress older dialogue turns into concise rolling summary
+      const RECENT_DIALOGUE_TURNS = 12;
+      let olderMsgs: ChatMessage[] = [];
+      let contextMsgs = msgsForContext;
+
+      if (msgsForContext.length > RECENT_DIALOGUE_TURNS) {
+        olderMsgs = msgsForContext.slice(0, -RECENT_DIALOGUE_TURNS);
+        contextMsgs = msgsForContext.slice(-RECENT_DIALOGUE_TURNS);
+      }
+
+      // Prepare context compression summary for older messages
+      let contextSummary = session.rollingSummary?.trim() || '';
+      if (!contextSummary && olderMsgs.length > 0) {
+        const synopsis = olderMsgs
+          .slice(-8)
+          .map((m) => {
+            const v = m.variants[m.activeVariantIndex]?.text?.trim() || '';
+            return `${m.senderName}: ${v.length > 100 ? v.slice(0, 100) + '...' : v}`;
+          })
+          .join('\n');
+        contextSummary = (language === 'ru' ? 'Предыдущие события диалога:\n' : 'Earlier dialogue events:\n') + synopsis;
+      }
+
+      // Build system prompt
+      const groupMembers = type === 'group' ? allCharacters.filter((c) => group?.characterIds.includes(c.id)) : [];
+      let systemPrompt = buildSystemPrompt({
+        character: speaker,
+        group: group || undefined,
+        groupCharacters: groupMembers,
+        userPersona,
+        textStyle: textStyleToUse,
+        chatDirectives: session.chatDirectives,
+        thoughtsEnabled: session.thoughtsEnabled === true,
+        memoryNodes,
+        relationshipScore: affinity,
+        speakerCharacter: speaker,
+        customSystemPrompt: freshSettings?.customSystemPrompt,
+        customSystemPromptMode: freshSettings?.customSystemPromptMode,
+        contextSummary: contextSummary || undefined,
+      });
+
+      if (guidancePrompt && guidancePrompt.trim()) {
+        systemPrompt += `\n### USER GUIDED GENERATION INSTRUCTION FOR THIS TURN:\n${guidancePrompt.trim()}\n`;
+      }
+
+      // Build message array for API
+      const apiMessages: any[] = [{ role: 'system', content: systemPrompt }];
+
+      // Process raw dialogue turns with clear speaker attribution
+      const rawTurns: Array<{ role: 'user' | 'assistant'; text: string; image?: string }> = [];
+      for (const msg of contextMsgs) {
+        const activeVariant = msg.variants[msg.activeVariantIndex];
+        if (!activeVariant || !activeVariant.text?.trim()) continue;
+
+        const isMe = type === 'group' ? msg.senderId === speaker.id : msg.senderId !== 'user';
+        const role: 'user' | 'assistant' = isMe ? 'assistant' : 'user';
+
+        let textContent = activeVariant.text.trim();
+        if (type === 'group' && !isMe) {
+          textContent = `[${msg.senderName}]: ${textContent}`;
+        }
+        if (isMe && activeVariant.thought && session.thoughtsEnabled) {
+          textContent = `<thought>${activeVariant.thought}</thought>\n${textContent}`;
+        }
+
+        rawTurns.push({
+          role,
+          text: textContent,
+          image: msg.image && msg.senderId === 'user' ? msg.image : undefined,
+        });
+      }
+
+      // Merge adjacent turns of the same role
+      const alternatingTurns: any[] = [];
+      for (const turn of rawTurns) {
+        const last = alternatingTurns[alternatingTurns.length - 1];
+        if (last && last.role === turn.role) {
           if (typeof last.content === 'string') {
-            last.content = [
-              { type: 'text', text: last.content },
-              { type: 'image_url', image_url: { url: turn.image } },
-            ];
+            last.content += `\n\n${turn.text}`;
           } else if (Array.isArray(last.content)) {
-            last.content.push({ type: 'image_url', image_url: { url: turn.image } });
+            last.content[0].text += `\n\n${turn.text}`;
           }
-        }
-      } else {
-        if (turn.image && turn.role === 'user') {
-          alternatingTurns.push({
-            role: 'user',
-            content: [
-              { type: 'text', text: turn.text },
-              { type: 'image_url', image_url: { url: turn.image } },
-            ],
-          });
-        } else {
-          alternatingTurns.push({
-            role: turn.role,
-            content: turn.text,
-          });
-        }
-      }
-    }
-
-    // Ensure the conversation starts with a user turn (API requirement for Gemini / Claude / OpenRouter)
-    if (alternatingTurns.length > 0 && alternatingTurns[0].role === 'assistant') {
-      alternatingTurns.unshift({
-        role: 'user',
-        content: type === 'group'
-          ? (language === 'ru' ? '[Сцена начинается]' : '[Scene begins]')
-          : (language === 'ru' ? 'Привет.' : 'Hello.'),
-      });
-    }
-
-    // If there are no turns yet, seed a start prompt
-    if (alternatingTurns.length === 0) {
-      alternatingTurns.push({
-        role: 'user',
-        content: language === 'ru' ? '[Сцена начинается. Начни разговор.]' : '[Scene begins. Start conversation.]',
-      });
-    }
-
-    apiMessages.push(...alternatingTurns);
-
-    let fullGenerated = '';
-
-    await streamChatCompletion({
-      apiKeyConfig: activeApiKey,
-      model: settings?.textModel || 'deepseek/deepseek-chat',
-      messages: apiMessages,
-      signal: abortController.signal,
-      onToken: (tok) => {
-        fullGenerated += tok;
-        let currentThought = '';
-        let display = fullGenerated;
-
-        const thoughtMatch = display.match(/<thought>([\s\S]*?)<\/thought>/);
-        if (thoughtMatch) {
-          currentThought = thoughtMatch[1].trim();
-          display = display.replace(/<thought>[\s\S]*?<\/thought>/, '').trimStart();
-        } else if (display.startsWith('<thought>')) {
-          currentThought = display.replace('<thought>', '');
-          display = '';
-        }
-
-        const emotionMatch = display.match(/<emotion>([^<]+)<\/emotion>/i);
-        if (emotionMatch) {
-          setStreamingEmotion(emotionMatch[1].trim().toLowerCase());
-          display = display.replace(/<emotion>[\s\S]*?<\/emotion>/gi, '').trimStart();
-        }
-
-        setStreamingThought(currentThought);
-        setStreamingText(cleanArtifacts(display));
-      },
-      onComplete: async (completed) => {
-        setIsGenerating(false);
-        abortControllerRef.current = null;
-
-        let finalThought = '';
-        let finalText = completed;
-        let finalEmotion: string | undefined = undefined;
-
-        const match = completed.match(/<thought>([\s\S]*?)<\/thought>/);
-        if (match) {
-          finalThought = match[1].trim();
-          finalText = completed.replace(/<thought>[\s\S]*?<\/thought>/, '').trim();
-        }
-
-        // 1. Match <emotion>...</emotion>
-        const emTagMatch = finalText.match(/<emotion>([\s\S]*?)<\/emotion>/i);
-        if (emTagMatch) {
-          finalEmotion = emTagMatch[1].trim().toLowerCase();
-          finalText = finalText.replace(/<emotion>[\s\S]*?<\/emotion>/gi, '').trim();
-        }
-
-        // 2. Match [emotion: ...] or [эмоция: ...]
-        if (!finalEmotion) {
-          const emBracketMatch = finalText.match(/\[(?:эмоция|emotion):\s*([^\]]+)\]/i);
-          if (emBracketMatch) {
-            finalEmotion = emBracketMatch[1].trim().toLowerCase();
-            finalText = finalText.replace(/\[(?:эмоция|emotion):\s*[^\]]+\]/gi, '').trim();
-          }
-        }
-
-        // 3. Match standalone emotion brackets
-        if (!finalEmotion) {
-          const emWordMatch = finalText.match(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/i);
-          if (emWordMatch) {
-            finalEmotion = emWordMatch[1].trim().toLowerCase();
-            finalText = finalText.replace(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/gi, '').trim();
-          }
-        }
-
-        // 4. Fallback from actions if character has emotions configured
-        if (!finalEmotion && speaker.emotions && speaker.emotions.length > 0) {
-          const lower = finalText.toLowerCase();
-          if (/\*(?:.*)(?:улыб|сме|радост|счаст|smile|laugh|happy)(?:.*)\*/.test(lower)) finalEmotion = 'happy';
-          else if (/\*(?:.*)(?:плач|слез|груст|печал|вздох|sad|cry)(?:.*)\*/.test(lower)) finalEmotion = 'sad';
-          else if (/\*(?:.*)(?:гнев|злос|ярост|хмур|рыч|angry|rage)(?:.*)\*/.test(lower)) finalEmotion = 'angry';
-          else if (/\*(?:.*)(?:смущ|красне|румян|shy|blush)(?:.*)\*/.test(lower)) finalEmotion = 'blushing';
-          else if (/\*(?:.*)(?:ухмыл|усмеш|сарказм|smirk)(?:.*)\*/.test(lower)) finalEmotion = 'smirk';
-          else if (/\*(?:.*)(?:вздраг|удивл|шок|surpris|shock)(?:.*)\*/.test(lower)) finalEmotion = 'surprised';
-          else if (/\*(?:.*)(?:задум|размышл|pensive|thought)(?:.*)\*/.test(lower)) finalEmotion = 'thoughtful';
-          else finalEmotion = 'neutral';
-        }
-
-        finalText = cleanArtifacts(finalText);
-
-        const newVariant: MessageVariant = {
-          text: finalText || cleanArtifacts(completed),
-          thought: finalThought || undefined,
-          emotion: finalEmotion,
-          timestamp: Date.now(),
-        };
-
-        let updatedMsgList = [...messages];
-
-        if (existingBotMsgToVariant) {
-          // Append as a new variant to existing message
-          const variants = [...existingBotMsgToVariant.variants, newVariant];
-          await db.messages.update(existingBotMsgToVariant.id, {
-            variants,
-            activeVariantIndex: variants.length - 1,
-            emotion: finalEmotion || existingBotMsgToVariant.emotion,
-          });
-        } else {
-          // Create new bot message
-          const newBotMsg: ChatMessage = {
-            id: 'msg-' + Math.random().toString(36).substring(2, 10),
-            chatId: session.id,
-            senderId: speaker.id,
-            senderName: speaker.name,
-            senderAvatar: speaker.avatar,
-            emotion: finalEmotion,
-            variants: [newVariant],
-            activeVariantIndex: 0,
-            createdAt: Date.now(),
-          };
-          await db.messages.put(newBotMsg);
-          updatedMsgList.push(newBotMsg);
-        }
-
-        await db.chats.update(session.id, { updatedAt: Date.now() });
-
-        const targetTurnMsgId = existingBotMsgToVariant
-          ? existingBotMsgToVariant.id
-          : updatedMsgList[updatedMsgList.length - 1]?.id;
-
-        // Run automated memory graph extraction and affinity change in background with fresh DB messages
-        const freshHistory = await db.messages.where('chatId').equals(session.id).sortBy('createdAt');
-        extractMemoryAndAffinity(
-          session.id,
-          speaker.id,
-          affinity,
-          freshHistory,
-          activeApiKey,
-          settings?.textModel,
-          targetTurnMsgId
-        ).then(async ({ newAffinity }) => {
-          if (newAffinity !== affinity) {
-            const currentLatest = await db.chats.get(session.id);
-            if (currentLatest) {
-              const updatedR = { ...(currentLatest.relationships || {}), [speaker.id]: newAffinity };
-              await db.chats.update(session.id, { relationships: updatedR });
+          if (turn.image) {
+            if (typeof last.content === 'string') {
+              last.content = [
+                { type: 'text', text: last.content },
+                { type: 'image_url', image_url: { url: turn.image } },
+              ];
+            } else if (Array.isArray(last.content)) {
+              last.content.push({ type: 'image_url', image_url: { url: turn.image } });
             }
           }
+        } else {
+          if (turn.image && turn.role === 'user') {
+            alternatingTurns.push({
+              role: 'user',
+              content: [
+                { type: 'text', text: turn.text },
+                { type: 'image_url', image_url: { url: turn.image } },
+              ],
+            });
+          } else {
+            alternatingTurns.push({
+              role: turn.role,
+              content: turn.text,
+            });
+          }
+        }
+      }
+
+      // Ensure start turn
+      if (alternatingTurns.length > 0 && alternatingTurns[0].role === 'assistant') {
+        alternatingTurns.unshift({
+          role: 'user',
+          content: type === 'group'
+            ? (language === 'ru' ? '[Сцена начинается]' : '[Scene begins]')
+            : (language === 'ru' ? 'Привет.' : 'Hello.'),
         });
-      },
-      onError: (err) => {
-        setIsGenerating(false);
-        abortControllerRef.current = null;
-        alert((language === 'ru' ? 'Ошибка генерации: ' : 'Generation Error: ') + err.message);
-      },
-    });
+      }
+
+      if (alternatingTurns.length === 0) {
+        alternatingTurns.push({
+          role: 'user',
+          content: language === 'ru' ? '[Сцена начинается. Начни разговор.]' : '[Scene begins. Start conversation.]',
+        });
+      }
+
+      apiMessages.push(...alternatingTurns);
+
+      let fullGenerated = '';
+
+      await streamChatCompletion({
+        apiKeyConfig: activeApiKey,
+        model: settings?.textModel || 'deepseek/deepseek-chat',
+        messages: apiMessages,
+        signal: abortController.signal,
+        onToken: (tok) => {
+          fullGenerated += tok;
+          let currentThought = '';
+          let display = fullGenerated;
+
+          const thoughtMatch = display.match(/<thought>([\s\S]*?)<\/thought>/);
+          if (thoughtMatch) {
+            currentThought = thoughtMatch[1].trim();
+            display = display.replace(/<thought>[\s\S]*?<\/thought>/, '').trimStart();
+          } else if (display.startsWith('<thought>')) {
+            currentThought = display.replace('<thought>', '');
+            display = '';
+          }
+
+          const emotionMatch = display.match(/<emotion>([^<]+)<\/emotion>/i);
+          if (emotionMatch) {
+            setStreamingEmotion(emotionMatch[1].trim().toLowerCase());
+            display = display.replace(/<emotion>[\s\S]*?<\/emotion>/gi, '').trimStart();
+          }
+
+          setStreamingThought(currentThought);
+          setStreamingText(cleanArtifacts(display));
+        },
+        onComplete: async (completed) => {
+          setIsGenerating(false);
+          abortControllerRef.current = null;
+
+          if (!completed || !completed.trim()) {
+            alert(language === 'ru' ? 'Модель вернула пустой ответ. Проверьте лимиты модели или повторите попытку.' : 'Model returned an empty response. Please try again.');
+            return;
+          }
+
+          let finalThought = '';
+          let finalText = completed;
+          let finalEmotion: string | undefined = undefined;
+
+          const match = completed.match(/<thought>([\s\S]*?)<\/thought>/);
+          if (match) {
+            finalThought = match[1].trim();
+            finalText = completed.replace(/<thought>[\s\S]*?<\/thought>/, '').trim();
+          }
+
+          // 1. Match <emotion>...</emotion>
+          const emTagMatch = finalText.match(/<emotion>([\s\S]*?)<\/emotion>/i);
+          if (emTagMatch) {
+            finalEmotion = emTagMatch[1].trim().toLowerCase();
+            finalText = finalText.replace(/<emotion>[\s\S]*?<\/emotion>/gi, '').trim();
+          }
+
+          // 2. Match [emotion: ...] or [эмоция: ...]
+          if (!finalEmotion) {
+            const emBracketMatch = finalText.match(/\[(?:эмоция|emotion):\s*([^\]]+)\]/i);
+            if (emBracketMatch) {
+              finalEmotion = emBracketMatch[1].trim().toLowerCase();
+              finalText = finalText.replace(/\[(?:эмоция|emotion):\s*[^\]]+\]/gi, '').trim();
+            }
+          }
+
+          // 3. Match standalone emotion brackets
+          if (!finalEmotion) {
+            const emWordMatch = finalText.match(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/i);
+            if (emWordMatch) {
+              finalEmotion = emWordMatch[1].trim().toLowerCase();
+              finalText = finalText.replace(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/gi, '').trim();
+            }
+          }
+
+          // 4. Fallback from actions if character has emotions configured
+          if (!finalEmotion && speaker.emotions && speaker.emotions.length > 0) {
+            const lower = finalText.toLowerCase();
+            if (/\*(?:.*)(?:улыб|сме|радост|счаст|smile|laugh|happy)(?:.*)\*/.test(lower)) finalEmotion = 'happy';
+            else if (/\*(?:.*)(?:плач|слез|груст|печал|вздох|sad|cry)(?:.*)\*/.test(lower)) finalEmotion = 'sad';
+            else if (/\*(?:.*)(?:гнев|злос|ярост|хмур|рыч|angry|rage)(?:.*)\*/.test(lower)) finalEmotion = 'angry';
+            else if (/\*(?:.*)(?:смущ|красне|румян|shy|blush)(?:.*)\*/.test(lower)) finalEmotion = 'blushing';
+            else if (/\*(?:.*)(?:ухмыл|усмеш|сарказм|smirk)(?:.*)\*/.test(lower)) finalEmotion = 'smirk';
+            else if (/\*(?:.*)(?:вздраг|удивл|шок|surpris|shock)(?:.*)\*/.test(lower)) finalEmotion = 'surprised';
+            else if (/\*(?:.*)(?:задум|размышл|pensive|thought)(?:.*)\*/.test(lower)) finalEmotion = 'thoughtful';
+            else finalEmotion = 'neutral';
+          }
+
+          finalText = cleanArtifacts(finalText);
+
+          const newVariant: MessageVariant = {
+            text: finalText || cleanArtifacts(completed),
+            thought: finalThought || undefined,
+            emotion: finalEmotion,
+            timestamp: Date.now(),
+          };
+
+          let updatedMsgList = [...messages];
+
+          if (existingBotMsgToVariant) {
+            // Append as a new variant to existing message
+            const variants = [...existingBotMsgToVariant.variants, newVariant];
+            await db.messages.update(existingBotMsgToVariant.id, {
+              variants,
+              activeVariantIndex: variants.length - 1,
+              emotion: finalEmotion || existingBotMsgToVariant.emotion,
+            });
+          } else {
+            // Create new bot message
+            const newBotMsg: ChatMessage = {
+              id: 'msg-' + Math.random().toString(36).substring(2, 10),
+              chatId: session.id,
+              senderId: speaker.id,
+              senderName: speaker.name,
+              senderAvatar: speaker.avatar,
+              emotion: finalEmotion,
+              variants: [newVariant],
+              activeVariantIndex: 0,
+              createdAt: Date.now(),
+            };
+            await db.messages.put(newBotMsg);
+            updatedMsgList.push(newBotMsg);
+          }
+
+          await db.chats.update(session.id, { updatedAt: Date.now() });
+
+          const targetTurnMsgId = existingBotMsgToVariant
+            ? existingBotMsgToVariant.id
+            : updatedMsgList[updatedMsgList.length - 1]?.id;
+
+          // Run automated memory graph extraction and affinity change in background with fresh DB messages
+          const freshHistory = await db.messages.where('chatId').equals(session.id).sortBy('createdAt');
+          extractMemoryAndAffinity(
+            session.id,
+            speaker.id,
+            affinity,
+            freshHistory,
+            activeApiKey,
+            settings?.textModel,
+            targetTurnMsgId
+          ).then(async ({ newAffinity }) => {
+            if (newAffinity !== affinity) {
+              const currentLatest = await db.chats.get(session.id);
+              if (currentLatest) {
+                const updatedR = { ...(currentLatest.relationships || {}), [speaker.id]: newAffinity };
+                await db.chats.update(session.id, { relationships: updatedR });
+              }
+            }
+          }).catch((err) => {
+            console.warn('Background memory extraction error:', err);
+          });
+
+          // Run automated context compression in background if conversation exceeds recent window
+          if (freshHistory.length > RECENT_DIALOGUE_TURNS && activeApiKey?.key) {
+            const older = freshHistory.slice(0, -RECENT_DIALOGUE_TURNS);
+            const lastOlder = older[older.length - 1];
+            const latestChat = await db.chats.get(session.id);
+            if (lastOlder && latestChat?.lastSummarizedMsgId !== lastOlder.id) {
+              const toSummarize = older.map((m) => ({
+                senderName: m.senderName,
+                text: m.variants[m.activeVariantIndex]?.text || '',
+              }));
+              compressChatHistory(
+                activeApiKey,
+                settings?.textModel || 'deepseek/deepseek-chat',
+                toSummarize,
+                latestChat?.rollingSummary
+              ).then(async (summary) => {
+                if (summary && summary.trim()) {
+                  await db.chats.update(session.id, {
+                    rollingSummary: summary.trim(),
+                    lastSummarizedMsgId: lastOlder.id,
+                  });
+                }
+              }).catch((err) => {
+                console.warn('Background compression error:', err);
+              });
+            }
+          }
+        },
+        onError: (err) => {
+          setIsGenerating(false);
+          abortControllerRef.current = null;
+          if (!abortController.signal.aborted) {
+            alert((language === 'ru' ? 'Ошибка генерации: ' : 'Generation Error: ') + err.message);
+          }
+        },
+      });
+    } catch (err: any) {
+      if (!abortController.signal.aborted) {
+        alert((language === 'ru' ? 'Ошибка запуска генерации: ' : 'Failed to generate: ') + (err?.message || err));
+      }
+    } finally {
+      setIsGenerating(false);
+      abortControllerRef.current = null;
+    }
   };
 
   // Send User Message
@@ -896,7 +975,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   // User Magic Wand Ghostwriter
   const handleExecuteUserWand = async () => {
-    if (!activeApiKey) return;
+    if (!activeApiKey) {
+      alert(language === 'ru' ? 'Сначала укажите API-ключ в настройках' : 'Please configure an API key in settings first');
+      return;
+    }
     setIsWandGenerating(true);
     try {
       const history = buildContextHistory(messages);
@@ -912,7 +994,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
         history
       );
 
-      setInputText(suggested);
+      if (suggested && suggested.trim()) {
+        setInputText(suggested.trim());
+      }
       setShowUserWandModal(false);
       setUserWandPrompt('');
     } catch (err: any) {
@@ -940,7 +1024,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
         const recap = await summarizeScene(
           activeApiKey,
           settings?.textModel || 'deepseek/deepseek-chat',
-          history
+          history,
+          language
         );
         setSummaryModalText(recap);
       } catch (err: any) {
@@ -1114,6 +1199,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     borderRadius: `${currentTheme.bubbleRadius}px`,
                     opacity: currentTheme.bubbleOpacity,
                     fontSize: `${currentTheme.fontSize}px`,
+                    fontFamily: fontFamilyStyle,
+                    lineHeight: lineHeightStyle,
                   }}
                 >
                   {/* Image attachment if any */}
@@ -1191,7 +1278,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                       </div>
                     </div>
                   ) : (
-                    <div className="leading-relaxed whitespace-pre-wrap break-words">
+                    <div className="whitespace-pre-wrap break-words" style={{ lineHeight: lineHeightStyle }}>
                       {formatMessageText(activeVariant.text)}
                     </div>
                   )}
@@ -1403,6 +1490,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   borderRadius: `${currentTheme.bubbleRadius}px`,
                   opacity: currentTheme.bubbleOpacity,
                   fontSize: `${currentTheme.fontSize}px`,
+                  fontFamily: fontFamilyStyle,
+                  lineHeight: lineHeightStyle,
                 }}
               >
                 {streamingThought && (
@@ -1417,7 +1506,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   </div>
                 )}
 
-                <div className="leading-relaxed whitespace-pre-wrap break-words">
+                <div className="whitespace-pre-wrap break-words" style={{ lineHeight: lineHeightStyle }}>
                   {formatMessageText(streamingText || '...')}
                   <span className="inline-block w-1.5 h-4 ml-0.5 bg-violet-400 animate-pulse align-middle" />
                 </div>

@@ -82,6 +82,8 @@ export interface ChatSession {
   thoughtsEnabled: boolean;
   chatDirectives?: string;
   relationships: Record<string, number>; // characterId -> affinity (-100 to 100)
+  rollingSummary?: string; // compressed rolling summary of older messages
+  lastSummarizedMsgId?: string; // id of the latest message covered by rolling summary
   createdAt: number;
   updatedAt: number;
 }
@@ -148,6 +150,8 @@ export interface ThemeConfig {
   bubbleOpacity: number; // 0.3 to 1.0
   fontSize: number; // 13 to 20
   backgroundTint: number; // 0.0 to 0.95
+  fontFamily?: 'sans' | 'serif' | 'mono'; // dialogue font family
+  lineHeight?: 'normal' | 'relaxed' | 'loose'; // dialogue line height
 }
 
 export interface AppSettings {

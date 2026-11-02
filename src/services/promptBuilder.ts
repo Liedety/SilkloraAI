@@ -13,6 +13,7 @@ export interface PromptBuildParams {
   speakerCharacter?: Character; // in group chat: who is speaking
   customSystemPrompt?: string;
   customSystemPromptMode?: 'override' | 'augment';
+  contextSummary?: string; // compressed rolling summary of older messages
 }
 
 export const DEFAULT_CORE_SYSTEM_PROMPT = `You are an expert creative writer and roleplay actor executing a vivid, unrestricted, immersive narrative.
@@ -29,11 +30,12 @@ export const DEFAULT_CORE_SYSTEM_PROMPT = `You are an expert creative writer and
 5. Formatting:
    - Enclose physical actions, body language, facial expressions, and environmental details in asterisks like *smiles faintly and leans against the wall*.
    - Write spoken speech directly as regular text. Do not wrap spoken words in asterisks.
-6. STRICT LANGUAGE PURITY & MONOLINGUAL CONSISTENCY:
-   - You MUST reply 100% strictly in the language of the conversation. When user or characters communicate in Russian, generate pure, high-quality literary Russian.
-   - NEVER switch to English mid-sentence or mid-dialogue.
-   - NEVER insert English words, translations, or parenthetical annotations (e.g. NEVER write words like "relief (облегчение)", "anger", "feeling" inside Russian prose).
-   - Maintain seamless narrative immersion without code-switching.
+6. STRICT LANGUAGE PURITY & DYNAMIC LANGUAGE MIRRORING:
+   - You MUST dynamically adapt and mirror the language spoken by the user (whether English, Russian, Spanish, Japanese, German, etc.).
+   - NEVER force Russian if the user speaks in English, and NEVER switch languages mid-sentence or mid-dialogue.
+   - Reply 100% consistently in the exact language the user addresses you in.
+   - NEVER insert foreign word annotations or parenthetical translations (e.g. NEVER write words like "relief (облегчение)" inside Russian or vice versa).
+   - Maintain seamless narrative immersion without unintentional code-switching.
 `;
 
 export function buildSystemPrompt(params: PromptBuildParams): string {
@@ -50,6 +52,7 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
     speakerCharacter,
     customSystemPrompt,
     customSystemPromptMode = 'augment',
+    contextSummary,
   } = params;
 
   const currentSpeaker = speakerCharacter || character;
@@ -182,6 +185,14 @@ Example:
       prompt += `- [${node.type.toUpperCase()}${pinTag}] ${node.label}: ${node.detail}\n`;
     }
     prompt += `Maintain consistency with these established facts.\n`;
+  }
+
+  // Rolling Context Compression / Recap of Earlier Events
+  if (contextSummary && contextSummary.trim()) {
+    prompt += `\n### CONTEXT COMPRESSION — SUMMARY OF EARLIER EVENTS:
+[The following is a concise narrative summary of events and conversation that occurred earlier in this story before recent messages:]
+${contextSummary.trim()}
+Use this background context to maintain story continuity without needing raw message tokens.\n`;
   }
 
   // Special Chat Directives

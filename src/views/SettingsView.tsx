@@ -19,7 +19,7 @@ import {
   Upload,
   RotateCcw,
 } from 'lucide-react';
-import { db, DEFAULT_THEME, APP_THEMES } from '../db';
+import { db, DEFAULT_THEME, APP_THEMES, getLocalizedTextStyle } from '../db';
 import type {
   ApiKeyConfig,
   ApiProvider,
@@ -85,75 +85,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   // System Prompt Customization State
   const [customPrompt, setCustomPrompt] = useState(settings?.customSystemPrompt ?? '');
-  const [customPromptMode, setCustomPromptMode] = useState<'override' | 'augment'>(
-    settings?.customSystemPromptMode ?? 'augment'
-  );
-  const [isPromptSaved, setIsPromptSaved] = useState(false);
   const [promptFeedback, setPromptFeedback] = useState<string | null>(null);
   const promptFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (settings) {
       setCustomPrompt(settings.customSystemPrompt || '');
-      setCustomPromptMode(settings.customSystemPromptMode || 'augment');
     }
-  }, [settings?.customSystemPrompt, settings?.customSystemPromptMode]);
+  }, [settings?.customSystemPrompt]);
 
-  const handleSavePrompt = async () => {
-    await db.settings.update('default', {
-      customSystemPrompt: customPrompt,
-      customSystemPromptMode: customPromptMode,
-    });
-    setIsPromptSaved(true);
-    setPromptFeedback(t.saveSuccessful);
-    setTimeout(() => {
-      setIsPromptSaved(false);
-      setPromptFeedback(null);
-    }, 2000);
-  };
-
-  const handleResetPrompt = async () => {
-    setCustomPrompt('');
-    setCustomPromptMode('augment');
-    await db.settings.update('default', {
-      customSystemPrompt: '',
-      customSystemPromptMode: 'augment',
-    });
-    setPromptFeedback(t.promptResetSuccess);
-    setTimeout(() => setPromptFeedback(null), 2000);
-  };
-
-  const handleLoadDefaultPrompt = () => {
-    setCustomPrompt(DEFAULT_CORE_SYSTEM_PROMPT);
-    setPromptFeedback(language === 'ru' ? 'Базовый шаблон загружен в редактор' : 'Default template loaded into editor');
-    setTimeout(() => setPromptFeedback(null), 2000);
-  };
-
-  const handleExportPrompt = () => {
+  const handleDownloadPrompt = () => {
     const content = customPrompt || DEFAULT_CORE_SYSTEM_PROMPT;
-    const payload = JSON.stringify(
-      {
-        customSystemPrompt: content,
-        customSystemPromptMode: customPromptMode,
-        exportedAt: new Date().toISOString(),
-      },
-      null,
-      2
-    );
-    const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `silklora-system-prompt-${customPromptMode}.json`;
+    a.download = 'silklora-system-prompt.txt';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    setPromptFeedback(t.promptExported);
-    setTimeout(() => setPromptFeedback(null), 2000);
+    setPromptFeedback(language === 'ru' ? 'Файл silklora-system-prompt.txt скачан' : 'silklora-system-prompt.txt downloaded');
+    setTimeout(() => setPromptFeedback(null), 2500);
   };
 
-  const handleImportPromptFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleUploadPromptFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
@@ -163,23 +119,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     };
     reader.onload = async (ev) => {
       const text = ev.target?.result;
-      if (typeof text === 'string') {
+      if (typeof text === 'string' && text.trim()) {
         let contentToUse = text;
-        let modeToUse = customPromptMode;
-
         try {
           const parsed = JSON.parse(text);
           if (parsed && typeof parsed === 'object') {
             if (typeof parsed.customSystemPrompt === 'string') {
               contentToUse = parsed.customSystemPrompt;
-              if (parsed.customSystemPromptMode === 'override' || parsed.customSystemPromptMode === 'augment') {
-                modeToUse = parsed.customSystemPromptMode;
-              }
             } else if (typeof parsed.prompt === 'string') {
               contentToUse = parsed.prompt;
-              if (parsed.mode === 'override' || parsed.mode === 'augment') {
-                modeToUse = parsed.mode;
-              }
             }
           }
         } catch {
@@ -187,17 +135,26 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         }
 
         setCustomPrompt(contentToUse);
-        setCustomPromptMode(modeToUse);
         await db.settings.update('default', {
           customSystemPrompt: contentToUse,
-          customSystemPromptMode: modeToUse,
+          customSystemPromptMode: 'override',
         });
-        setPromptFeedback(t.promptImported);
-        setTimeout(() => setPromptFeedback(null), 2000);
+        setPromptFeedback(language === 'ru' ? 'Шаблон .txt успешно загружен!' : 'Custom .txt prompt loaded successfully!');
+        setTimeout(() => setPromptFeedback(null), 2500);
       }
     };
     reader.readAsText(file);
     e.target.value = '';
+  };
+
+  const handleResetPromptToDefault = async () => {
+    setCustomPrompt('');
+    await db.settings.update('default', {
+      customSystemPrompt: '',
+      customSystemPromptMode: 'augment',
+    });
+    setPromptFeedback(t.promptResetSuccess);
+    setTimeout(() => setPromptFeedback(null), 2500);
   };
 
   // Theme settings local state
@@ -788,12 +745,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
 
           <div className="space-y-2">
-            {textStyles.map((st) => {
-              const isSelected = settings?.textStyleId === st.id;
+            {textStyles.map((rawSt) => {
+              const st = getLocalizedTextStyle(rawSt, language);
+              const isSelected = settings?.textStyleId === rawSt.id;
               return (
                 <div
-                  key={st.id}
-                  onClick={() => db.settings.update('default', { textStyleId: st.id })}
+                  key={rawSt.id}
+                  onClick={() => db.settings.update('default', { textStyleId: rawSt.id })}
                   className={`p-3 rounded-xl border transition-all cursor-pointer select-none ${
                     isSelected
                       ? 'bg-violet-950/30 border-violet-500'
@@ -846,7 +804,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
-        {/* 6. System Prompt Template */}
+        {/* 6. System Prompt Settings */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
@@ -865,110 +823,64 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             {t.sectionSystemPromptDesc}
           </p>
 
-          {/* Mode Selector */}
-          <div className="flex items-center gap-2 pt-1">
-            <span className="text-xs text-slate-400 font-medium">{t.promptModeLabel}:</span>
-            <div className="flex bg-silk-950 p-0.5 rounded-xl border border-silk-800">
-              <button
-                type="button"
-                onClick={() => setCustomPromptMode('augment')}
-                className={`px-3 py-1 rounded-lg text-xs font-medium transition-all ${
-                  customPromptMode === 'augment'
-                    ? 'bg-violet-600 text-white shadow-md'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                {t.promptModeAugment}
-              </button>
-              <button
-                type="button"
-                onClick={() => setCustomPromptMode('override')}
-                className={`px-3 py-1 rounded-lg text-xs font-medium transition-all ${
-                  customPromptMode === 'override'
-                    ? 'bg-rose-600 text-white shadow-md'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                {t.promptModeOverride}
-              </button>
+          {/* Standard .txt File Representation Card */}
+          <div className="p-3 bg-silk-950 rounded-xl border border-silk-800 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-10 h-10 rounded-xl bg-violet-600/20 border border-violet-500/40 flex items-center justify-center shrink-0">
+                <FileText className="w-5 h-5 text-violet-400" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-white flex items-center gap-1.5 truncate">
+                  <span>silklora-system-prompt.txt</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 font-mono">
+                    {customPrompt ? (language === 'ru' ? 'пользовательский' : 'custom') : (language === 'ru' ? 'базовый' : 'standard')}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 truncate mt-0.5">
+                  {customPrompt ? t.customPromptActiveBadge : t.basePromptTxtBadge}
+                </p>
+              </div>
             </div>
+
+            {customPrompt && (
+              <button
+                type="button"
+                onClick={handleResetPromptToDefault}
+                className="px-2.5 py-1 text-[11px] text-slate-400 hover:text-white bg-silk-850 hover:bg-silk-800 rounded-lg border border-silk-750 shrink-0 ml-2 transition-all flex items-center gap-1"
+                title={t.resetToDefaultPrompt}
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>{language === 'ru' ? 'Сбросить' : 'Reset'}</span>
+              </button>
+            )}
           </div>
 
-          {/* Prompt Editor */}
-          <div className="space-y-1.5">
-            <textarea
-              rows={8}
-              value={customPrompt}
-              onChange={(e) => setCustomPrompt(e.target.value)}
-              placeholder={customPromptMode === 'override' ? DEFAULT_CORE_SYSTEM_PROMPT : t.promptTemplatePlaceholder}
-              className="w-full p-3 bg-silk-950 border border-silk-700/80 rounded-xl text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-violet-500 leading-relaxed resize-y"
-            />
-            <div className="flex items-center justify-between text-[10px] text-slate-500 px-1">
-              <span>{language === 'ru' ? 'Переменные: {{char}} — персонаж, {{user}} — игрок' : 'Placeholders: {{char}} = Character, {{user}} = User'}</span>
-              <span>{customPrompt.length} chars</span>
-            </div>
-          </div>
+          {/* Download & Upload Buttons */}
+          <div className="grid grid-cols-2 gap-2 pt-1">
+            <button
+              type="button"
+              onClick={handleDownloadPrompt}
+              className="flex items-center justify-center gap-2 py-2.5 px-3 bg-silk-850 hover:bg-silk-800 text-slate-200 hover:text-white rounded-xl text-xs font-semibold border border-silk-750 shadow-sm active:scale-98 transition-all"
+            >
+              <Download className="w-4 h-4 text-violet-400" />
+              <span>{t.downloadPrompt}</span>
+            </button>
 
-          {/* Action Buttons: Save, Reset, Export, Import */}
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleSavePrompt}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-md active:scale-95 transition-all"
-              >
-                <Check className="w-3.5 h-3.5" />
-                <span>{t.savePrompt}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleResetPrompt}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-silk-850 hover:bg-silk-800 text-slate-300 hover:text-white rounded-xl text-xs font-medium border border-silk-750 active:scale-95 transition-all"
-                title={t.resetPromptDefault}
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>{t.resetPromptDefault}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleLoadDefaultPrompt}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-silk-850 hover:bg-silk-800 text-slate-300 hover:text-white rounded-xl text-xs font-medium border border-silk-750 active:scale-95 transition-all"
-                title={t.loadDefaultPrompt}
-              >
-                <FileText className="w-3.5 h-3.5" />
-                <span>{t.loadDefaultPrompt}</span>
-              </button>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleExportPrompt}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 bg-silk-850 hover:bg-silk-800 text-slate-300 hover:text-white rounded-xl text-xs font-medium border border-silk-750 active:scale-95 transition-all"
-                title={t.exportPrompt}
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>{t.exportPrompt}</span>
-              </button>
-
-              <label className="flex items-center gap-1.5 px-2.5 py-1.5 bg-silk-850 hover:bg-silk-800 text-slate-300 hover:text-white rounded-xl text-xs font-medium border border-silk-750 cursor-pointer active:scale-95 transition-all">
-                <Upload className="w-3.5 h-3.5" />
-                <span>{t.importPrompt}</span>
-                <input
-                  ref={promptFileInputRef}
-                  type="file"
-                  accept=".txt,.json"
-                  onChange={handleImportPromptFile}
-                  className="hidden"
-                />
-              </label>
-            </div>
+            <label className="flex items-center justify-center gap-2 py-2.5 px-3 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-md active:scale-98 transition-all cursor-pointer">
+              <Upload className="w-4 h-4 text-white" />
+              <span>{t.uploadPrompt}</span>
+              <input
+                ref={promptFileInputRef}
+                type="file"
+                accept=".txt"
+                onChange={handleUploadPromptFile}
+                className="hidden"
+              />
+            </label>
           </div>
         </div>
 
-        {/* 7. Application Theme & Palette */}
+        {/* 7. Application Themes (Design & Interface) */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4">
           <div>
             <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
@@ -1008,7 +920,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           {/* Custom App Colors: Accent, Action, Background, Surface */}
           <div className="space-y-3 pt-1 border-t border-silk-800/80">
             <h4 className="text-xs font-semibold text-slate-300">
-              {language === 'ru' ? 'Собственные цвета оформления приложения:' : 'Custom App Color Pickers:'}
+              {language === 'ru' ? 'Палитра дизайна интерфейса:' : 'App Interface Palette:'}
             </h4>
             <div className="grid grid-cols-2 gap-3">
               <div>
@@ -1066,7 +978,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
-        {/* 7. Chat Bubbles & Visual Readability */}
+        {/* 8. Message Bubbles Style */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4">
           <div>
             <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
@@ -1076,7 +988,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <p className="text-[11px] text-slate-400 mt-1 leading-snug">{t.sectionChatStylingDesc}</p>
           </div>
 
-          {/* Sliders: Radius, Opacity, Font size, Background tint */}
+          {/* Bubble Colors: User and Bot */}
+          <div className="grid grid-cols-2 gap-3 pt-1">
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">{t.bubbleUserBg}</label>
+              <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
+                <input
+                  type="color"
+                  value={currentTheme.bubbleUserBg}
+                  onChange={(e) => handleUpdateTheme({ bubbleUserBg: e.target.value })}
+                  className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
+                />
+                <span className="text-xs font-mono text-slate-300">{currentTheme.bubbleUserBg}</span>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">{t.bubbleBotBg}</label>
+              <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
+                <input
+                  type="color"
+                  value={currentTheme.bubbleBotBg}
+                  onChange={(e) => handleUpdateTheme({ bubbleBotBg: e.target.value })}
+                  className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
+                />
+                <span className="text-xs font-mono text-slate-300">{currentTheme.bubbleBotBg}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Sliders: Radius, Opacity, Background tint */}
           <div className="space-y-3 pt-1">
             <div>
               <div className="flex justify-between text-xs text-slate-400 mb-1">
@@ -1111,21 +1052,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
             <div>
               <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span>{t.fontSize}</span>
-                <span className="font-mono">{currentTheme.fontSize}px</span>
-              </div>
-              <input
-                type="range"
-                min={13}
-                max={18}
-                value={currentTheme.fontSize}
-                onChange={(e) => handleUpdateTheme({ fontSize: parseInt(e.target.value) })}
-                className="w-full accent-violet-500 h-1.5 bg-silk-800 rounded-lg cursor-pointer"
-              />
-            </div>
-
-            <div>
-              <div className="flex justify-between text-xs text-slate-400 mb-1">
                 <span>{t.backgroundTint}</span>
                 <span className="font-mono">{Math.round(currentTheme.backgroundTint * 100)}%</span>
               </div>
@@ -1139,33 +1065,89 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 className="w-full accent-violet-500 h-1.5 bg-silk-800 rounded-lg cursor-pointer"
               />
             </div>
+          </div>
+        </div>
 
-            {/* Bubble Colors: User and Bot */}
-            <div className="grid grid-cols-2 gap-3 pt-1">
-              <div>
-                <label className="block text-[11px] text-slate-400 mb-1">{t.bubbleUserBg}</label>
-                <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
-                  <input
-                    type="color"
-                    value={currentTheme.bubbleUserBg}
-                    onChange={(e) => handleUpdateTheme({ bubbleUserBg: e.target.value })}
-                    className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
-                  />
-                  <span className="text-xs font-mono text-slate-300">{currentTheme.bubbleUserBg}</span>
-                </div>
+        {/* 9. Typography & Text Settings */}
+        <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4">
+          <div>
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+              <Type className="w-4 h-4 text-violet-400" />
+              <span>{t.sectionTypography}</span>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1 leading-snug">{t.sectionTypographyDesc}</p>
+          </div>
+
+          <div className="space-y-4 pt-1">
+            {/* Font Size */}
+            <div>
+              <div className="flex justify-between text-xs text-slate-400 mb-1">
+                <span>{t.fontSize}</span>
+                <span className="font-mono text-violet-400 font-semibold">{currentTheme.fontSize}px</span>
               </div>
+              <input
+                type="range"
+                min={12}
+                max={20}
+                value={currentTheme.fontSize}
+                onChange={(e) => handleUpdateTheme({ fontSize: parseInt(e.target.value) })}
+                className="w-full accent-violet-500 h-1.5 bg-silk-800 rounded-lg cursor-pointer"
+              />
+            </div>
 
-              <div>
-                <label className="block text-[11px] text-slate-400 mb-1">{t.bubbleBotBg}</label>
-                <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
-                  <input
-                    type="color"
-                    value={currentTheme.bubbleBotBg}
-                    onChange={(e) => handleUpdateTheme({ bubbleBotBg: e.target.value })}
-                    className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
-                  />
-                  <span className="text-xs font-mono text-slate-300">{currentTheme.bubbleBotBg}</span>
-                </div>
+            {/* Font Family Selector */}
+            <div>
+              <label className="block text-xs text-slate-400 mb-1.5 font-medium">{t.fontFamily}</label>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { id: 'sans', label: t.fontFamilySans, fontStyle: 'font-sans' },
+                  { id: 'serif', label: t.fontFamilySerif, fontStyle: 'font-serif' },
+                  { id: 'mono', label: t.fontFamilyMono, fontStyle: 'font-mono' },
+                ].map((f) => {
+                  const isSelected = (currentTheme.fontFamily || 'sans') === f.id;
+                  return (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => handleUpdateTheme({ fontFamily: f.id as any })}
+                      className={`p-2 rounded-xl border text-center transition-all ${
+                        isSelected
+                          ? 'bg-violet-600/25 border-violet-500 text-white font-semibold'
+                          : 'bg-silk-850 border-silk-800 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      <span className={`text-xs block ${f.fontStyle}`}>{f.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Line Spacing Selector */}
+            <div>
+              <label className="block text-xs text-slate-400 mb-1.5 font-medium">{t.lineHeight}</label>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { id: 'normal', label: t.lineHeightNormal },
+                  { id: 'relaxed', label: t.lineHeightRelaxed },
+                  { id: 'loose', label: t.lineHeightLoose },
+                ].map((lh) => {
+                  const isSelected = (currentTheme.lineHeight || 'relaxed') === lh.id;
+                  return (
+                    <button
+                      key={lh.id}
+                      type="button"
+                      onClick={() => handleUpdateTheme({ lineHeight: lh.id as any })}
+                      className={`p-2 rounded-xl border text-center transition-all ${
+                        isSelected
+                          ? 'bg-violet-600/25 border-violet-500 text-white font-semibold'
+                          : 'bg-silk-850 border-silk-800 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      <span className="text-xs block">{lh.label}</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           </div>
