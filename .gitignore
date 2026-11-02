@@ -6,3 +6,5 @@ android/app/build
 android/build
 *.apk
 .temp
+.agents
+
