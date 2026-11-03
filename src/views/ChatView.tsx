@@ -32,7 +32,7 @@ import type {
   MessageVariant,
 } from '../types';
 import { translations } from '../i18n';
-import { streamChatCompletion, suggestUserReply, summarizeScene, compressChatHistory, cleanArtifacts } from '../services/ai';
+import { streamChatCompletion, suggestUserReply, summarizeScene, compressChatHistory, cleanArtifacts, extractEmotionAndCleanResponse } from '../services/ai';
 import { buildSystemPrompt } from '../services/promptBuilder';
 import { extractMemoryAndAffinity } from '../services/memoryGraph';
 import { ChatSettingsModal } from './ChatSettingsModal';
@@ -100,15 +100,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
         // Seed initial greeting if character has greeting enabled
         if (type === 'character' && character && character.greeting && character.greetingEnabled) {
+          const parsedGreeting = extractEmotionAndCleanResponse(character.greeting, character.emotions);
           const greetingMsg: ChatMessage = {
             id: 'msg-' + Math.random().toString(36).substring(2, 10),
             chatId: newSession.id,
             senderId: character.id,
             senderName: character.name,
             senderAvatar: character.avatar,
+            emotion: parsedGreeting.emotion,
             variants: [
               {
-                text: character.greeting,
+                text: parsedGreeting.text || character.greeting,
+                emotion: parsedGreeting.emotion,
+                thought: parsedGreeting.thought,
                 timestamp: Date.now(),
               },
             ],
@@ -331,27 +335,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const emLower = emotion.trim().toLowerCase();
       // 1. Direct match on name or label
       const direct = char.emotions.find(
-        (e) => e.name.toLowerCase() === emLower || e.label?.toLowerCase() === emLower
+        (e) => (e.name.toLowerCase() === emLower || e.label?.toLowerCase() === emLower) && e.avatar
       );
       if (direct?.avatar) return direct.avatar;
 
       // 2. Fuzzy synonym match (Russian & English)
       const synonymGroups: Record<string, string[]> = {
-        happy: ['happy', 'joy', 'smile', 'радость', 'улыбка', 'веселье', 'счастье'],
-        sad: ['sad', 'sorrow', 'crying', 'грусть', 'печаль', 'слезы', 'тоска'],
-        angry: ['angry', 'furious', 'rage', 'гнев', 'злость', 'ярость', 'раздражение'],
-        blushing: ['blushing', 'shy', 'embarrassed', 'смущение', 'стыд', 'румянец'],
-        smirk: ['smirk', 'tease', 'playful', 'усмешка', 'сарказм', 'ухмылка'],
-        surprised: ['surprised', 'shocked', 'удивление', 'шок', 'испуг'],
-        thoughtful: ['thoughtful', 'pensive', 'задумчивость', 'размышление'],
-        neutral: ['neutral', 'calm', 'нейтральный', 'спокойствие'],
+        happy: ['happy', 'joy', 'smile', 'радость', 'улыбка', 'веселье', 'счастье', 'радостный', 'веселый'],
+        sad: ['sad', 'sorrow', 'crying', 'грусть', 'печаль', 'слезы', 'тоска', 'грустный', 'печальный'],
+        angry: ['angry', 'furious', 'rage', 'гнев', 'злость', 'ярость', 'раздражение', 'злой', 'сердитый'],
+        blushing: ['blushing', 'shy', 'embarrassed', 'смущение', 'стыд', 'румянец', 'смущенный'],
+        smirk: ['smirk', 'tease', 'playful', 'усмешка', 'сарказм', 'ухмылка', 'ухмыляющийся'],
+        surprised: ['surprised', 'shocked', 'удивление', 'шок', 'испуг', 'удивленный'],
+        thoughtful: ['thoughtful', 'pensive', 'задумчивость', 'размышление', 'задумчивый'],
+        neutral: ['neutral', 'calm', 'нейтральный', 'спокойствие', 'спокойный'],
       };
 
       for (const [, words] of Object.entries(synonymGroups)) {
-        if (words.some((w) => emLower.includes(w))) {
+        if (words.some((w) => emLower.includes(w) || w.includes(emLower))) {
           const match = char.emotions.find((e) => {
             const eName = (e.name + ' ' + (e.label || '')).toLowerCase();
-            return words.some((w) => eName.includes(w));
+            return e.avatar && words.some((w) => eName.includes(w) || w.includes(eName));
           });
           if (match?.avatar) return match.avatar;
         }
@@ -368,41 +372,43 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const char = allCharacters.find((c) => c.id === senderId) || (type === 'character' ? character : undefined);
     if (!char || !char.emotions || char.emotions.length === 0) return null;
 
-    if (emotion && emotion.trim()) {
+    if (emotion && emotion.trim() && emotion.trim().toLowerCase() !== 'none') {
       const emLower = emotion.trim().toLowerCase();
       // 1. Direct match on name or label
       const direct = char.emotions.find(
-        (e) => e.name.toLowerCase() === emLower || e.label?.toLowerCase() === emLower
+        (e) => (e.name.toLowerCase() === emLower || e.label?.toLowerCase() === emLower) && e.avatar
       );
       if (direct?.avatar) return { avatar: direct.avatar, name: direct.label || direct.name };
 
       // 2. Fuzzy synonym match (Russian & English)
       const synonymGroups: Record<string, string[]> = {
-        happy: ['happy', 'joy', 'smile', 'радость', 'улыбка', 'веселье', 'счастье'],
-        sad: ['sad', 'sorrow', 'crying', 'грусть', 'печаль', 'слезы', 'тоска'],
-        angry: ['angry', 'furious', 'rage', 'гнев', 'злость', 'ярость', 'раздражение'],
-        blushing: ['blushing', 'shy', 'embarrassed', 'смущение', 'стыд', 'румянец'],
-        smirk: ['smirk', 'tease', 'playful', 'усмешка', 'сарказм', 'ухмылка'],
-        surprised: ['surprised', 'shocked', 'удивление', 'шок', 'испуг'],
-        thoughtful: ['thoughtful', 'pensive', 'задумчивость', 'размышление'],
-        neutral: ['neutral', 'calm', 'нейтральный', 'спокойствие'],
+        happy: ['happy', 'joy', 'smile', 'радость', 'улыбка', 'веселье', 'счастье', 'радостный', 'веселый'],
+        sad: ['sad', 'sorrow', 'crying', 'грусть', 'печаль', 'слезы', 'тоска', 'грустный', 'печальный'],
+        angry: ['angry', 'furious', 'rage', 'гнев', 'злость', 'ярость', 'раздражение', 'злой', 'сердитый'],
+        blushing: ['blushing', 'shy', 'embarrassed', 'смущение', 'стыд', 'румянец', 'смущенный'],
+        smirk: ['smirk', 'tease', 'playful', 'усмешка', 'сарказм', 'ухмылка', 'ухмыляющийся'],
+        surprised: ['surprised', 'shocked', 'удивление', 'шок', 'испуг', 'удивленный'],
+        thoughtful: ['thoughtful', 'pensive', 'задумчивость', 'размышление', 'задумчивый'],
+        neutral: ['neutral', 'calm', 'нейтральный', 'спокойствие', 'спокойный'],
       };
 
       for (const [, words] of Object.entries(synonymGroups)) {
-        if (words.some((w) => emLower.includes(w))) {
+        if (words.some((w) => emLower.includes(w) || w.includes(emLower))) {
           const match = char.emotions.find((e) => {
             const eName = (e.name + ' ' + (e.label || '')).toLowerCase();
-            return words.some((w) => eName.includes(w));
+            return e.avatar && words.some((w) => eName.includes(w) || w.includes(eName));
           });
           if (match?.avatar) return { avatar: match.avatar, name: match.label || match.name };
         }
       }
     }
 
-    // 3. Fallback: if character has neutral sprite with avatar or first sprite with avatar
-    const fallback = char.emotions.find((e) => e.name === 'neutral' && e.avatar) || char.emotions.find((e) => e.avatar);
-    if (fallback?.avatar) {
-      return { avatar: fallback.avatar, name: fallback.label || fallback.name };
+    // 3. Fallback: only if emotion is explicitly 'neutral'
+    if (emotion && emotion.trim().toLowerCase() === 'neutral') {
+      const fallback = char.emotions.find((e) => e.name === 'neutral' && e.avatar);
+      if (fallback?.avatar) {
+        return { avatar: fallback.avatar, name: fallback.label || fallback.name };
+      }
     }
 
     return null;
@@ -411,10 +417,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // Build current dialogue context string for AI
   const buildContextHistory = (msgList: ChatMessage[]): string => {
     return msgList
-      .slice(-12)
+      .slice(-8)
       .map((m) => {
         const v = m.variants[m.activeVariantIndex];
-        return `${m.senderName}: ${v ? v.text : ''}`;
+        const raw = v ? v.text : '';
+        const cleaned = raw
+          .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+          .replace(/<thought>[\s\S]*$/gi, '')
+          .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
+          .replace(/<\s*emotion[:\s][^>]+>/gi, '')
+          .replace(/(?:\[|<|\()(?:эмоция|emotion):\s*[^\]>\)]+(?:\]|>|\))/gi, '')
+          .trim();
+        return `${m.senderName}: ${cleaned}`;
       })
       .join('\n');
   };
@@ -496,8 +510,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const dialogueLang: 'en' | 'ru' = /[а-яА-ЯёЁ]/.test(lastUserText) ? 'ru' : (/[a-zA-Z]/.test(lastUserText) ? 'en' : language);
       const textStyleToUse = rawStyle ? getLocalizedTextStyle(rawStyle, dialogueLang) : undefined;
 
-      // Keep recent 12 dialogue turns verbatim; compress older dialogue turns into concise rolling summary
-      const RECENT_DIALOGUE_TURNS = 12;
+      // Prepare context compression summary for older messages (read fresh from DB)
+      const freshChat = await db.chats.get(session.id);
+      let contextSummary = freshChat?.rollingSummary?.trim() || session.rollingSummary?.trim() || '';
+
+      // Keep recent dialogue turns verbatim (6 turns when rolling summary is present, 8 when not) to prevent context ballooning and slow generations
+      const RECENT_DIALOGUE_TURNS = contextSummary ? 6 : 8;
       let olderMsgs: ChatMessage[] = [];
       let contextMsgs = msgsForContext;
 
@@ -506,15 +524,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
         contextMsgs = msgsForContext.slice(-RECENT_DIALOGUE_TURNS);
       }
 
-      // Prepare context compression summary for older messages (read fresh from DB)
-      const freshChat = await db.chats.get(session.id);
-      let contextSummary = freshChat?.rollingSummary?.trim() || session.rollingSummary?.trim() || '';
       if (!contextSummary && olderMsgs.length > 0) {
         const synopsis = olderMsgs
-          .slice(-8)
+          .slice(-6)
           .map((m) => {
             const v = m.variants[m.activeVariantIndex]?.text?.trim() || '';
-            return `${m.senderName}: ${v.length > 100 ? v.slice(0, 100) + '...' : v}`;
+            const cleaned = v.replace(/<thought>[\s\S]*?<\/thought>/gi, '').trim();
+            return `${m.senderName}: ${cleaned.length > 80 ? cleaned.slice(0, 80) + '...' : cleaned}`;
           })
           .join('\n');
         contextSummary = (dialogueLang === 'ru' ? 'Предыдущие события диалога:\n' : 'Earlier dialogue events:\n') + synopsis;
@@ -554,12 +570,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
         const isMe = type === 'group' ? msg.senderId === speaker.id : msg.senderId !== 'user';
         const role: 'user' | 'assistant' = isMe ? 'assistant' : 'user';
 
-        let textContent = activeVariant.text.trim();
+        // Strip any hidden <thought> tags and leaked emotion tags from history so past turns do not inflate prompt tokens or trigger ballooning responses
+        let textContent = activeVariant.text
+          .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+          .replace(/<thought>[\s\S]*$/gi, '')
+          .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
+          .replace(/<\s*emotion[:\s][^>]+>/gi, '')
+          .replace(/(?:\[|<|\()(?:эмоция|emotion):\s*[^\]>\)]+(?:\]|>|\))/gi, '')
+          .trim();
         if (type === 'group' && !isMe) {
           textContent = `[${msg.senderName}]: ${textContent}`;
-        }
-        if (isMe && activeVariant.thought && session.thoughtsEnabled) {
-          textContent = `<thought>${activeVariant.thought}</thought>\n${textContent}`;
         }
 
         rawTurns.push({
@@ -638,20 +658,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
           let currentThought = '';
           let display = fullGenerated;
 
+          // Check for emotion tag early across full stream (even before/inside/after thought tag)
+          const emotionMatch = fullGenerated.match(/<emotion>([^<]+)<\/emotion>/i)
+            || fullGenerated.match(/(?:\[|<|\()(?:эмоция|emotion):\s*([^\]>\)]+)(?:\]|>|\))/i);
+          if (emotionMatch) {
+            setStreamingEmotion(emotionMatch[1].trim().toLowerCase());
+          }
+
           const thoughtMatch = display.match(/<thought>([\s\S]*?)<\/thought>/);
           if (thoughtMatch) {
-            currentThought = thoughtMatch[1].trim();
+            currentThought = thoughtMatch[1].replace(/<emotion>[\s\S]*?<\/emotion>/gi, '').trim();
             display = display.replace(/<thought>[\s\S]*?<\/thought>/, '').trimStart();
           } else if (display.startsWith('<thought>')) {
-            currentThought = display.replace('<thought>', '');
+            currentThought = display.replace('<thought>', '').replace(/<emotion>[\s\S]*?<\/emotion>/gi, '');
             display = '';
           }
 
-          const emotionMatch = display.match(/<emotion>([^<]+)<\/emotion>/i);
-          if (emotionMatch) {
-            setStreamingEmotion(emotionMatch[1].trim().toLowerCase());
-            display = display.replace(/<emotion>[\s\S]*?<\/emotion>/gi, '').trimStart();
-          }
+          display = display
+            .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
+            .replace(/<\s*emotion[:\s][^>]+>/gi, '')
+            .replace(/(?:\[|<|\()(?:эмоция|emotion):\s*[^\]>\)]+(?:\]|>|\))/gi, '')
+            .trimStart();
 
           setStreamingThought(currentThought);
           setStreamingText(cleanArtifacts(display));
@@ -666,55 +693,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
               return;
             }
 
-            let finalThought = '';
-            let finalText = completed;
-            let finalEmotion: string | undefined = undefined;
-
-            const match = completed.match(/<thought>([\s\S]*?)<\/thought>/);
-            if (match) {
-              finalThought = match[1].trim();
-              finalText = completed.replace(/<thought>[\s\S]*?<\/thought>/, '').trim();
-            }
-
-            // 1. Match <emotion>...</emotion>
-            const emTagMatch = finalText.match(/<emotion>([\s\S]*?)<\/emotion>/i);
-            if (emTagMatch) {
-              finalEmotion = emTagMatch[1].trim().toLowerCase();
-              finalText = finalText.replace(/<emotion>[\s\S]*?<\/emotion>/gi, '').trim();
-            }
-
-            // 2. Match [emotion: ...] or [эмоция: ...]
-            if (!finalEmotion) {
-              const emBracketMatch = finalText.match(/\[(?:эмоция|emotion):\s*([^\]]+)\]/i);
-              if (emBracketMatch) {
-                finalEmotion = emBracketMatch[1].trim().toLowerCase();
-                finalText = finalText.replace(/\[(?:эмоция|emotion):\s*[^\]]+\]/gi, '').trim();
-              }
-            }
-
-            // 3. Match standalone emotion brackets
-            if (!finalEmotion) {
-              const emWordMatch = finalText.match(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/i);
-              if (emWordMatch) {
-                finalEmotion = emWordMatch[1].trim().toLowerCase();
-                finalText = finalText.replace(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/gi, '').trim();
-              }
-            }
-
-            // 4. Fallback from actions if character has emotions configured
-            if (!finalEmotion && speaker.emotions && speaker.emotions.length > 0) {
-              const lower = finalText.toLowerCase();
-              if (/\*(?:.*)(?:улыб|сме|радост|счаст|smile|laugh|happy)(?:.*)\*/.test(lower)) finalEmotion = 'happy';
-              else if (/\*(?:.*)(?:плач|слез|груст|печал|вздох|sad|cry)(?:.*)\*/.test(lower)) finalEmotion = 'sad';
-              else if (/\*(?:.*)(?:гнев|злос|ярост|хмур|рыч|angry|rage)(?:.*)\*/.test(lower)) finalEmotion = 'angry';
-              else if (/\*(?:.*)(?:смущ|красне|румян|shy|blush)(?:.*)\*/.test(lower)) finalEmotion = 'blushing';
-              else if (/\*(?:.*)(?:ухмыл|усмеш|сарказм|smirk)(?:.*)\*/.test(lower)) finalEmotion = 'smirk';
-              else if (/\*(?:.*)(?:вздраг|удивл|шок|surpris|shock)(?:.*)\*/.test(lower)) finalEmotion = 'surprised';
-              else if (/\*(?:.*)(?:задум|размышл|pensive|thought)(?:.*)\*/.test(lower)) finalEmotion = 'thoughtful';
-              else finalEmotion = 'neutral';
-            }
-
-            finalText = cleanArtifacts(finalText);
+            const { text: finalText, thought: finalThought, emotion: finalEmotion } =
+              extractEmotionAndCleanResponse(completed, speaker.emotions);
 
             const newVariant: MessageVariant = {
               text: finalText || cleanArtifacts(completed),
@@ -779,8 +759,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
             });
 
             // Run automated context compression in background if conversation exceeds recent window
-            if (freshHistory.length > RECENT_DIALOGUE_TURNS && activeApiKey?.key) {
-              const older = freshHistory.slice(0, -RECENT_DIALOGUE_TURNS);
+            const COMPRESSION_THRESHOLD = 8;
+            if (freshHistory.length > COMPRESSION_THRESHOLD && activeApiKey?.key) {
+              const older = freshHistory.slice(0, -COMPRESSION_THRESHOLD);
               const lastOlder = older[older.length - 1];
               const latestChat = await db.chats.get(session.id);
               if (lastOlder && latestChat?.lastSummarizedMsgId !== lastOlder.id) {
@@ -796,10 +777,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 }
 
                 if (newTurnsToSummarize.length > 0) {
-                  const toSummarize = newTurnsToSummarize.map((m) => ({
-                    senderName: m.senderName,
-                    text: m.variants[m.activeVariantIndex]?.text || '',
-                  }));
+                  const toSummarize = newTurnsToSummarize.map((m) => {
+                    const t = m.variants[m.activeVariantIndex]?.text || '';
+                    return {
+                      senderName: m.senderName,
+                      text: t.replace(/<thought>[\s\S]*?<\/thought>/gi, '').trim(),
+                    };
+                  });
                   compressChatHistory(
                     activeApiKey,
                     settings?.textModel || 'deepseek/deepseek-chat',
@@ -1089,9 +1073,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
     } else if (cmd === '/action') {
       setInputText('*action* ');
     } else if (cmd === '/reset') {
-      if (window.confirm(language === 'ru' ? 'Очистить все сообщения в этой сессии?' : 'Clear messages in this chat session?')) {
+      if (window.confirm(language === 'ru' ? 'Очистить сообщения и не зафиксированные воспоминания в этой сессии?' : 'Clear messages and unpinned memories in this chat session?')) {
         if (session) {
           await db.messages.where('chatId').equals(session.id).delete();
+          const unpinned = await db.memoryNodes.where('chatId').equals(session.id).filter((n) => !n.isPinned).toArray();
+          for (const u of unpinned) {
+            await db.memoryEdges.where('source').equals(u.id).delete();
+            await db.memoryEdges.where('target').equals(u.id).delete();
+            await db.memoryNodes.delete(u.id);
+          }
+          await db.chats.update(session.id, {
+            rollingSummary: undefined,
+            lastSummarizedMsgId: undefined,
+            relationships: {},
+            updatedAt: Date.now(),
+          });
         }
       }
       setInputText('');
@@ -1132,7 +1128,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       <div
         className="absolute inset-0 pointer-events-none z-0"
         style={{
-          backgroundColor: `rgba(7, 9, 14, ${currentTheme.backgroundTint})`,
+          backgroundColor: `rgba(var(--app-bg-rgb, 7, 9, 14), ${currentTheme.backgroundTint})`,
         }}
       />
 
@@ -1214,7 +1210,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
             const botChar = !isUser ? allCharacters.find((c) => c.id === msg.senderId) || (type === 'character' ? character : undefined) : undefined;
             const botAvatar = !isUser
-              ? (botChar?.avatar || msg.senderAvatar || '')
+              ? getSpeakerAvatar(msg.senderId, activeVariant.emotion || msg.emotion, botChar?.avatar || msg.senderAvatar || '')
               : undefined;
 
             return (
@@ -1524,7 +1520,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <div className="flex justify-start items-end gap-2.5 animate-fade-in">
             <div className="relative w-8 h-8 rounded-xl overflow-hidden shrink-0 border border-silk-700 bg-silk-800 mb-1">
               <AvatarImage
-                src={streamingSender.avatar}
+                src={getSpeakerAvatar(streamingSender.id, streamingEmotion || undefined, streamingSender.avatar)}
                 alt={streamingSender.name}
                 className="w-full h-full object-cover"
               />

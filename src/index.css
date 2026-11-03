@@ -4,10 +4,23 @@
 
 :root {
   --theme-accent: #8b5cf6;
-  --theme-action: #fb7185;
   --theme-accent-rgb: 139, 92, 246;
+  --theme-accent-hover: #7c3aed;
+  --theme-accent-hover-rgb: 124, 58, 237;
+  --theme-accent-light: #a78bfa;
+  --theme-accent-light-rgb: 167, 139, 250;
+  --theme-action: #fb7185;
+  --theme-action-rgb: 251, 113, 133;
   --app-bg: #0a0814;
+  --app-bg-rgb: 10, 8, 20;
   --app-surface: #141126;
+  --app-surface-rgb: 20, 17, 38;
+  --app-surface-elevated: #1e1938;
+  --app-surface-elevated-rgb: 30, 25, 56;
+  --app-border: #2a234e;
+  --app-border-rgb: 42, 35, 78;
+  --app-border-subtle: #3a316a;
+  --app-border-subtle-rgb: 58, 49, 106;
 }
 
 @layer utilities {
@@ -41,10 +54,10 @@
   }
 }
 
-body {
+html, body {
   margin: 0;
   padding: 0;
-  background-color: #07090e;
+  background-color: var(--app-bg, #0a0814);
   color: #f8fafc;
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;

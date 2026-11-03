@@ -1,4 +1,4 @@
-import type { ApiKeyConfig, Character, Group, Language } from '../types';
+import type { ApiKeyConfig, Character, CharacterEmotion, Group, Language } from '../types';
 
 export interface ChatCompletionMessage {
   role: 'system' | 'user' | 'assistant';
@@ -407,9 +407,11 @@ export function cleanArtifacts(str: string): string {
     .replace(/^\s*User:[:\s]*/i, '')
     .replace(/^\s*Bot:[:\s]*/i, '')
     .replace(/^\s*Assistant:[:\s]*/i, '')
-    // Strip raw emotion tags from visible chat text
+    // Strip raw emotion tags and standalone bracket emotions from visible chat text
     .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
-    .replace(/\[(?:эмоция|emotion):\s*[^\]]+\]/gi, '')
+    .replace(/<\s*emotion[:\s][^>]+>/gi, '')
+    .replace(/(?:\[|<|\()(?:эмоция|emotion):\s*[^\]>\)]+(?:\]|>|\))/gi, '')
+    .replace(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/gi, '')
     // Clean accidental bilingual translation parentheticals (e.g. "слово (word)")
     .replace(/([а-яА-ЯёЁ]{2,30})\s*\([a-zA-Z\s]{2,30}\)/g, '$1')
     .replace(/([a-zA-Z]{2,30})\s*\(([а-яА-ЯёЁ\s]{2,30})\)/g, '$2')
@@ -425,6 +427,128 @@ export function cleanArtifacts(str: string): string {
     .replace(/\s*[\{\}]\s*$/g, '')
     .replace(/^\s*[\{\}]\s*/g, '')
     .trim();
+}
+
+export interface ParsedBotResponse {
+  text: string;
+  thought?: string;
+  emotion?: string;
+}
+
+/**
+ * Robustly parses and extracts character emotion, inner monologue thoughts, and clean visible text
+ * from a raw LLM response. Prevents default-to-neutral traps by extracting tags from anywhere
+ * (including inside thoughts) and heuristically analyzing emotional context when tags are absent.
+ */
+export function extractEmotionAndCleanResponse(
+  completed: string,
+  characterEmotions?: CharacterEmotion[]
+): ParsedBotResponse {
+  if (!completed || !completed.trim()) {
+    return { text: '' };
+  }
+
+  let finalEmotion: string | undefined = undefined;
+
+  // 1. Match <emotion>...</emotion> anywhere in full generated response
+  const emTagMatch = completed.match(/<emotion>([\s\S]*?)<\/emotion>/i);
+  if (emTagMatch) {
+    finalEmotion = emTagMatch[1].trim().toLowerCase();
+  }
+
+  // 2. Match [emotion: ...] or <emotion: ...> or (emotion: ...)
+  if (!finalEmotion) {
+    const emBracketMatch = completed.match(/(?:\[|<|\()(?:эмоция|emotion):\s*([^\]>\)]+)(?:\]|>|\))/i);
+    if (emBracketMatch) {
+      finalEmotion = emBracketMatch[1].trim().toLowerCase();
+    }
+  }
+
+  // 3. Match standalone emotion brackets like [happy] or [радость]
+  if (!finalEmotion) {
+    const emWordMatch = completed.match(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/i);
+    if (emWordMatch) {
+      finalEmotion = emWordMatch[1].trim().toLowerCase();
+    }
+  }
+
+  // Extract thoughts: <thought>...</thought>
+  let finalThought = '';
+  let visibleText = completed;
+
+  const thoughtMatch = completed.match(/<thought>([\s\S]*?)<\/thought>/);
+  if (thoughtMatch) {
+    finalThought = thoughtMatch[1].trim();
+    visibleText = completed.replace(/<thought>[\s\S]*?<\/thought>/, '').trim();
+  } else if (visibleText.startsWith('<thought>')) {
+    // Unclosed thought block
+    finalThought = visibleText.replace('<thought>', '').trim();
+    visibleText = '';
+  }
+
+  // Strip emotion tags from thought content if they leaked inside
+  if (finalThought) {
+    finalThought = finalThought
+      .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
+      .replace(/<\s*emotion[:\s][^>]+>/gi, '')
+      .replace(/(?:\[|<|\()(?:эмоция|emotion):\s*[^\]>\)]+(?:\]|>|\))/gi, '')
+      .trim();
+  }
+
+  // 4. Fallback: if character has emotions configured, detect mood from actions, speech, and thoughts
+  if (!finalEmotion && characterEmotions && characterEmotions.length > 0) {
+    const textToAnalyze = (visibleText + ' ' + finalThought).toLowerCase();
+    const emotionPatterns: Array<{ name: string; regex: RegExp }> = [
+      { name: 'happy', regex: /(?:улыб|сме|радост|счаст|весел|хохот|хихик|smile|laugh|happy|grin|giggle|cheerful|joy)/i },
+      { name: 'sad', regex: /(?:плач|слез|груст|печал|вздох|тоск|рыдан|всхлип|sad|cry|tear|grief|sorrow|sigh|weep)/i },
+      { name: 'angry', regex: /(?:гнев|злос|ярост|хмур|рыч|раздраж|стиснул|оскал|крик|angry|rage|furious|growl|frown|irritat|scowl|snarl)/i },
+      { name: 'blushing', regex: /(?:смущ|красне|покрасн|румян|стыд|неловк|shy|blush|embarrass|fluster)/i },
+      { name: 'smirk', regex: /(?:ухмыл|усмеш|сарказм|ехидн|прищур|подразн|smirk|tease|mock|sneer|playful|wry)/i },
+      { name: 'surprised', regex: /(?:вздраг|удивл|шок|опешил|замер|surpris|shock|startle|gasp|stun)/i },
+      { name: 'thoughtful', regex: /(?:задум|размышл|нахмурил лоб|взгляд в пустоту|pensive|thought|ponder|reflect|contemplat)/i },
+    ];
+
+    for (const ep of emotionPatterns) {
+      const hasConfigured = characterEmotions.some(
+        (e) => e.name.toLowerCase() === ep.name || e.label?.toLowerCase() === ep.name
+      );
+      if (hasConfigured && ep.regex.test(textToAnalyze)) {
+        finalEmotion = ep.name;
+        break;
+      }
+    }
+
+    // Direct emotion name match in text
+    if (!finalEmotion) {
+      for (const em of characterEmotions) {
+        const eName = em.name.toLowerCase();
+        if (eName !== 'neutral' && new RegExp(`\\b${eName}\\b`, 'i').test(textToAnalyze)) {
+          finalEmotion = eName;
+          break;
+        }
+      }
+    }
+
+    // Default to neutral if neutral is explicitly in character emotions
+    if (!finalEmotion && characterEmotions.some((e) => e.name.toLowerCase() === 'neutral')) {
+      finalEmotion = 'neutral';
+    }
+  }
+
+  // Strip all emotion tags from visible text
+  visibleText = visibleText
+    .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
+    .replace(/<\s*emotion[:\s][^>]+>/gi, '')
+    .replace(/(?:\[|<|\()(?:эмоция|emotion):\s*[^\]>\)]+(?:\]|>|\))/gi, '')
+    .replace(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/gi, '');
+
+  const cleaned = cleanArtifacts(visibleText);
+
+  return {
+    text: cleaned || cleanArtifacts(completed),
+    thought: finalThought || undefined,
+    emotion: finalEmotion,
+  };
 }
 
 export async function generatePersonaWithAI(
@@ -717,13 +841,13 @@ export async function compressChatHistory(
 
   const system = isRu
     ? `Ты — литературный архивариус и летописец ролевой истории.
-Твоя задача: составить краткий, емкий и связный пересказ (1-2 абзаца) предшествующих диалогов и событий сюжета.
+Твоя задача: составить предельно краткий, емкий и компактный пересказ (строго 1-2 коротких абзаца, не более 150-200 слов) предшествующих событий сюжета.
 Отрази ключевые решения, действия, смену отношений, тайны и факты, необходимые для сохранения контекста в долгих диалогах.
-Пиши на чистом русском языке без мета-вступлений. Выводи ТОЛЬКО текст краткого пересказа.`
+НЕ растягивай текст и не включай мелкую болтовню. Пиши на чистом русском языке без мета-вступлений. Выводи ТОЛЬКО сжатый пересказ.`
     : `You are an expert narrative chronicler for a roleplay story.
-Your task: produce a concise, coherent summary (1-2 paragraphs) of earlier dialogue turns and story developments.
-Highlight pivotal plot events, character decisions, secrets revealed, and relationship shifts needed to preserve long-term context in extended chats.
-Output ONLY the concise narrative recap with no meta introductions or disclaimers.`;
+Your task: produce a strictly concise, compact summary (strictly 1-2 short paragraphs, max 150-200 words) of earlier dialogue turns and story developments.
+Highlight pivotal plot events, character decisions, secrets revealed, and relationship shifts needed to preserve long-term context.
+Eliminate trivial chatter and keep it strictly bounded. Output ONLY the concise narrative recap with no meta introductions.`;
 
   const userContent = previousSummary
     ? (isRu
@@ -741,12 +865,16 @@ Output ONLY the concise narrative recap with no meta introductions or disclaimer
       { role: 'system', content: system },
       { role: 'user', content: userContent },
     ],
-    temperature: 0.4,
+    temperature: 0.35,
     onToken: (t) => { out += t; },
     onError: (e) => { throw e; },
   });
 
-  return out.trim();
+  let summary = out.trim();
+  if (summary.length > 1200) {
+    summary = summary.slice(0, 1200).trim() + '...';
+  }
+  return summary;
 }
 
 export async function summarizeScene(

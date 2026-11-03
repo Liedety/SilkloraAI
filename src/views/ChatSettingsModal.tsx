@@ -24,6 +24,7 @@ import type {
 } from '../types';
 import { translations } from '../i18n';
 import { MemoryGraphView } from '../components/MemoryGraphView';
+import { pruneAndConsolidateMemories } from '../services/memoryGraph';
 
 interface ChatSettingsModalProps {
   isOpen: boolean;
@@ -216,8 +217,27 @@ export const ChatSettingsModal: React.FC<ChatSettingsModalProps> = ({
                   <h3 className="text-xs font-semibold text-white">{t.memoryGraphTitle}</h3>
                   <p className="text-[11px] text-slate-400">{t.memoryGraphDesc}</p>
                 </div>
-                <div className="text-[11px] font-mono text-violet-400 bg-silk-800 px-2 py-0.5 rounded-lg shrink-0">
-                  {memoryNodes.length} {t.nodesCount}
+                <div className="flex items-center gap-2 shrink-0">
+                  <div className="text-[11px] font-mono text-violet-400 bg-silk-800 px-2 py-0.5 rounded-lg">
+                    {memoryNodes.length} {t.nodesCount}
+                  </div>
+                  {memoryNodes.length > 5 && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const { prunedCount, consolidatedCount } = await pruneAndConsolidateMemories(session.id, 10);
+                        alert(
+                          language === 'ru'
+                            ? `Очищено ${prunedCount} устаревших воспоминаний, объединено ${consolidatedCount}.`
+                            : `Pruned ${prunedCount} stale memories, consolidated ${consolidatedCount}.`
+                        );
+                      }}
+                      className="px-2 py-0.5 text-[10px] font-medium text-slate-300 hover:text-white bg-silk-800 hover:bg-silk-700 border border-silk-700 rounded-lg transition-all"
+                      title={language === 'ru' ? 'Очистить устаревшие воспоминания' : 'Prune older memories'}
+                    >
+                      {language === 'ru' ? 'Очистить лишнее' : 'Prune stale'}
+                    </button>
+                  )}
                 </div>
               </div>
 

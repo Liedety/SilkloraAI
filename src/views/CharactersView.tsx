@@ -200,9 +200,14 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
   const handleDeleteCharacter = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (window.confirm(t.confirmDeleteCharacter)) {
+      const associatedChats = await db.chats.where('targetId').equals(id).toArray();
+      for (const chat of associatedChats) {
+        await db.messages.where('chatId').equals(chat.id).delete();
+        await db.memoryNodes.where('chatId').equals(chat.id).delete();
+        await db.memoryEdges.where('chatId').equals(chat.id).delete();
+        await db.chats.delete(chat.id);
+      }
       await db.characters.delete(id);
-      // clean associated chats
-      await db.chats.where('targetId').equals(id).delete();
     }
   };
 

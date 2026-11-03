@@ -43,7 +43,7 @@ export const ChatPreviewCard: React.FC<ChatPreviewCardProps> = ({ theme }) => {
     <div
       className="relative w-full rounded-2xl overflow-hidden border border-silk-700/80 p-4 shadow-xl select-none"
       style={{
-        backgroundColor: `rgba(10, 14, 23, ${theme.backgroundTint})`,
+        backgroundColor: `rgba(var(--app-bg-rgb, 10, 14, 23), ${theme.backgroundTint})`,
       }}
     >
       <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-3">

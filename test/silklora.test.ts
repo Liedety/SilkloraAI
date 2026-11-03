@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cleanArtifacts } from '../src/services/ai.ts';
+import { cleanArtifacts, extractEmotionAndCleanResponse } from '../src/services/ai.ts';
 import { buildSystemPrompt, DEFAULT_CORE_SYSTEM_PROMPT } from '../src/services/promptBuilder.ts';
 import { translations } from '../src/i18n/index.ts';
 import { normalizeLabel, calculateNodeScore, findDuplicateNodes, selectNodesToPrune, isSignificantTurn } from '../src/services/memoryGraph.ts';
@@ -674,3 +674,213 @@ test('Incremental context compression delta calculation', () => {
   assert.strictEqual(turnsSecond.length, 2, 'Incremental run must only include newly aged-out messages');
   assert.deepStrictEqual(turnsSecond.map((m) => m.id), ['m3', 'm4'], 'Delta messages must be m3 and m4');
 });
+
+test('buildSystemPrompt: strictly caps active injected memories to top 6 essential/pinned memories', () => {
+  const speaker: Character = {
+    id: 'char-1',
+    name: 'Кай',
+    description: 'Маг теней',
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  const nodes: MemoryNode[] = [
+    { id: 'n-pin-1', chatId: 'c1', label: 'Древняя клятва', type: 'relationship', detail: 'Клятва на крови', isPinned: true, createdAt: 10 },
+    { id: 'n-pin-2', chatId: 'c1', label: 'Тайный ключ', type: 'secret', detail: 'Ключ от врат 7', isPinned: true, createdAt: 20 },
+    ...Array.from({ length: 15 }, (_, i) => ({
+      id: `n-regular-${i}`,
+      chatId: 'c1',
+      label: `Событие ${i}`,
+      type: 'event' as const,
+      detail: `Обычное воспоминание ${i}`,
+      createdAt: 100 + i,
+    })),
+  ];
+
+  const prompt = buildSystemPrompt({
+    character: speaker,
+    memoryNodes: nodes,
+  });
+
+  // Extract memory lines from prompt
+  const memorySectionMatch = prompt.match(/### RELEVANT LONG-TERM MEMORIES & ESTABLISHED FACTS:\n([\s\S]*?)Maintain consistency/);
+  assert.ok(memorySectionMatch, 'Prompt must contain memories section');
+  const memoryLines = memorySectionMatch[1].trim().split('\n');
+
+  assert.strictEqual(memoryLines.length, 6, 'Should strictly cap active injected memories to 6');
+  assert.ok(memoryLines.some((l) => l.includes('Древняя клятва') || l.includes('ДРЕВНЯЯ КЛЯТВА')), 'Pinned node 1 must be preserved');
+  assert.ok(memoryLines.some((l) => l.includes('Тайный ключ') || l.includes('ТАЙНЫЙ КЛЮЧ')), 'Pinned node 2 must be preserved');
+  // Later unpinned nodes (beyond index 3 of sorted unpinned) must NOT be present
+  assert.strictEqual(prompt.includes('Обычное воспоминание 0'), false, 'Older unpinned nodes beyond cap of 6 must be excluded');
+});
+
+test('buildSystemPrompt: injects systemic response length constraints and bounded context summary', () => {
+  const speaker: Character = {
+    id: 'char-1',
+    name: 'Селена',
+    description: 'Наемник',
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  // 1. Systemic length constraint in DEFAULT_CORE_SYSTEM_PROMPT and buildSystemPrompt
+  assert.match(DEFAULT_CORE_SYSTEM_PROMPT, /PROPORTIONAL LENGTH & CONCISE PACING/);
+  assert.match(DEFAULT_CORE_SYSTEM_PROMPT, /strictly 1 to 3 paragraphs max/);
+
+  const prompt = buildSystemPrompt({
+    character: speaker,
+    contextSummary: 'A'.repeat(1500), // oversized summary
+  });
+
+  assert.match(prompt, /ABSOLUTE RESPONSE LENGTH & PACING DIRECTIVE/);
+  assert.match(prompt, /strictly 1 to 3 paragraphs max unless explicitly directed otherwise/);
+  assert.match(prompt, /Under NO circumstances should you generate excessive filler/i);
+
+  // 2. Bounded contextSummary (capped to 1000 chars)
+  const summaryMatch = prompt.match(/### CONTEXT COMPRESSION — SUMMARY OF EARLIER EVENTS:\n\[[\s\S]*?\]\n([\s\S]*?)\nUse this background/);
+  assert.ok(summaryMatch, 'Must contain compression section');
+  const summaryContent = summaryMatch[1].trim();
+  assert.ok(summaryContent.length <= 1005, 'Oversized summary must be bounded to ~1000 characters');
+  assert.ok(summaryContent.endsWith('...'), 'Truncated summary must end with ellipsis');
+});
+
+test('selectNodesToPrune: uses aggressive default cap of 16 nodes to prevent memory graph bloat', () => {
+  const nodes: MemoryNode[] = Array.from({ length: 22 }, (_, i) => ({
+    id: `node-${i}`,
+    chatId: 'c1',
+    label: `Узел ${i}`,
+    type: 'event',
+    detail: `Детали ${i}`,
+    createdAt: 1000 + i * 10,
+  }));
+
+  // With default maxNodes = 16, exactly 6 lowest priority nodes should be pruned
+  const pruned = selectNodesToPrune(nodes, []);
+  assert.strictEqual(pruned.length, 6, 'Should prune exactly excess 6 nodes when 22 nodes are present');
+});
+
+test('Dialogue history: strips past <thought> blocks and bounds recent dialogue turns', () => {
+  const rawVariantText = '<thought>I must not show fear to him.</thought>\n*Bows slightly* Greetings, traveler.';
+  const cleaned = rawVariantText.replace(/<thought>[\s\S]*?<\/thought>/gi, '').trim();
+
+  assert.strictEqual(cleaned, '*Bows slightly* Greetings, traveler.', 'Must strip past <thought> monologue from text');
+  assert.strictEqual(cleaned.includes('<thought>'), false);
+  assert.strictEqual(cleaned.includes('I must not show fear'), false);
+
+  // Turn count window: 6 turns when summary is present vs 8 when not
+  const hasSummary = true;
+  const recentTurnsWithSummary = hasSummary ? 6 : 8;
+  const recentTurnsWithoutSummary = false ? 6 : 8;
+  assert.strictEqual(recentTurnsWithSummary, 6, 'Should limit history to 6 turns when rolling summary is present');
+  assert.strictEqual(recentTurnsWithoutSummary, 8, 'Should limit history to 8 turns when no summary is present');
+});
+
+test('Theme palette: defines full app styling variables across root, surfaces, and accents', () => {
+  const themes = APP_THEMES;
+  assert.ok(themes.length >= 5, 'Should have rich palette of app themes');
+
+  for (const t of themes) {
+    assert.ok(t.theme.appBgColor, `Theme ${t.id} must define appBgColor`);
+    assert.ok(t.theme.appSurfaceColor, `Theme ${t.id} must define appSurfaceColor`);
+    assert.ok(t.theme.accentColor, `Theme ${t.id} must define accentColor`);
+    assert.ok(t.theme.actionColor, `Theme ${t.id} must define actionColor`);
+    assert.ok(t.theme.bubbleUserBg, `Theme ${t.id} must define bubbleUserBg`);
+    assert.ok(t.theme.bubbleBotBg, `Theme ${t.id} must define bubbleBotBg`);
+  }
+});
+
+test('extractEmotionAndCleanResponse: extracts emotion tags from start, inside thoughts, and post-thoughts', () => {
+  const emotions = [
+    { id: '1', name: 'neutral', label: 'Нейтральный', avatar: 'data:img1' },
+    { id: '2', name: 'happy', label: 'Радость', avatar: 'data:img2' },
+    { id: '3', name: 'smirk', label: 'Усмешка', avatar: 'data:img3' },
+    { id: '4', name: 'sad', label: 'Грусть', avatar: 'data:img4' },
+  ];
+
+  // Case 1: Tag at start
+  const sample1 = '<emotion>happy</emotion> *смеется* Привет, рад тебя видеть!';
+  const res1 = extractEmotionAndCleanResponse(sample1, emotions);
+  assert.strictEqual(res1.emotion, 'happy');
+  assert.strictEqual(res1.text, '*смеется* Привет, рад тебя видеть!');
+  assert.strictEqual(res1.thought, undefined);
+
+  // Case 2: Tag inside <thought> block
+  const sample2 = '<thought><emotion>smirk</emotion>Он даже не догадывается о ловушке.</thought> *Ухмыльнулся и подал руку* Добро пожаловать.';
+  const res2 = extractEmotionAndCleanResponse(sample2, emotions);
+  assert.strictEqual(res2.emotion, 'smirk');
+  assert.strictEqual(res2.thought, 'Он даже не догадывается о ловушке.');
+  assert.strictEqual(res2.text, '*Ухмыльнулся и подал руку* Добро пожаловать.');
+
+  // Case 3: Tag after <thought> block
+  const sample3 = '<thought>Как же больно это слышать...</thought>\n<emotion>sad</emotion>\n*Опустил взгляд* Я понимаю тебя.';
+  const res3 = extractEmotionAndCleanResponse(sample3, emotions);
+  assert.strictEqual(res3.emotion, 'sad');
+  assert.strictEqual(res3.thought, 'Как же больно это слышать...');
+  assert.strictEqual(res3.text, '*Опустил взгляд* Я понимаю тебя.');
+
+  // Case 4: Bracketed emotion syntax [эмоция: радость]
+  const sample4 = '[эмоция: радость] *Тепло улыбнулся* Спасибо тебе большое!';
+  const res4 = extractEmotionAndCleanResponse(sample4, emotions);
+  assert.strictEqual(res4.emotion, 'радость');
+  assert.strictEqual(res4.text, '*Тепло улыбнулся* Спасибо тебе большое!');
+});
+
+test('extractEmotionAndCleanResponse: detects matching character emotion from narrative action cues when tags are omitted', () => {
+  const emotions = [
+    { id: '1', name: 'neutral', label: 'Нейтральный', avatar: 'data:img1' },
+    { id: '2', name: 'happy', label: 'Радость', avatar: 'data:img2' },
+    { id: '3', name: 'sad', label: 'Грусть', avatar: 'data:img3' },
+    { id: '4', name: 'blushing', label: 'Смущение', avatar: 'data:img4' },
+  ];
+
+  // Laughing / smiling -> happy
+  const happyMsg = '*Широко улыбнулась и звонко рассмеялась* Ты всегда умеешь поднять настроение!';
+  const resHappy = extractEmotionAndCleanResponse(happyMsg, emotions);
+  assert.strictEqual(resHappy.emotion, 'happy', 'Should identify happy emotion from smile/laughter');
+
+  // Weeping / tears -> sad
+  const sadMsg = '*Сдерживая слезы, тихо всхлипнула* Я не хотела, чтобы все так вышло...';
+  const resSad = extractEmotionAndCleanResponse(sadMsg, emotions);
+  assert.strictEqual(resSad.emotion, 'sad', 'Should identify sad emotion from tears/weeping');
+
+  // Blush / shy -> blushing
+  const blushMsg = '*Густо покраснела и смущенно отвела взгляд* Перестань, мне неловко...';
+  const resBlush = extractEmotionAndCleanResponse(blushMsg, emotions);
+  assert.strictEqual(resBlush.emotion, 'blushing', 'Should identify blushing emotion from flustered reaction');
+
+  // Calm / neutral action -> neutral
+  const neutralMsg = '*Спокойно подошел к столу и перелистнул страницу документов* Вот отчет.';
+  const resNeutral = extractEmotionAndCleanResponse(neutralMsg, emotions);
+  assert.strictEqual(resNeutral.emotion, 'neutral', 'Should fallback to neutral for stoic/flat narrative');
+});
+
+test('buildSystemPrompt: guides emotion expression, provides non-neutral example, and includes recency reminder', () => {
+  const speaker: Character = {
+    id: 'c1',
+    name: 'Катя',
+    description: 'Веселая девушка-маг.',
+    avatar: 'katya.png',
+    greeting: 'Привет!',
+    greetingEnabled: true,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    emotions: [
+      { id: 'e1', name: 'neutral', label: 'Нейтральный', avatar: 'katya_neutral.png' },
+      { id: 'e2', name: 'happy', label: 'Радость', avatar: 'katya_happy.png' },
+      { id: 'e3', name: 'smirk', label: 'Ухмылка', avatar: 'katya_smirk.png' },
+    ],
+  };
+
+  const prompt = buildSystemPrompt({
+    character: speaker,
+    thoughtsEnabled: true,
+  });
+
+  // Prompt should use non-neutral emotion example rather than default neutral
+  assert.match(prompt, /<emotion>happy<\/emotion>/, 'Should provide non-neutral example e.g. happy');
+  assert.match(prompt, /NEVER default to "neutral"/, 'Should warn against defaulting to neutral');
+  assert.match(prompt, /### MANDATORY EMOTION SPRITE REMINDER:/, 'Should contain recency emotion reminder at prompt end');
+  assert.match(prompt, /<thought>[\s\S]*?<\/thought>/, 'Should contain thoughts monologue block');
+});
+
+

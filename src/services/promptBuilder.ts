@@ -36,6 +36,10 @@ export const DEFAULT_CORE_SYSTEM_PROMPT = `You are an expert creative writer and
    - Reply 100% consistently in the exact language the user addresses you in.
    - NEVER insert foreign word annotations or parenthetical translations (e.g. NEVER write words like "relief (облегчение)" inside Russian or vice versa).
    - Maintain seamless narrative immersion without unintentional code-switching.
+7. PROPORTIONAL LENGTH & CONCISE PACING:
+   - Keep responses focused, vivid, and proportional: strictly 1 to 3 paragraphs max unless explicitly directed otherwise.
+   - NEVER generate excessive filler, unprompted soliloquies, circular narrative loops, or ballooning walls of text.
+   - Give dynamic room for the other participant to react, speak, and make choices instead of monopolizing the scene.
 `;
 
 export function buildSystemPrompt(params: PromptBuildParams): string {
@@ -94,10 +98,16 @@ UNCOMPROMISING STYLE ENFORCEMENT RULES:
   }
 
   if (thoughtsEnabled) {
+    const speakerEmos = currentSpeaker?.emotions;
+    const hasEmotions = !!(speakerEmos && speakerEmos.length > 0);
+    const nonNeutral = speakerEmos && speakerEmos.length > 0
+      ? speakerEmos.find((e) => e.name.toLowerCase() !== 'neutral')?.name || speakerEmos[0].name
+      : '';
+    const emoTag = hasEmotions ? `<emotion>${nonNeutral}</emotion>\n` : '';
     prompt += `\n### INNER THOUGHTS MONOLOGUE:
 Before your spoken words or external actions, write your character's raw, unvarnished, authentic inner thoughts inside a <thought>...</thought> tag block.
 Example:
-<thought>He is pushing too hard. If I give in now, he'll think I'm weak. I need to keep him at arm's length.</thought>
+${emoTag}<thought>He is pushing too hard. If I give in now, he'll think I'm weak. I need to keep him at arm's length.</thought>
 *Takes a measured step back, crossing arms.* You think you can read me that easily?
 `;
   }
@@ -145,7 +155,22 @@ Example:
   // Active Character emotion sprites support
   if (currentSpeaker?.emotions && currentSpeaker.emotions.length > 0) {
     const emotionNames = currentSpeaker.emotions.map((e) => e.name).join(', ');
-    prompt += `\n### EMOTION TAGGING:\nThis character has dedicated emotion avatars (${emotionNames}). At the very beginning of your turn, wrap the character's prevailing emotional expression in tag: <emotion>emotion_name</emotion> choosing strictly from available list: [${emotionNames}] (e.g. <emotion>${currentSpeaker.emotions[0].name}</emotion>).\n`;
+    const nonNeutral =
+      currentSpeaker.emotions.find((e) => e.name.toLowerCase() !== 'neutral')?.name ||
+      currentSpeaker.emotions[0].name;
+    prompt += `\n### EMOTION TAGGING:\nThis character has dedicated emotion avatars (${emotionNames}). At the very beginning of your turn, wrap the character's prevailing emotional expression in tag: <emotion>emotion_name</emotion> choosing strictly from available list: [${emotionNames}] (e.g. <emotion>${nonNeutral}</emotion>).
+
+CRITICAL EMOTION SELECTION INSTRUCTIONS:
+- You MUST actively express and match ${speakerName}'s true emotional state for this turn.
+- NEVER default to "neutral" when there is warmth, anger, sorrow, amusement, desire, tension, or embarrassment in the scene.
+- If amused, cheerful, or smiling -> choose "happy" (or matching sprite).
+- If irritated, fierce, furious, or hostile -> choose "angry" (or matching sprite).
+- If hurting, melancholic, sad, or crying -> choose "sad" (or matching sprite).
+- If flustered, shy, embarrassed, or blushful -> choose "blushing" (or matching sprite).
+- If teasing, sarcastic, playful, or smug -> choose "smirk" (or matching sprite).
+- If startled, shocked, or bewildered -> choose "surprised" (or matching sprite).
+- If pondering, calculating, or deep in thought -> choose "thoughtful" (or matching sprite).
+- Use "neutral" ONLY when ${speakerName} is genuinely flat, aloof, or expressionless.\n`;
   }
 
   // User Persona
@@ -180,7 +205,7 @@ Example:
       if (!a.isPinned && b.isPinned) return 1;
       return b.createdAt - a.createdAt;
     });
-    for (const node of sortedNodes.slice(0, 10)) {
+    for (const node of sortedNodes.slice(0, 6)) {
       const pinTag = node.isPinned ? ' [CORE/PERMANENT]' : '';
       prompt += `- [${node.type.toUpperCase()}${pinTag}] ${node.label}: ${node.detail}\n`;
     }
@@ -189,9 +214,13 @@ Example:
 
   // Rolling Context Compression / Recap of Earlier Events
   if (contextSummary && contextSummary.trim()) {
+    let cleanSummary = contextSummary.trim();
+    if (cleanSummary.length > 1000) {
+      cleanSummary = cleanSummary.slice(0, 1000).trim() + '...';
+    }
     prompt += `\n### CONTEXT COMPRESSION — SUMMARY OF EARLIER EVENTS:
 [The following is a concise narrative summary of events and conversation that occurred earlier in this story before recent messages:]
-${contextSummary.trim()}
+${cleanSummary}
 Use this background context to maintain story continuity without needing raw message tokens.\n`;
   }
 
@@ -207,6 +236,19 @@ Style name: ${textStyle.name}
 Instruction: ${textStyle.instruction}
 CRITICAL CONSTRAINT: You MUST strictly obey all instructions above, including any paragraph count limits (e.g. if the style specifies maximum 3 paragraphs, NEVER generate 4 or more paragraphs). Stop writing immediately once your response satisfies the style requirements.
 FINAL STYLE CHECK: Ensure every sentence and paragraph strictly complies with "${textStyle.name}" style rules before emitting your final answer.\n`;
+  }
+
+  // Strong systemic length & pacing constraints to keep bot replies crisp and prevent ballooning over 20+ turns
+  prompt += `\n### ABSOLUTE RESPONSE LENGTH & PACING DIRECTIVE:
+- Keep your response focused, vivid, and proportional: strictly 1 to 3 paragraphs max unless explicitly directed otherwise.
+- Under NO circumstances should you generate excessive filler, unprompted soliloquies, or ballooning walls of text.
+- Advance the scene with punchy, evocative actions and dialogue, leaving natural openings for the user to respond.\n`;
+
+  // Emotion sprite reminder at the very end of the prompt for maximum recency compliance
+  if (currentSpeaker?.emotions && currentSpeaker.emotions.length > 0) {
+    const emotionNames = currentSpeaker.emotions.map((e) => e.name).join(', ');
+    prompt += `\n### MANDATORY EMOTION SPRITE REMINDER:
+Start your turn with <emotion>chosen_emotion</emotion> chosen from [${emotionNames}] that accurately embodies ${speakerName}'s feelings in this turn.\n`;
   }
 
   return prompt;

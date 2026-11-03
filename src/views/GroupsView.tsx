@@ -317,8 +317,14 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
   const handleDeleteGroup = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (window.confirm(t.confirmDeleteGroup)) {
+      const associatedChats = await db.chats.where('targetId').equals(id).toArray();
+      for (const chat of associatedChats) {
+        await db.messages.where('chatId').equals(chat.id).delete();
+        await db.memoryNodes.where('chatId').equals(chat.id).delete();
+        await db.memoryEdges.where('chatId').equals(chat.id).delete();
+        await db.chats.delete(chat.id);
+      }
       await db.groups.delete(id);
-      await db.chats.where('targetId').equals(id).delete();
     }
   };
 

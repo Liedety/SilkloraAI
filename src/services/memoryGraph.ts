@@ -107,7 +107,7 @@ export function findDuplicateNodes(nodes: MemoryNode[]): { survivor: MemoryNode;
 export function selectNodesToPrune(
   nodes: MemoryNode[],
   edges: MemoryEdge[] = [],
-  maxNodes: number = 30
+  maxNodes: number = 16
 ): MemoryNode[] {
   if (nodes.length <= maxNodes) return [];
 
@@ -146,7 +146,7 @@ export function selectNodesToPrune(
  */
 export async function pruneAndConsolidateMemories(
   chatId: string,
-  maxNodes: number = 30
+  maxNodes: number = 16
 ): Promise<{ prunedCount: number; consolidatedCount: number }> {
   let consolidatedCount = 0;
   let prunedCount = 0;
@@ -205,6 +205,20 @@ export async function pruneAndConsolidateMemories(
         // Delete duplicate node
         await db.memoryNodes.delete(dup.id);
         consolidatedCount++;
+      }
+    }
+
+    // Phase 1.5: Purge orphaned memory nodes whose associated message was deleted from DB
+    const allDbMessages = await db.messages.where('chatId').equals(chatId).toArray();
+    const existingMsgIds = new Set(allDbMessages.map((m) => m.id));
+    const allNodesAfterConsolidation = await db.memoryNodes.where('chatId').equals(chatId).toArray();
+
+    for (const node of allNodesAfterConsolidation) {
+      if (!node.isPinned && node.messageId && !existingMsgIds.has(node.messageId)) {
+        await db.memoryEdges.where('source').equals(node.id).delete();
+        await db.memoryEdges.where('target').equals(node.id).delete();
+        await db.memoryNodes.delete(node.id);
+        prunedCount++;
       }
     }
 
@@ -374,6 +388,7 @@ export async function extractMemoryAndAffinity(
   // Fast-path: if this turn is completely trivial small talk with 0 affinity delta,
   // skip memory extraction entirely to avoid polluting memory or wasting tokens.
   if (!isSignificantTurn(userText, botText, 0) && userText.trim().length < 60) {
+    await pruneAndConsolidateMemories(chatId, 16);
     return { newAffinity: currentAffinity, newNodes: [] };
   }
 
@@ -505,7 +520,7 @@ No markdown wrappers, raw JSON only.`;
         }
       }
 
-      await pruneAndConsolidateMemories(chatId, 30);
+      await pruneAndConsolidateMemories(chatId, 16);
       return { newAffinity, newNodes: createdNodes };
     } catch {
       const deltaM = rawResponse.match(/"affinityDelta"\s*:\s*(-?\d+)/);
@@ -600,6 +615,6 @@ No markdown wrappers, raw JSON only.`;
     }
   }
 
-  await pruneAndConsolidateMemories(chatId, 30);
+  await pruneAndConsolidateMemories(chatId, 16);
   return { newAffinity, newNodes: [node] };
 }

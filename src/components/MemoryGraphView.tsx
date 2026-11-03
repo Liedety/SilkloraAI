@@ -246,7 +246,8 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
       // Background grid with DPR scaling
       ctx.save();
       ctx.scale(dpr, dpr);
-      ctx.fillStyle = '#07090e';
+      const appBg = (containerRef.current ? getComputedStyle(containerRef.current).getPropertyValue('--app-bg').trim() : '') || '#07090e';
+      ctx.fillStyle = appBg;
       ctx.fillRect(0, 0, width, height);
 
       // Apply pan & zoom
@@ -275,10 +276,13 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
         const s = nodeMap.get(edge.source);
         const t = nodeMap.get(edge.target);
         if (s && t) {
+          const themeAccent = (containerRef.current ? getComputedStyle(containerRef.current).getPropertyValue('--theme-accent').trim() : '') || '#8b5cf6';
+          const themeSurface = (containerRef.current ? getComputedStyle(containerRef.current).getPropertyValue('--app-surface').trim() : '') || '#141126';
+
           ctx.beginPath();
           ctx.moveTo(s.x, s.y);
           ctx.lineTo(t.x, t.y);
-          ctx.strokeStyle = 'rgba(139, 92, 246, 0.4)';
+          ctx.strokeStyle = `rgba(var(--theme-accent-rgb, 139, 92, 246), 0.45)`;
           ctx.lineWidth = 2;
           ctx.stroke();
 
@@ -287,7 +291,7 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
           const my = (s.y + t.y) / 2;
           ctx.beginPath();
           ctx.arc(mx, my, 2.5, 0, Math.PI * 2);
-          ctx.fillStyle = '#a78bfa';
+          ctx.fillStyle = themeAccent;
           ctx.fill();
 
           // Localized edge label badge
@@ -300,9 +304,9 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
             const pw = tm.width + 8;
             const ph = 14;
 
-            ctx.fillStyle = 'rgba(12, 10, 26, 0.9)';
+            ctx.fillStyle = themeSurface;
             ctx.fillRect(mx - pw / 2, my - ph / 2, pw, ph);
-            ctx.strokeStyle = 'rgba(139, 92, 246, 0.4)';
+            ctx.strokeStyle = `rgba(var(--theme-accent-rgb, 139, 92, 246), 0.5)`;
             ctx.lineWidth = 1;
             ctx.strokeRect(mx - pw / 2, my - ph / 2, pw, ph);
 
@@ -340,10 +344,10 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
         const text = node.label.length > 22 ? node.label.slice(0, 20) + '...' : node.label;
         const textMetrics = ctx.measureText(text);
         const textWidth = textMetrics.width;
-
-        ctx.fillStyle = 'rgba(12, 15, 23, 0.85)';
+        const pillSurface = (containerRef.current ? getComputedStyle(containerRef.current).getPropertyValue('--app-surface').trim() : '') || 'rgba(12, 15, 23, 0.9)';
+        ctx.fillStyle = pillSurface;
         ctx.fillRect(node.x - textWidth / 2 - 4, node.y + node.radius + 4, textWidth + 8, 16);
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
         ctx.strokeRect(node.x - textWidth / 2 - 4, node.y + node.radius + 4, textWidth + 8, 16);
 
         ctx.fillStyle = '#f1f5f9';

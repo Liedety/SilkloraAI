@@ -10,17 +10,39 @@ import { SettingsView } from './views/SettingsView';
 import { ChatView } from './views/ChatView';
 
 function hexToRgb(hex: string): string {
-  const clean = hex.replace('#', '');
+  const clean = hex.replace('#', '').trim();
+  let r = 139, g = 92, b = 246;
   if (clean.length === 3) {
-    const r = parseInt(clean[0] + clean[0], 16) || 139;
-    const g = parseInt(clean[1] + clean[1], 16) || 92;
-    const b = parseInt(clean[2] + clean[2], 16) || 246;
-    return `${r}, ${g}, ${b}`;
+    r = parseInt(clean[0] + clean[0], 16) || 139;
+    g = parseInt(clean[1] + clean[1], 16) || 92;
+    b = parseInt(clean[2] + clean[2], 16) || 246;
+  } else if (clean.length >= 6) {
+    r = parseInt(clean.substring(0, 2), 16) || 139;
+    g = parseInt(clean.substring(2, 4), 16) || 92;
+    b = parseInt(clean.substring(4, 6), 16) || 246;
   }
-  const r = parseInt(clean.substring(0, 2), 16) || 139;
-  const g = parseInt(clean.substring(2, 4), 16) || 92;
-  const b = parseInt(clean.substring(4, 6), 16) || 246;
   return `${r}, ${g}, ${b}`;
+}
+
+function adjustBrightness(hex: string, percent: number): string {
+  const clean = hex.replace('#', '').trim();
+  let r = 139, g = 92, b = 246;
+  if (clean.length === 3) {
+    r = parseInt(clean[0] + clean[0], 16) || 139;
+    g = parseInt(clean[1] + clean[1], 16) || 92;
+    b = parseInt(clean[2] + clean[2], 16) || 246;
+  } else if (clean.length >= 6) {
+    r = parseInt(clean.substring(0, 2), 16) || 139;
+    g = parseInt(clean.substring(2, 4), 16) || 92;
+    b = parseInt(clean.substring(4, 6), 16) || 246;
+  }
+  const factor = 1 + percent / 100;
+  const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+  const add = percent > 0 ? percent * 0.4 : 0;
+  const newR = clamp(r * factor + add);
+  const newG = clamp(g * factor + add);
+  const newB = clamp(b * factor + add);
+  return `#${((1 << 24) + (newR << 16) + (newG << 8) + newB).toString(16).slice(1)}`;
 }
 
 export const App: React.FC = () => {
@@ -51,11 +73,39 @@ export const App: React.FC = () => {
       const action = settings.theme.actionColor || '#fb7185';
       const bg = settings.theme.appBgColor || '#0a0814';
       const surface = settings.theme.appSurfaceColor || '#141126';
+
+      const accentHover = adjustBrightness(accent, 15);
+      const accentLight = adjustBrightness(accent, 40);
+      const surfaceElevated = adjustBrightness(surface, 15);
+      const border = adjustBrightness(surface, 25);
+      const borderSubtle = adjustBrightness(surface, 35);
+
       root.style.setProperty('--theme-accent', accent);
-      root.style.setProperty('--theme-action', action);
       root.style.setProperty('--theme-accent-rgb', hexToRgb(accent));
+      root.style.setProperty('--theme-accent-hover', accentHover);
+      root.style.setProperty('--theme-accent-hover-rgb', hexToRgb(accentHover));
+      root.style.setProperty('--theme-accent-light', accentLight);
+      root.style.setProperty('--theme-accent-light-rgb', hexToRgb(accentLight));
+
+      root.style.setProperty('--theme-action', action);
+      root.style.setProperty('--theme-action-rgb', hexToRgb(action));
+
       root.style.setProperty('--app-bg', bg);
+      root.style.setProperty('--app-bg-rgb', hexToRgb(bg));
       root.style.setProperty('--app-surface', surface);
+      root.style.setProperty('--app-surface-rgb', hexToRgb(surface));
+      root.style.setProperty('--app-surface-elevated', surfaceElevated);
+      root.style.setProperty('--app-surface-elevated-rgb', hexToRgb(surfaceElevated));
+      root.style.setProperty('--app-border', border);
+      root.style.setProperty('--app-border-rgb', hexToRgb(border));
+      root.style.setProperty('--app-border-subtle', borderSubtle);
+      root.style.setProperty('--app-border-subtle-rgb', hexToRgb(borderSubtle));
+
+      const metaThemeColor = document.querySelector('meta[name="theme-color"]');
+      if (metaThemeColor) {
+        metaThemeColor.setAttribute('content', bg);
+      }
+
       const fontFamily =
         settings.theme.fontFamily === 'serif'
           ? 'Georgia, Cambria, "Times New Roman", serif'
