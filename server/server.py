@@ -6,6 +6,39 @@ Lightweight OpenAI-compatible inference server for local GGUF models & Vision pr
 
 import os
 import sys
+import subprocess
+import importlib.util
+
+REQUIRED_DEPS = [
+    ("fastapi", "fastapi>=0.100.0"),
+    ("uvicorn", "uvicorn[standard]>=0.23.0"),
+    ("requests", "requests>=2.31.0"),
+    ("huggingface_hub", "huggingface_hub>=0.20.0"),
+    ("psutil", "psutil>=5.9.0"),
+    ("multipart", "python-multipart>=0.0.6"),
+]
+
+def auto_install_dependencies():
+    missing = []
+    for mod_name, pkg_spec in REQUIRED_DEPS:
+        if importlib.util.find_spec(mod_name) is None:
+            missing.append(pkg_spec)
+    
+    if missing:
+        print(f"[SilkloraAI Hub] Missing packages detected: {', '.join(missing)}")
+        print("[SilkloraAI Hub] Installing dependencies automatically...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--prefer-binary", *missing])
+            print("[SilkloraAI Hub] Dependencies successfully installed.")
+        except Exception:
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "--prefer-binary", *missing])
+                print("[SilkloraAI Hub] Dependencies successfully installed with --user flag.")
+            except Exception as e:
+                print(f"[SilkloraAI Hub] Notice: Failed to auto-install dependencies: {e}")
+
+auto_install_dependencies()
+
 import json
 import time
 import socket
@@ -22,7 +55,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-# Optional llama-cpp-python import with graceful fallback
+# Optional llama-cpp-python import with automatic installation attempt
 LLAMA_AVAILABLE = False
 try:
     import llama_cpp
@@ -33,7 +66,24 @@ try:
         pass
     LLAMA_AVAILABLE = True
 except ImportError:
-    LLAMA_AVAILABLE = False
+    try:
+        print("[SilkloraAI Hub] Attempting to install prebuilt llama-cpp-python for CPU inference...")
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install",
+            "llama-cpp-python",
+            "--prefer-binary",
+            "--extra-index-url", "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        import llama_cpp
+        from llama_cpp import Llama
+        try:
+            from llama_cpp.llama_chat_format import Llava15ChatHandler, MoondreamChatHandler
+        except ImportError:
+            pass
+        LLAMA_AVAILABLE = True
+        print("[SilkloraAI Hub] llama-cpp-python is installed and active.")
+    except Exception:
+        LLAMA_AVAILABLE = False
 
 BASE_DIR = Path(__file__).resolve().parent
 MODELS_DIR = BASE_DIR / "models"

@@ -486,43 +486,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         {aiEngineMode === 'local' ? (
           /* LOCAL AI HUB SECTION (Replaces Cloud Keys & Models) */
           <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4 shadow-xl">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
-                <Wifi className="w-4 h-4 text-emerald-400" />
-                <span>{t.localHubTitle}</span>
-              </div>
-              <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30">
-                Wi-Fi Direct
-              </span>
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-300">
+              <Wifi className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>{t.localHubTitle}</span>
             </div>
 
             <p className="text-[11px] text-slate-400 leading-relaxed">
               {t.localHubDesc}
             </p>
 
-            {/* Server Address Input */}
-            <div className="space-y-1.5">
+            {/* Server Address Input & Ping Button */}
+            <div className="space-y-2">
               <label className="block text-xs font-semibold text-slate-300">
                 {t.localServerUrlLabel}
               </label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={localServerUrl}
-                  onChange={(e) => handleUpdateLocalServerUrl(e.target.value)}
-                  placeholder={t.localServerUrlPlaceholder}
-                  className="flex-1 px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white font-mono placeholder-slate-500 focus:outline-none focus:border-violet-500"
-                />
-                <button
-                  type="button"
-                  onClick={handlePingServer}
-                  disabled={isPinging}
-                  className="px-3.5 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shrink-0 shadow-md transition-all active:scale-95"
-                >
-                  <Activity className={`w-3.5 h-3.5 ${isPinging ? 'animate-spin' : ''}`} />
-                  <span>{isPinging ? t.checkingConnection : t.checkConnection}</span>
-                </button>
-              </div>
+              <input
+                type="text"
+                value={localServerUrl}
+                onChange={(e) => handleUpdateLocalServerUrl(e.target.value)}
+                placeholder={t.localServerUrlPlaceholder}
+                className="w-full px-3.5 py-2.5 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white font-mono placeholder-slate-500 focus:outline-none focus:border-violet-500"
+              />
+              <button
+                type="button"
+                onClick={handlePingServer}
+                disabled={isPinging}
+                className="w-full py-2.5 px-4 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-2 shadow-md transition-all active:scale-[0.98]"
+              >
+                <Activity className={`w-4 h-4 ${isPinging ? 'animate-spin' : ''}`} />
+                <span>{isPinging ? t.checkingConnection : t.checkConnection}</span>
+              </button>
             </div>
 
             {/* Ping Result Status Banner */}
@@ -584,19 +577,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
               <ul className="text-[11px] text-slate-400 space-y-2 leading-relaxed">
                 <li className="flex items-start gap-2">
-                  <span className="text-violet-400 font-mono font-bold">1.</span>
+                  <span className="text-violet-400 font-mono font-bold shrink-0">1.</span>
                   <span>{t.wifiStep1}</span>
                 </li>
                 <li className="flex items-start gap-2">
-                  <span className="text-violet-400 font-mono font-bold">2.</span>
+                  <span className="text-violet-400 font-mono font-bold shrink-0">2.</span>
                   <span>{t.wifiStep2}</span>
                 </li>
                 <li className="flex items-start gap-2">
-                  <span className="text-violet-400 font-mono font-bold">3.</span>
+                  <span className="text-violet-400 font-mono font-bold shrink-0">3.</span>
                   <span>{t.wifiStep3}</span>
                 </li>
                 <li className="flex items-start gap-2">
-                  <span className="text-violet-400 font-mono font-bold">4.</span>
+                  <span className="text-violet-400 font-mono font-bold shrink-0">4.</span>
                   <span>{t.wifiStep4}</span>
                 </li>
               </ul>
