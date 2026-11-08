@@ -154,6 +154,8 @@ export interface ThemeConfig {
   lineHeight?: 'normal' | 'relaxed' | 'loose'; // dialogue line height
 }
 
+export type AiEngineMode = 'cloud' | 'local';
+
 export interface AppSettings {
   id: string; // singleton 'default'
   language: Language;
@@ -164,4 +166,6 @@ export interface AppSettings {
   contextWindowSize: number;
   customSystemPrompt?: string;
   customSystemPromptMode?: 'override' | 'augment';
+  aiEngineMode?: AiEngineMode;
+  localHubUrl?: string;
 }

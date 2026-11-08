@@ -1,8 +1,128 @@
-import type { ApiKeyConfig, Character, CharacterEmotion, Group, Language } from '../types';
+import type { ApiKeyConfig, AppSettings, Character, CharacterEmotion, Group, Language } from '../types';
 
 export interface ChatCompletionMessage {
   role: 'system' | 'user' | 'assistant';
   content: string | Array<{ type: 'text' | 'image_url'; text?: string; image_url?: { url: string } }>;
+}
+
+export function normalizeLocalServerUrl(rawUrl: string): string {
+  let url = (rawUrl || '').trim();
+  if (!url) return 'http://192.168.1.55:8080/v1';
+
+  if (!/^https?:\/\//i.test(url)) {
+    url = `http://${url}`;
+  }
+
+  url = url.replace(/\/+$/, '');
+
+  if (!/\/v1$/i.test(url)) {
+    url = `${url}/v1`;
+  }
+
+  return url;
+}
+
+export async function pingLocalServer(rawUrl: string): Promise<{
+  ok: boolean;
+  pingMs: number;
+  activeModel?: string;
+  error?: string;
+}> {
+  const normalized = normalizeLocalServerUrl(rawUrl);
+  const start = performance.now();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+  try {
+    const modelsUrl = `${normalized}/models`;
+    const res = await fetch(modelsUrl, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+    const pingMs = Math.max(1, Math.round(performance.now() - start));
+
+    if (res.ok) {
+      let activeModel: string | undefined;
+      try {
+        const data = await res.json();
+        if (data.data && Array.isArray(data.data) && data.data.length > 0) {
+          activeModel = data.data[0].id || data.data[0].name;
+        } else if (data.models && Array.isArray(data.models) && data.models.length > 0) {
+          activeModel = data.models[0].id || data.models[0].name;
+        }
+      } catch {
+        // ignore json parse error
+      }
+
+      return {
+        ok: true,
+        pingMs,
+        activeModel: activeModel || 'GGUF Local Model',
+      };
+    }
+
+    const rootUrl = normalized.replace(/\/v1\/?$/, '');
+    const healthRes = await fetch(`${rootUrl}/health`, {
+      method: 'GET',
+      signal: controller.signal,
+    }).catch(() => null);
+
+    if (healthRes && healthRes.ok) {
+      const data = await healthRes.json().catch(() => ({}));
+      return {
+        ok: true,
+        pingMs,
+        activeModel: data.active_model || 'GGUF Local Model',
+      };
+    }
+
+    throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    const isAbort = err.name === 'AbortError' || controller.signal.aborted;
+    const msg = isAbort
+      ? 'Таймаут подключения (сервер не ответил за 6 сек)'
+      : (err.message || 'Ошибка подключения');
+    return {
+      ok: false,
+      pingMs: 0,
+      error: msg,
+    };
+  }
+}
+
+export function getEffectiveAiConfig(
+  settings?: AppSettings,
+  activeApiKey?: ApiKeyConfig
+): {
+  apiKeyConfig?: ApiKeyConfig;
+  textModel: string;
+  isLocal: boolean;
+} {
+  const isLocal = settings?.aiEngineMode === 'local';
+  if (isLocal) {
+    const baseUrl = normalizeLocalServerUrl(settings?.localHubUrl || 'http://192.168.1.55:8080/v1');
+    return {
+      apiKeyConfig: {
+        id: 'local-hub',
+        provider: 'custom',
+        name: 'Local AI Hub (PC)',
+        baseUrl,
+        key: 'local-key',
+        isActive: true,
+      },
+      textModel: 'local-model',
+      isLocal: true,
+    };
+  }
+  return {
+    apiKeyConfig: activeApiKey,
+    textModel: settings?.textModel || 'deepseek/deepseek-chat',
+    isLocal: false,
+  };
 }
 
 export interface StreamOptions {
@@ -54,8 +174,11 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKeyConfig.key.trim()}`,
     };
+
+    if (apiKeyConfig.key && apiKeyConfig.key.trim()) {
+      headers['Authorization'] = `Bearer ${apiKeyConfig.key.trim()}`;
+    }
 
     if (apiKeyConfig.provider === 'openrouter') {
       headers['HTTP-Referer'] = 'https://silklora.ai';

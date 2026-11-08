@@ -20,7 +20,7 @@ import type { Group, ImageCropOffset, Language } from '../types';
 import { translations } from '../i18n';
 import { ImageCropperModal } from '../components/ImageCropperModal';
 import { AvatarImage } from '../components/AvatarImage';
-import { generateGroupWithAI, generateGroupRolesWithAI } from '../services/ai';
+import { generateGroupWithAI, generateGroupRolesWithAI, getEffectiveAiConfig } from '../services/ai';
 
 interface GroupsViewProps {
   language: Language;
@@ -40,6 +40,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
   const folders = useLiveQuery(() => db.folders.toArray()) || [];
   const activeApiKey = useLiveQuery(() => db.apiKeys.filter((k) => k.isActive).first());
   const settings = useLiveQuery(() => db.settings.get('default'));
+  const { apiKeyConfig: effectiveApiKey, textModel: effectiveModel, isLocal } = getEffectiveAiConfig(settings, activeApiKey);
 
   const [showEditModal, setShowEditModal] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
@@ -193,8 +194,8 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
   };
 
   const handleOpenRolesModal = () => {
-    if (!activeApiKey || !activeApiKey.key.trim()) {
-      alert(language === 'ru' ? 'Настройте API ключ в Настройках.' : 'Configure API key in Settings.');
+    if (!effectiveApiKey || (!effectiveApiKey.key.trim() && !isLocal)) {
+      alert(language === 'ru' ? 'Настройте подключение к ИИ в Настройках.' : 'Configure AI connection in Settings.');
       return;
     }
     const selectedChars = characters.filter((c) => currentFormRef.current.characterIds.includes(c.id));
@@ -211,8 +212,8 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
     setIsGeneratingRoles(true);
     try {
       const generated = await generateGroupRolesWithAI(
-        activeApiKey!,
-        settings?.textModel || 'deepseek/deepseek-chat',
+        effectiveApiKey!,
+        effectiveModel,
         currentFormRef.current.name || 'Group',
         currentFormRef.current.description || '',
         selectedChars,
@@ -230,16 +231,16 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
   };
 
   const handleRunAiGroupGen = async () => {
-    if (!activeApiKey || !activeApiKey.key.trim()) {
-      alert(language === 'ru' ? 'Настройте API ключ в Настройках.' : 'Configure API key in Settings.');
+    if (!effectiveApiKey || (!effectiveApiKey.key.trim() && !isLocal)) {
+      alert(language === 'ru' ? 'Настройте подключение к ИИ в Настройках.' : 'Configure AI connection in Settings.');
       return;
     }
     if (!genConcept.trim()) return;
     setIsGeneratingGroup(true);
     try {
       const res = await generateGroupWithAI(
-        activeApiKey,
-        settings?.textModel || 'deepseek/deepseek-chat',
+        effectiveApiKey,
+        effectiveModel,
         genConcept,
         language
       );

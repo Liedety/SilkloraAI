@@ -320,6 +320,8 @@ export async function initDatabaseDefaults() {
       contextWindowSize: 20,
       customSystemPrompt: '',
       customSystemPromptMode: 'augment',
+      aiEngineMode: 'cloud',
+      localHubUrl: 'http://192.168.1.55:8080/v1',
     });
   }
 

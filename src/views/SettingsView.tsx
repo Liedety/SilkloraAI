@@ -18,6 +18,10 @@ import {
   Download,
   Upload,
   RotateCcw,
+  Cloud,
+  Monitor,
+  Wifi,
+  Activity,
 } from 'lucide-react';
 import { db, DEFAULT_THEME, APP_THEMES, getLocalizedTextStyle } from '../db';
 import type {
@@ -29,7 +33,7 @@ import type {
   ThemeConfig,
 } from '../types';
 import { translations } from '../i18n';
-import { fetchAvailableModels, fetchVisionModels } from '../services/ai';
+import { fetchAvailableModels, fetchVisionModels, pingLocalServer, normalizeLocalServerUrl } from '../services/ai';
 import { DEFAULT_CORE_SYSTEM_PROMPT } from '../services/promptBuilder';
 import { ChatPreviewCard } from '../components/ChatPreviewCard';
 
@@ -50,6 +54,58 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const settings = useLiveQuery(() => db.settings.get('default'));
   const apiKeys = useLiveQuery(() => db.apiKeys.toArray()) || [];
   const textStyles = useLiveQuery(() => db.textStyles.toArray()) || [];
+
+  // Local AI Hub State
+  const aiEngineMode = settings?.aiEngineMode || 'cloud';
+  const [localServerUrl, setLocalServerUrl] = useState(
+    settings?.localHubUrl || 'http://192.168.1.55:8080/v1'
+  );
+  const [isPinging, setIsPinging] = useState(false);
+  const [pingResult, setPingResult] = useState<{
+    ok: boolean;
+    pingMs: number;
+    activeModel?: string;
+    error?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (settings?.localHubUrl) {
+      setLocalServerUrl(settings.localHubUrl);
+    }
+  }, [settings?.localHubUrl]);
+
+  const handleSetAiEngineMode = async (mode: 'cloud' | 'local') => {
+    await db.settings.update('default', { aiEngineMode: mode });
+  };
+
+  const handleUpdateLocalServerUrl = async (val: string) => {
+    setLocalServerUrl(val);
+    await db.settings.update('default', { localHubUrl: val });
+  };
+
+  const handlePingServer = async () => {
+    setIsPinging(true);
+    setPingResult(null);
+    try {
+      const res = await pingLocalServer(localServerUrl);
+      setPingResult(res);
+      if (res.ok) {
+        const normalized = normalizeLocalServerUrl(localServerUrl);
+        if (normalized !== localServerUrl) {
+          setLocalServerUrl(normalized);
+          await db.settings.update('default', { localHubUrl: normalized });
+        }
+      }
+    } catch (err: any) {
+      setPingResult({
+        ok: false,
+        pingMs: 0,
+        error: err.message || 'Error',
+      });
+    } finally {
+      setIsPinging(false);
+    }
+  };
 
   // API Key Form State
   const [showAddKey, setShowAddKey] = useState(false);
@@ -348,6 +404,51 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
       {/* Main Settings Scroll */}
       <div className="flex-1 overflow-y-auto p-4 space-y-6 pb-28">
+        {/* AI Engine Mode Switcher: Cloud vs Local PC */}
+        <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+              <Monitor className="w-4 h-4 text-violet-400" />
+              <span>{t.sectionAiEngineMode}</span>
+            </div>
+            <span
+              className={`text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider ${
+                aiEngineMode === 'local'
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                  : 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+              }`}
+            >
+              {aiEngineMode === 'local' ? 'Local Hub' : 'Cloud'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => handleSetAiEngineMode('cloud')}
+              className={`py-2.5 px-3 rounded-xl text-xs font-semibold border flex items-center justify-center gap-2 transition-all ${
+                aiEngineMode === 'cloud'
+                  ? 'bg-violet-600 border-violet-500 text-white shadow-lg shadow-violet-600/30'
+                  : 'bg-silk-800 border-silk-700 text-slate-400 hover:text-white'
+              }`}
+            >
+              <Cloud className="w-4 h-4" />
+              <span>{t.aiModeCloud}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSetAiEngineMode('local')}
+              className={`py-2.5 px-3 rounded-xl text-xs font-semibold border flex items-center justify-center gap-2 transition-all ${
+                aiEngineMode === 'local'
+                  ? 'bg-violet-600 border-violet-500 text-white shadow-lg shadow-violet-600/30'
+                  : 'bg-silk-800 border-silk-700 text-slate-400 hover:text-white'
+              }`}
+            >
+              <Monitor className="w-4 h-4" />
+              <span>{t.aiModeLocal}</span>
+            </button>
+          </div>
+        </div>
+
         {/* 1. Language Section */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
           <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
@@ -380,8 +481,132 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
-        {/* 2. API Keys Section */}
-        <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
+        {aiEngineMode === 'local' ? (
+          /* LOCAL AI HUB SECTION (Replaces Cloud Keys & Models) */
+          <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4 shadow-xl">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+                <Wifi className="w-4 h-4 text-emerald-400" />
+                <span>{t.localHubTitle}</span>
+              </div>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30">
+                Wi-Fi Direct
+              </span>
+            </div>
+
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              {t.localHubDesc}
+            </p>
+
+            {/* Server Address Input */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-slate-300">
+                {t.localServerUrlLabel}
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={localServerUrl}
+                  onChange={(e) => handleUpdateLocalServerUrl(e.target.value)}
+                  placeholder={t.localServerUrlPlaceholder}
+                  className="flex-1 px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white font-mono placeholder-slate-500 focus:outline-none focus:border-violet-500"
+                />
+                <button
+                  type="button"
+                  onClick={handlePingServer}
+                  disabled={isPinging}
+                  className="px-3.5 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shrink-0 shadow-md transition-all active:scale-95"
+                >
+                  <Activity className={`w-3.5 h-3.5 ${isPinging ? 'animate-spin' : ''}`} />
+                  <span>{isPinging ? t.checkingConnection : t.checkConnection}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Ping Result Status Banner */}
+            {pingResult && (
+              <div
+                className={`p-3 rounded-xl border transition-all ${
+                  pingResult.ok
+                    ? 'bg-emerald-950/40 border-emerald-500/60 text-emerald-200'
+                    : 'bg-rose-950/40 border-rose-500/60 text-rose-200'
+                }`}
+              >
+                <div className="flex items-start gap-2.5">
+                  {pingResult.ok ? (
+                    <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 mt-1 shrink-0 animate-pulse shadow-[0_0_8px_#34d399]" />
+                  ) : (
+                    <div className="w-2.5 h-2.5 rounded-full bg-rose-400 mt-1 shrink-0" />
+                  )}
+                  <div className="flex-1 text-xs space-y-1">
+                    <div className="font-semibold flex items-center justify-between">
+                      <span>
+                        {pingResult.ok
+                          ? t.connectionSuccess.replace('{ms}', String(pingResult.pingMs))
+                          : t.connectionFailed}
+                      </span>
+                      {pingResult.ok && (
+                        <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">
+                          {pingResult.pingMs} ms
+                        </span>
+                      )}
+                    </div>
+                    {pingResult.ok && pingResult.activeModel && (
+                      <div className="text-[11px] text-emerald-300/90 font-mono">
+                        {t.activeModelPc.replace('{model}', pingResult.activeModel)}
+                      </div>
+                    )}
+                    {!pingResult.ok && (
+                      <p className="text-[11px] text-rose-300/90 leading-snug">
+                        {t.connectionFailedHint.replace('{url}', localServerUrl)}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Model Management Notice */}
+            <div className="p-3 rounded-xl bg-silk-850/70 border border-silk-800 text-[11px] text-slate-400 flex items-start gap-2">
+              <span className="text-violet-400 mt-0.5">ℹ️</span>
+              <p className="leading-relaxed">
+                {t.localModelManagedOnPc}
+              </p>
+            </div>
+
+            {/* Step-by-Step Wi-Fi Setup Guide */}
+            <div className="p-3.5 rounded-xl bg-silk-850 border border-silk-800 space-y-2.5">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                <span>📶</span>
+                <span>{t.wifiGuideTitle}</span>
+              </div>
+              <ul className="text-[11px] text-slate-400 space-y-2 leading-relaxed">
+                <li className="flex items-start gap-2">
+                  <span className="text-violet-400 font-mono font-bold">1.</span>
+                  <span>{t.wifiStep1}</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="text-violet-400 font-mono font-bold">2.</span>
+                  <span>{t.wifiStep2}</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="text-violet-400 font-mono font-bold">3.</span>
+                  <span>{t.wifiStep3}</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="text-violet-400 font-mono font-bold">4.</span>
+                  <span>{t.wifiStep4}</span>
+                </li>
+              </ul>
+              <div className="pt-2 border-t border-silk-800/80 text-[10px] text-slate-500 italic">
+                🛡️ {t.wifiFirewallTip}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* 2. API Keys Section */}
+            <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
               <Key className="w-4 h-4 text-violet-400" />
@@ -746,6 +971,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             )}
           </div>
         </div>
+      </>
+    )}
 
         {/* 5. Text & RP Styles */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">

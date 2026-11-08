@@ -21,7 +21,7 @@ import type { Character, CharacterEmotion, Folder, Group, ImageCropOffset, Langu
 import { translations } from '../i18n';
 import { ImageCropperModal } from '../components/ImageCropperModal';
 import { AvatarImage } from '../components/AvatarImage';
-import { generatePersonaWithAI } from '../services/ai';
+import { generatePersonaWithAI, getEffectiveAiConfig } from '../services/ai';
 
 interface CharactersViewProps {
   language: Language;
@@ -42,6 +42,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
   const groups = useLiveQuery(() => db.groups.toArray()) || [];
   const activeApiKey = useLiveQuery(() => db.apiKeys.filter((k) => k.isActive).first());
   const settings = useLiveQuery(() => db.settings.get('default'));
+  const { apiKeyConfig: effectiveApiKey, textModel: effectiveModel, isLocal } = getEffectiveAiConfig(settings, activeApiKey);
 
   // Active folder filter: null = all, 'none' = no folder, or folderId
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
@@ -344,8 +345,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
   };
 
   const handleRunAiGenerator = async () => {
-    if (!activeApiKey || !activeApiKey.key.trim()) {
-      alert(language === 'ru' ? 'Сначала настройте API ключ во вкладке Настройки.' : 'Please add and configure an API key in the Settings tab first.');
+    if (!effectiveApiKey || (!effectiveApiKey.key.trim() && !isLocal)) {
+      alert(language === 'ru' ? 'Сначала настройте подключение к ИИ во вкладке Настройки.' : 'Please configure AI connection in the Settings tab first.');
       return;
     }
     setIsGenerating(true);
@@ -365,8 +366,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
       }
 
       const generated = await generatePersonaWithAI(
-        activeApiKey,
-        settings?.textModel || 'deepseek/deepseek-chat',
+        effectiveApiKey,
+        effectiveModel,
         genConcept,
         genDo,
         genDont,

@@ -32,7 +32,15 @@ import type {
   MessageVariant,
 } from '../types';
 import { translations } from '../i18n';
-import { streamChatCompletion, suggestUserReply, summarizeScene, compressChatHistory, cleanArtifacts, extractEmotionAndCleanResponse } from '../services/ai';
+import {
+  streamChatCompletion,
+  suggestUserReply,
+  summarizeScene,
+  compressChatHistory,
+  cleanArtifacts,
+  extractEmotionAndCleanResponse,
+  getEffectiveAiConfig,
+} from '../services/ai';
 import { buildSystemPrompt } from '../services/promptBuilder';
 import { extractMemoryAndAffinity } from '../services/memoryGraph';
 import { ChatSettingsModal } from './ChatSettingsModal';
@@ -65,6 +73,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const allCharacters = useLiveQuery(() => db.characters.toArray()) || [];
   const settings = useLiveQuery(() => db.settings.get('default'));
   const activeApiKey = useLiveQuery(() => db.apiKeys.filter((k) => k.isActive).first());
+  const { apiKeyConfig: effectiveApiKey, textModel: effectiveModel, isLocal } = getEffectiveAiConfig(settings, activeApiKey);
 
   // Active Session state
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
@@ -440,8 +449,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
     existingBotMsgToVariant?: ChatMessage
   ) => {
     if (!session) return;
-    if (!activeApiKey || !activeApiKey.key.trim()) {
-      alert(language === 'ru' ? 'Пожалуйста, настройте активный API ключ в Настройках.' : 'Please configure an active API key in Settings.');
+    if (!effectiveApiKey || (!effectiveApiKey.key.trim() && !isLocal)) {
+      alert(language === 'ru' ? 'Пожалуйста, настройте подключение к ИИ в Настройках.' : 'Please configure AI connection in Settings.');
       return;
     }
 
@@ -649,8 +658,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
       let fullGenerated = '';
 
       await streamChatCompletion({
-        apiKeyConfig: activeApiKey,
-        model: settings?.textModel || 'deepseek/deepseek-chat',
+        apiKeyConfig: effectiveApiKey,
+        model: effectiveModel,
         messages: apiMessages,
         signal: abortController.signal,
         onToken: (tok) => {
@@ -743,8 +752,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
               speaker.id,
               affinity,
               freshHistory,
-              activeApiKey,
-              settings?.textModel,
+              effectiveApiKey,
+              effectiveModel,
               targetTurnMsgId
             ).then(async ({ newAffinity }) => {
               if (newAffinity !== affinity) {
@@ -760,7 +769,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
             // Run automated context compression in background if conversation exceeds recent window
             const COMPRESSION_THRESHOLD = 8;
-            if (freshHistory.length > COMPRESSION_THRESHOLD && activeApiKey?.key) {
+            if (freshHistory.length > COMPRESSION_THRESHOLD && (effectiveApiKey?.key || isLocal)) {
               const older = freshHistory.slice(0, -COMPRESSION_THRESHOLD);
               const lastOlder = older[older.length - 1];
               const latestChat = await db.chats.get(session.id);
@@ -785,8 +794,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     };
                   });
                   compressChatHistory(
-                    activeApiKey,
-                    settings?.textModel || 'deepseek/deepseek-chat',
+                    effectiveApiKey,
+                    effectiveModel,
                     toSummarize,
                     prevSummaryToPass
                   ).then(async (summary) => {
@@ -992,8 +1001,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   // User Magic Wand Ghostwriter
   const handleExecuteUserWand = async () => {
-    if (!activeApiKey) {
-      alert(language === 'ru' ? 'Сначала укажите API-ключ в настройках' : 'Please configure an API key in settings first');
+    if (!effectiveApiKey || (!effectiveApiKey.key.trim() && !isLocal)) {
+      alert(language === 'ru' ? 'Сначала настройте подключение к ИИ в настройках' : 'Please configure AI connection in settings first');
       return;
     }
     setIsWandGenerating(true);
@@ -1004,8 +1013,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
         : null;
 
       const suggested = await suggestUserReply(
-        activeApiKey,
-        settings?.textModel || 'deepseek/deepseek-chat',
+        effectiveApiKey,
+        effectiveModel,
         userPersona,
         userWandPrompt,
         history
@@ -1050,16 +1059,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
         );
         return;
       }
-      if (!activeApiKey) {
-        alert(language === 'ru' ? 'Требуется API ключ для генерации сводки.' : 'API key required for summary.');
+      if (!effectiveApiKey || (!effectiveApiKey.key.trim() && !isLocal)) {
+        alert(language === 'ru' ? 'Требуется подключение к ИИ для генерации сводки.' : 'AI connection required for summary.');
         return;
       }
       setSummaryModalText(language === 'ru' ? 'Генерация сводки сцены...' : 'Generating scene recap...');
       try {
         const history = buildContextHistory(messages);
         const recap = await summarizeScene(
-          activeApiKey,
-          settings?.textModel || 'deepseek/deepseek-chat',
+          effectiveApiKey,
+          effectiveModel,
           history,
           language
         );
