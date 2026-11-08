@@ -529,16 +529,42 @@ def async_load_worker(model_name: str, mmproj_name: Optional[str], n_ctx: int, n
                     n_ctx=n_ctx,
                     n_gpu_layers=n_gpu_layers,
                     chat_handler=chat_handler,
-                    verbose=False,
+                    verbose=True,
                 )
             except Exception as e:
                 err_msg = str(e)
                 hub_logger.log("WARNING", f"Initial load failed: {err_msg}")
-                # If failed with full GPU offload, try falling back to CPU / partial offload
-                if n_gpu_layers != 0:
-                    hub_logger.log("INFO", "Attempting automatic recovery: reloading with CPU mode (n_gpu_layers=0)...")
+                # If full offload failed (e.g. CUDA OOM for large 12B model on 8GB VRAM), try partial offload
+                if n_gpu_layers == -1 or n_gpu_layers > 15:
+                    hub_logger.log("INFO", "Attempting automatic recovery: reloading with partial GPU offload (20 layers)...")
                     with state.lock:
-                        state.loading_step = "GPU memory full, falling back to CPU mode..."
+                        state.loading_step = "VRAM limit reached, adapting to partial GPU offload (20 layers)..."
+                    try:
+                        llama_inst = Llama(
+                            model_path=str(model_path),
+                            n_ctx=min(n_ctx, 4096),
+                            n_gpu_layers=20,
+                            chat_handler=chat_handler,
+                            verbose=True,
+                        )
+                        n_gpu_layers = 20
+                        hub_logger.log("INFO", "Partial GPU offload (20 layers) successfully loaded.")
+                    except Exception as e2:
+                        hub_logger.log("WARNING", f"Partial GPU load failed ({e2}), falling back to CPU mode (n_gpu_layers=0)...")
+                        with state.lock:
+                            state.loading_step = "GPU memory full, falling back to CPU mode..."
+                        llama_inst = Llama(
+                            model_path=str(model_path),
+                            n_ctx=min(n_ctx, 2048),
+                            n_gpu_layers=0,
+                            chat_handler=chat_handler,
+                            verbose=False,
+                        )
+                        n_gpu_layers = 0
+                elif n_gpu_layers != 0:
+                    hub_logger.log("INFO", "Attempting recovery: reloading with CPU mode (n_gpu_layers=0)...")
+                    with state.lock:
+                        state.loading_step = "Falling back to CPU mode..."
                     llama_inst = Llama(
                         model_path=str(model_path),
                         n_ctx=min(n_ctx, 2048),
@@ -553,6 +579,9 @@ def async_load_worker(model_name: str, mmproj_name: Optional[str], n_ctx: int, n
             elapsed = round(time.time() - state.load_start_time, 2)
             with state.lock:
                 state.llama_instance = llama_inst
+                state.active_model_path = str(model_path)
+                state.active_model_name = model_name
+                state.n_gpu_layers = n_gpu_layers
                 state.active_model_path = str(model_path)
                 state.active_model_name = model_name
                 if mmproj_path and mmproj_path.exists():

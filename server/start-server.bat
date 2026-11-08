@@ -9,7 +9,6 @@ echo          SilkloraAI Local AI Hub - Windows Launcher
 echo ==========================================================
 echo.
 
-
 set "PY_EXE="
 set "PY_ARGS="
 
@@ -84,7 +83,7 @@ if !ERRORLEVEL! equ 0 (
     )
 )
 
-:: 5. Try standard python in PATH (verify it is real and not the 0-byte Windows Store stub)
+:: 5. Try standard python in PATH
 where python >nul 2>nul
 if !ERRORLEVEL! equ 0 (
     python -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
@@ -95,11 +94,9 @@ if !ERRORLEVEL! equ 0 (
     )
 )
 
-:: 6. Automatic setup: download and install standalone Python 3.11 runtime
+:: 6. Automatic download and install of Python 3.11 if missing
 echo Python 3 was not detected on this system.
 echo Automatically downloading Python 3.11 runtime for Windows...
-echo Please wait, downloading installer...
-
 set "SETUP_URL=https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe"
 if "%PROCESSOR_ARCHITECTURE%"=="x86" (
     if not defined PROCESSOR_ARCHITEW6432 (
@@ -114,45 +111,23 @@ if exist "%SystemRoot%\System32\curl.exe" (
 )
 
 if not exist "%~dp0python_setup.exe" (
-    echo Error: Failed to download Python installer automatically.
-    echo Please check internet connection or install Python 3.10+ from python.org.
-    echo.
+    echo Error: Failed to download Python installer.
+    echo Please install Python 3.10+ from python.org.
     pause
     exit /b 1
 )
 
-echo Installing Python 3.11 runtime into local environment...
-echo (Takes about 30-60 seconds, please wait...)
+echo Installing Python 3.11 into local environment...
 start /wait "" "%~dp0python_setup.exe" /quiet InstallAllUsers=0 TargetDir="%~dp0python_runtime" AssociateFiles=0 Shortcuts=0 Include_launcher=0 Include_test=0 Include_pip=1 PrependPath=0
 if exist "%~dp0python_setup.exe" del "%~dp0python_setup.exe" >nul 2>&1
 
 if exist "%~dp0python_runtime\python.exe" (
-    echo Python 3.11 runtime successfully initialized in python_runtime.
     set "PY_EXE=%~dp0python_runtime\python.exe"
     set "PY_ARGS="
     goto :python_found
 )
 
-echo Notice: Local directory setup returned unexpected result. Attempting user profile install...
-if exist "%SystemRoot%\System32\curl.exe" (
-    "%SystemRoot%\System32\curl.exe" -L -o "%~dp0python_setup.exe" "!SETUP_URL!"
-) else (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object System.Net.WebClient).DownloadFile('!SETUP_URL!', '%~dp0python_setup.exe')"
-)
-start /wait "" "%~dp0python_setup.exe" /quiet InstallAllUsers=0 SimpleInstall=1 PrependPath=1 Include_pip=1
-if exist "%~dp0python_setup.exe" del "%~dp0python_setup.exe" >nul 2>&1
-
-if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
-    echo Python 3.11 successfully installed into user profile.
-    set "PY_EXE=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
-    set "PY_ARGS="
-    goto :python_found
-)
-
-echo ERROR: Automatic installation could not be completed.
-echo Please install Python 3.10 or 3.11 from https://www.python.org/
-echo Check the box Add Python to PATH during installation.
-echo.
+echo Error: Python installation failed.
 pause
 exit /b 1
 
@@ -163,77 +138,62 @@ set "RUN_EXE="
 set "RUN_ARGS="
 
 if exist "venv\Scripts\python.exe" (
-    echo Using existing virtual environment in venv.
     set "RUN_EXE=venv\Scripts\python.exe"
     set "RUN_ARGS="
 ) else if exist "%~dp0python_runtime\python.exe" (
-    echo Using local runtime environment in python_runtime.
     set "RUN_EXE=%~dp0python_runtime\python.exe"
     set "RUN_ARGS="
 ) else (
-    echo Initializing virtual environment in venv...
-    if exist "venv" rmdir /s /q "venv" >nul 2>&1
-    "%PY_EXE%" %PY_ARGS% -m venv venv >nul 2>&1
-    if exist "venv\Scripts\python.exe" (
-        echo Virtual environment successfully initialized.
-        set "RUN_EXE=venv\Scripts\python.exe"
-        set "RUN_ARGS="
-    ) else (
-        echo Notice: Virtual environment not available. Using Python directly.
-        set "RUN_EXE=%PY_EXE%"
-        set "RUN_ARGS=%PY_ARGS%"
-    )
+    set "RUN_EXE=%PY_EXE%"
+    set "RUN_ARGS=%PY_ARGS%"
 )
 
-:: Ensure pip is installed
+:: Ensure pip is ready
 "%RUN_EXE%" %RUN_ARGS% -m pip --version >nul 2>&1
 if !ERRORLEVEL! neq 0 (
     echo Installing pip...
     "%RUN_EXE%" %RUN_ARGS% -m ensurepip --default-pip >nul 2>&1
 )
 
-echo Installing / verifying dependencies from requirements.txt...
-"%RUN_EXE%" %RUN_ARGS% -m pip install -r requirements.txt --prefer-binary
-if !ERRORLEVEL! neq 0 (
-    echo Retrying pip installation with --user flag...
-    "%RUN_EXE%" %RUN_ARGS% -m pip install --user -r requirements.txt --prefer-binary
-)
+:: Install/verify base requirements
+echo Checking dependencies...
+"%RUN_EXE%" %RUN_ARGS% -m pip install -r requirements.txt --prefer-binary >nul 2>&1
 
-:: Check / install llama-cpp-python
-"%RUN_EXE%" %RUN_ARGS% -c "from llama_cpp import Llama" >nul 2>&1
-if !ERRORLEVEL! neq 0 (
-    echo Checking llama-cpp-python inference engine...
-    set "USE_CUDA="
-    where nvidia-smi >nul 2>nul
-    if !ERRORLEVEL! equ 0 (
-        if exist "%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA" (
-            set "USE_CUDA=1"
-        )
-    )
-    if defined USE_CUDA (
-        echo NVIDIA CUDA Toolkit detected. Installing CUDA-accelerated llama-cpp-python...
-        "%RUN_EXE%" %RUN_ARGS% -m pip install --upgrade --force-reinstall llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
-        "%RUN_EXE%" %RUN_ARGS% -c "from llama_cpp import Llama" >nul 2>&1
-        if !ERRORLEVEL! neq 0 (
-            echo Notice: CUDA runtime libraries not accessible. Switching to CPU-optimized llama-cpp-python...
-            "%RUN_EXE%" %RUN_ARGS% -m pip install --upgrade --force-reinstall llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
-        )
+:: Check and setup NVIDIA GPU CUDA 12 acceleration
+where nvidia-smi >nul 2>nul
+if !ERRORLEVEL! equ 0 (
+    echo NVIDIA GPU detected. Verifying GPU acceleration engine...
+    "%RUN_EXE%" %RUN_ARGS% -c "import sys, llama_cpp; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 1)" >nul 2>&1
+    if !ERRORLEVEL! neq 0 (
+        echo Configuring NVIDIA CUDA 12 runtime and GPU inference engine...
+        "%RUN_EXE%" %RUN_ARGS% -m pip install nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 --prefer-binary >nul 2>&1
+        "%RUN_EXE%" %RUN_ARGS% -m pip install --upgrade --force-reinstall llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121 >nul 2>&1
+        "%RUN_EXE%" %RUN_ARGS% link_cuda.py
     ) else (
-        echo Installing reliable CPU-optimized llama-cpp-python...
-        "%RUN_EXE%" %RUN_ARGS% -m pip install --upgrade --force-reinstall llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+        echo NVIDIA CUDA GPU engine is active and ready.
+    )
+) else (
+    "%RUN_EXE%" %RUN_ARGS% -c "from llama_cpp import Llama" >nul 2>&1
+    if !ERRORLEVEL! neq 0 (
+        echo Installing CPU-optimized inference engine...
+        "%RUN_EXE%" %RUN_ARGS% -m pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
     )
 )
 
-:: Automatically configure Windows Defender Firewall rule for port 8080
+:: Ensure Windows Firewall rule for port 8080 (requests Admin UAC if missing)
 netsh advfirewall firewall show rule name="SilkloraAI Local Hub" >nul 2>&1
 if !ERRORLEVEL! neq 0 (
-    netsh advfirewall firewall add rule name="SilkloraAI Local Hub" dir=in action=allow protocol=TCP localport=8080 profile=any >nul 2>&1
+    echo Opening port 8080 in Windows Firewall for mobile phone connection...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process cmd -ArgumentList '/c netsh advfirewall firewall add rule name=\"SilkloraAI Local Hub\" dir=in action=allow protocol=TCP localport=8080 profile=any' -Verb RunAs -Wait" >nul 2>&1
 )
 
 echo.
-echo Launching SilkloraAI Local AI Hub server on port 8080...
-echo Web panel: http://localhost:8080
+echo ==========================================================
+echo Starting SilkloraAI Local AI Hub server on port 8080...
+echo Web Panel: http://localhost:8080
+echo ==========================================================
 echo.
+
 "%RUN_EXE%" %RUN_ARGS% server.py %*
 
 if !ERRORLEVEL! neq 0 (
