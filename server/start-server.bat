@@ -9,10 +9,16 @@ echo          SilkloraAI Local AI Hub - Windows Launcher
 echo ==========================================================
 echo.
 
+:: 0. Release port 8080 from any previous frozen process
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr :8080 ^| findstr LISTENING') do (
+    echo Terminating previous server process holding port 8080 (PID %%a)...
+    taskkill /f /pid %%a >nul 2>&1
+)
+
 set "PY_EXE="
 set "PY_ARGS="
 
-:: 0. Check for existing local bundled/downloaded runtime
+:: 1. Check for existing local bundled/downloaded runtime
 if exist "%~dp0python_runtime\python.exe" (
     "%~dp0python_runtime\python.exe" -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
     if !ERRORLEVEL! equ 0 (
@@ -22,7 +28,7 @@ if exist "%~dp0python_runtime\python.exe" (
     )
 )
 
-:: 1. Check for existing working venv
+:: 2. Check for existing working venv
 if exist "venv\Scripts\python.exe" (
     "venv\Scripts\python.exe" -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
     if !ERRORLEVEL! equ 0 (
@@ -32,7 +38,7 @@ if exist "venv\Scripts\python.exe" (
     )
 )
 
-:: 2. Check standard installation folders in AppData and Program Files
+:: 3. Check standard installation folders in AppData and Program Files
 for /d %%D in ("%LOCALAPPDATA%\Programs\Python\Python3*") do (
     if exist "%%~D\python.exe" (
         "%%~D\python.exe" -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
@@ -66,7 +72,7 @@ for /d %%D in ("%ProgramFiles(x86)%\Python3*") do (
     )
 )
 
-:: 3. Try Python Launcher py -3 or py
+:: 4. Try Python Launcher py -3 or py
 where py >nul 2>nul
 if !ERRORLEVEL! equ 0 (
     py -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
@@ -83,7 +89,7 @@ if !ERRORLEVEL! equ 0 (
     )
 )
 
-:: 4. Try standard python in PATH (verify it is real and not the 0-byte Windows Store stub)
+:: 5. Try standard python in PATH (verify it is real and not the 0-byte Windows Store stub)
 where python >nul 2>nul
 if !ERRORLEVEL! equ 0 (
     python -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
@@ -94,7 +100,7 @@ if !ERRORLEVEL! equ 0 (
     )
 )
 
-:: 5. Automatic setup: download and install standalone Python 3.11 runtime
+:: 6. Automatic setup: download and install standalone Python 3.11 runtime
 echo Python 3 was not detected on this system.
 echo Automatically downloading Python 3.11 runtime for Windows...
 echo Please wait, downloading installer...
@@ -198,20 +204,23 @@ if !ERRORLEVEL! neq 0 (
     "%RUN_EXE%" %RUN_ARGS% -m pip install --user -r requirements.txt --prefer-binary
 )
 
-:: Check / install llama-cpp-python with NVIDIA CUDA acceleration if available
-"%RUN_EXE%" %RUN_ARGS% -c "import llama_cpp" >nul 2>&1
+:: Check / install llama-cpp-python
+"%RUN_EXE%" %RUN_ARGS% -c "from llama_cpp import Llama" >nul 2>&1
 if !ERRORLEVEL! neq 0 (
+    echo Verifying llama-cpp-python inference engine...
     where nvidia-smi >nul 2>nul
     if !ERRORLEVEL! equ 0 (
-        echo NVIDIA GPU detected. Installing CUDA-accelerated llama-cpp-python...
-        "%RUN_EXE%" %RUN_ARGS% -m pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+        echo NVIDIA GPU detected. Testing CUDA-accelerated llama-cpp-python...
+        "%RUN_EXE%" %RUN_ARGS% -m pip install --upgrade --force-reinstall llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+        "%RUN_EXE%" %RUN_ARGS% -c "from llama_cpp import Llama" >nul 2>&1
         if !ERRORLEVEL! neq 0 (
-            echo Notice: CUDA package install returned non-zero code, falling back to CPU version...
-            "%RUN_EXE%" %RUN_ARGS% -m pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu >nul 2>&1
+            echo Notice: CUDA runtime libraries (cudart64_12.dll) not found in system.
+            echo Automatically switching to reliable CPU-optimized llama-cpp-python...
+            "%RUN_EXE%" %RUN_ARGS% -m pip install --upgrade --force-reinstall llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
         )
     ) else (
         echo Installing CPU-optimized llama-cpp-python...
-        "%RUN_EXE%" %RUN_ARGS% -m pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu >nul 2>&1
+        "%RUN_EXE%" %RUN_ARGS% -m pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
     )
 )
 

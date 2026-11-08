@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
 SilkloraAI Local AI Hub - Standalone Desktop Server (Windows / Linux / macOS)
-High-performance OpenAI-compatible inference server for local GGUF models & Vision projectors (mmproj).
+High-performance, non-blocking OpenAI-compatible inference server for local GGUF models & Vision projectors (mmproj).
 """
 
 import os
 import sys
 import subprocess
 import importlib.util
+from datetime import datetime
+from collections import deque
+from pathlib import Path
 
 REQUIRED_DEPS = [
     ("fastapi", "fastapi>=0.100.0"),
@@ -48,19 +51,74 @@ import traceback
 import urllib.parse
 import platform
 import shutil
-from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 import requests
 import psutil
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+
+BASE_DIR = Path(__file__).resolve().parent
+MODELS_DIR = BASE_DIR / "models"
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+DASHBOARD_FILE = BASE_DIR / "dashboard.html"
+QRCODE_FILE = BASE_DIR / "qrcode.min.js"
+LOG_FILE = BASE_DIR / "server.log"
+
+# -------------------------------------------------------------
+# Diagnostic Logging Engine
+# -------------------------------------------------------------
+class DiagnosticLogger:
+    def __init__(self, max_entries: int = 1000):
+        self.lock = threading.Lock()
+        self.entries = deque(maxlen=max_entries)
+        
+    def log(self, level: str, message: str):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry = f"[{timestamp}] [{level.upper()}] {message}"
+        with self.lock:
+            self.entries.append(entry)
+            try:
+                with open(LOG_FILE, "a", encoding="utf-8") as f:
+                    f.write(entry + "\n")
+            except Exception:
+                pass
+        print(f"[SilkloraAI Hub] [{level.upper()}] {message}")
+
+    def get_entries(self) -> List[str]:
+        with self.lock:
+            return list(self.entries)
+
+    def clear(self):
+        with self.lock:
+            self.entries.clear()
+            try:
+                LOG_FILE.write_text("", encoding="utf-8")
+            except Exception:
+                pass
+
+hub_logger = DiagnosticLogger()
+hub_logger.log("INFO", f"Server initializing on Python {platform.python_version()} ({sys.executable})")
 
 # Optional llama-cpp-python import with automatic installation attempt
 LLAMA_AVAILABLE = False
 LLAMA_BACKEND = "none"
+
+if os.name == "nt":
+    for p in [
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin",
+    ]:
+        if os.path.exists(p):
+            try:
+                os.add_dll_directory(p)
+            except Exception:
+                pass
+
 try:
     import llama_cpp
     from llama_cpp import Llama
@@ -70,16 +128,19 @@ try:
         pass
     LLAMA_AVAILABLE = True
     LLAMA_BACKEND = "installed"
-except ImportError:
+    hub_logger.log("INFO", f"llama-cpp-python initialized successfully (version: {getattr(llama_cpp, '__version__', 'unknown')})")
+except (ImportError, OSError, Exception) as e:
+    hub_logger.log("WARNING", f"llama-cpp-python failed to load ({e}). Attempting fallback to clean CPU prebuilt wheel...")
     try:
-        print("[SilkloraAI Hub] Attempting to install prebuilt llama-cpp-python...")
         subprocess.check_call([
-            sys.executable, "-m", "pip", "install",
+            sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-cache-dir",
             "llama-cpp-python",
             "--prefer-binary",
             "--extra-index-url", "https://abetlen.github.io/llama-cpp-python/whl/cpu"
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        import importlib
         import llama_cpp
+        importlib.reload(llama_cpp)
         from llama_cpp import Llama
         try:
             from llama_cpp.llama_chat_format import Llava15ChatHandler, MoondreamChatHandler
@@ -87,16 +148,11 @@ except ImportError:
             pass
         LLAMA_AVAILABLE = True
         LLAMA_BACKEND = "cpu_prebuilt"
-        print("[SilkloraAI Hub] llama-cpp-python successfully initialized.")
-    except Exception:
+        hub_logger.log("INFO", "Clean CPU-optimized llama-cpp-python successfully initialized.")
+    except Exception as e2:
         LLAMA_AVAILABLE = False
         LLAMA_BACKEND = "none"
-
-BASE_DIR = Path(__file__).resolve().parent
-MODELS_DIR = BASE_DIR / "models"
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
-DASHBOARD_FILE = BASE_DIR / "dashboard.html"
-QRCODE_FILE = BASE_DIR / "qrcode.min.js"
+        hub_logger.log("WARNING", f"Could not initialize llama-cpp-python: {e2}")
 
 app = FastAPI(title="SilkloraAI Local AI Hub", version="1.2.0")
 
@@ -120,6 +176,14 @@ class ServerState:
         self.n_gpu_layers: int = -1
         self.start_time: float = time.time()
         self.port: int = 8080
+
+        # Non-blocking loading state
+        self.is_loading: bool = False
+        self.loading_model_name: Optional[str] = None
+        self.loading_step: str = ""
+        self.loading_start_time: float = 0.0
+        self.load_error: Optional[str] = None
+        self.load_time_sec: Optional[float] = None
         
         # Download tracker
         self.download_lock = threading.Lock()
@@ -231,38 +295,79 @@ def analyze_system_hardware() -> Dict[str, Any]:
         }
     }
 
-def get_local_ip_addresses() -> List[str]:
-    ip_list = []
+def get_local_ip_addresses() -> List[Dict[str, Any]]:
+    """Enumerate network adapters and prioritize real Wi-Fi / LAN IPs over virtual adapters."""
+    default_ip = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0.1)
-        try:
-            s.connect(("8.8.8.8", 80))
-            primary_ip = s.getsockname()[0]
-            if primary_ip and primary_ip not in ("127.0.0.1", "localhost"):
-                ip_list.append(primary_ip)
-        except Exception:
-            pass
-        finally:
-            s.close()
+        s.connect(("8.8.8.8", 80))
+        default_ip = s.getsockname()[0]
+        s.close()
     except Exception:
         pass
+
+    results = []
+    seen_ips = set()
 
     try:
         addrs = psutil.net_if_addrs()
+        stats = psutil.net_if_stats()
         for iface_name, iface_addrs in addrs.items():
+            iface_lower = iface_name.lower()
+            is_virtual = any(k in iface_lower for k in [
+                "virtual", "vbox", "vmware", "wsl", "vethernet", "loopback", 
+                "bluetooth", "pseudo", "docker", "hyper-v", "tailscale", "zerotier", "tap"
+            ])
+            is_wifi = any(k in iface_lower for k in ["wi-fi", "wifi", "wlan", "wireless", "802.11", "wlp"])
+            stat = stats.get(iface_name)
+            is_up = stat.isup if stat else True
+
             for addr in iface_addrs:
                 if addr.family == socket.AF_INET:
                     ip = addr.address
-                    if ip and not ip.startswith("127.") and ip not in ip_list:
-                        if ip.startswith("192.168.") or ip.startswith("10.") or ip.startswith("172."):
-                            ip_list.insert(0, ip)
-                        else:
-                            ip_list.append(ip)
+                    if ip and not ip.startswith("127.") and ip not in seen_ips:
+                        seen_ips.add(ip)
+                        is_primary = (ip == default_ip)
+                        label = f"{ip} ({iface_name})"
+                        if is_wifi:
+                            label += " [Wi-Fi]"
+                        elif is_virtual:
+                            label += " [Virtual]"
+                        
+                        results.append({
+                            "ip": ip,
+                            "interface": iface_name,
+                            "label": label,
+                            "is_wifi": is_wifi,
+                            "is_virtual": is_virtual,
+                            "is_primary": is_primary,
+                            "is_up": is_up,
+                        })
     except Exception:
         pass
 
-    return ip_list or ["127.0.0.1"]
+    def _score(item):
+        score = 0
+        if item["is_primary"]: score += 100
+        if item["is_wifi"]: score += 50
+        if not item["is_virtual"]: score += 25
+        if item["ip"].startswith("192.168."): score += 15
+        if item["is_up"]: score += 5
+        return -score
+
+    results.sort(key=_score)
+    if not results:
+        results.append({
+            "ip": "127.0.0.1",
+            "interface": "localhost",
+            "label": "127.0.0.1 (Localhost)",
+            "is_wifi": False,
+            "is_virtual": False,
+            "is_primary": True,
+            "is_up": True,
+        })
+    return results
 
 def scan_local_models() -> List[Dict[str, Any]]:
     models = []
@@ -290,52 +395,114 @@ def scan_local_models() -> List[Dict[str, Any]]:
 def unload_current_model():
     with state.lock:
         if state.llama_instance is not None:
+            hub_logger.log("INFO", f"Unloading current active model: {state.active_model_name}")
             del state.llama_instance
             state.llama_instance = None
         state.active_model_path = None
         state.active_model_name = "None (No model loaded)"
         state.active_mmproj_path = None
         state.active_mmproj_name = None
-        print("[SilkloraAI Hub] Active model unloaded from memory.")
+        state.load_error = None
+        hub_logger.log("INFO", "Active model memory released.")
 
-def load_gguf_model(model_path: str, mmproj_path: Optional[str] = None, n_ctx: int = 4096, n_gpu_layers: int = -1):
+def async_load_worker(model_name: str, mmproj_name: Optional[str], n_ctx: int, n_gpu_layers: int):
+    """Background worker thread to load models without blocking FastAPI's event loop."""
+    hub_logger.log("INFO", f"Worker starting load: {model_name} (ctx={n_ctx}, gpu_layers={n_gpu_layers}, mmproj={mmproj_name})")
     with state.lock:
+        state.is_loading = True
+        state.loading_model_name = model_name
+        state.loading_step = "Verifying model file on disk..."
+        state.load_error = None
+        state.load_start_time = time.time()
+
+    try:
+        model_path = MODELS_DIR / model_name
+        if not model_path.exists():
+            raise FileNotFoundError(f"Model file not found: {model_name}")
+
+        size_bytes = model_path.stat().st_size
+        size_gb = round(size_bytes / (1024**3), 2)
+        if size_bytes < 100 * 1024 * 1024:
+            hub_logger.log("WARNING", f"Model file is unusually small ({size_gb} GB). It may be incomplete or corrupted.")
+
+        mmproj_path = (MODELS_DIR / mmproj_name) if mmproj_name else None
+
         unload_current_model()
-        
-        state.n_ctx = n_ctx
-        state.n_gpu_layers = n_gpu_layers
-        p_model = Path(model_path)
-        if not p_model.exists():
-            raise FileNotFoundError(f"Model file not found: {model_path}")
-            
-        state.active_model_path = str(p_model)
-        state.active_model_name = p_model.name
-        
-        if mmproj_path:
-            p_mmproj = Path(mmproj_path)
-            if p_mmproj.exists():
-                state.active_mmproj_path = str(p_mmproj)
-                state.active_mmproj_name = p_mmproj.name
-        
+
+        with state.lock:
+            state.loading_step = f"Reading {size_gb} GB tensors & allocating memory..."
+        hub_logger.log("INFO", state.loading_step)
+
         if LLAMA_AVAILABLE:
             chat_handler = None
-            if state.active_mmproj_path:
+            if mmproj_path and mmproj_path.exists():
                 try:
-                    chat_handler = Llava15ChatHandler(clip_model_path=state.active_mmproj_path)
+                    hub_logger.log("INFO", f"Initializing Vision projector handler from {mmproj_path.name}...")
+                    chat_handler = Llava15ChatHandler(clip_model_path=str(mmproj_path))
                 except Exception as e:
-                    print(f"[SilkloraAI Hub] Notice: Failed to init Llava15ChatHandler ({e}), loading text only.")
-            
-            print(f"[SilkloraAI Hub] Loading GGUF Model: {state.active_model_name} (gpu_layers={n_gpu_layers}, ctx={n_ctx})...")
-            state.llama_instance = Llama(
-                model_path=state.active_model_path,
-                n_ctx=n_ctx,
-                n_gpu_layers=n_gpu_layers,
-                chat_handler=chat_handler,
-                verbose=False,
-            )
-            print(f"[SilkloraAI Hub] Successfully loaded: {state.active_model_name}")
+                    hub_logger.log("WARNING", f"Failed to initialize Llava15ChatHandler ({e}), proceeding with text only.")
+
+            # Attempt model instantiation with fallback on CUDA OOM
+            llama_inst = None
+            try:
+                hub_logger.log("INFO", f"Calling Llama(model_path={model_name}, n_ctx={n_ctx}, n_gpu_layers={n_gpu_layers})...")
+                llama_inst = Llama(
+                    model_path=str(model_path),
+                    n_ctx=n_ctx,
+                    n_gpu_layers=n_gpu_layers,
+                    chat_handler=chat_handler,
+                    verbose=False,
+                )
+            except Exception as e:
+                err_msg = str(e)
+                hub_logger.log("WARNING", f"Initial load failed: {err_msg}")
+                # If failed with full GPU offload, try falling back to CPU / partial offload
+                if n_gpu_layers != 0:
+                    hub_logger.log("INFO", "Attempting automatic recovery: reloading with CPU mode (n_gpu_layers=0)...")
+                    with state.lock:
+                        state.loading_step = "GPU memory full, falling back to CPU mode..."
+                    llama_inst = Llama(
+                        model_path=str(model_path),
+                        n_ctx=min(n_ctx, 2048),
+                        n_gpu_layers=0,
+                        chat_handler=chat_handler,
+                        verbose=False,
+                    )
+                    n_gpu_layers = 0
+                else:
+                    raise e
+
+            elapsed = round(time.time() - state.load_start_time, 2)
+            with state.lock:
+                state.llama_instance = llama_inst
+                state.active_model_path = str(model_path)
+                state.active_model_name = model_name
+                if mmproj_path and mmproj_path.exists():
+                    state.active_mmproj_path = str(mmproj_path)
+                    state.active_mmproj_name = mmproj_path.name
+                state.n_ctx = n_ctx
+                state.n_gpu_layers = n_gpu_layers
+                state.load_time_sec = elapsed
+                state.load_error = None
+
+            hub_logger.log("INFO", f"Model {model_name} successfully loaded in {elapsed}s (gpu_layers={n_gpu_layers})")
         else:
-            print(f"[SilkloraAI Hub] [Simulation Mode] Selected: {state.active_model_name} (llama-cpp-python not compiled)")
+            with state.lock:
+                state.active_model_path = str(model_path)
+                state.active_model_name = model_name
+                state.load_time_sec = 0.1
+            hub_logger.log("INFO", f"Selected {model_name} (Simulation mode: llama-cpp-python not available)")
+
+    except Exception as e:
+        err_detail = f"{type(e).__name__}: {str(e)}"
+        trace_str = traceback.format_exc()
+        hub_logger.log("ERROR", f"Failed to load model {model_name}: {err_detail}\n{trace_str}")
+        with state.lock:
+            state.load_error = err_detail
+    finally:
+        with state.lock:
+            state.is_loading = False
+            state.loading_step = ""
 
 def background_hf_download(repo_id: str, filename: str, target_path: Path):
     download_url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
@@ -355,7 +522,7 @@ def background_hf_download(repo_id: str, filename: str, target_path: Path):
         }
 
     try:
-        print(f"[SilkloraAI Hub] Starting download: {filename} from {repo_id}...")
+        hub_logger.log("INFO", f"Starting download: {filename} from {repo_id}...")
         headers = {"User-Agent": "SilkloraAI-Local-Hub/1.2"}
         resp = requests.get(download_url, headers=headers, stream=True, timeout=30)
         resp.raise_for_status()
@@ -372,7 +539,7 @@ def background_hf_download(repo_id: str, filename: str, target_path: Path):
         with open(temp_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1024 * 1024):
                 if state.cancel_download_flag:
-                    print(f"[SilkloraAI Hub] Download cancelled: {filename}")
+                    hub_logger.log("INFO", f"Download cancelled by user: {filename}")
                     temp_path.unlink(missing_ok=True)
                     with state.download_lock:
                         state.download_task = {"status": "cancelled", "filename": filename}
@@ -402,7 +569,7 @@ def background_hf_download(repo_id: str, filename: str, target_path: Path):
                         last_update = now
 
         temp_path.rename(target_path)
-        print(f"[SilkloraAI Hub] Download complete: {filename}")
+        hub_logger.log("INFO", f"Download complete: {filename} ({round(total_size / (1024**3), 2)} GB)")
         with state.download_lock:
             state.download_task = {"status": "completed", "filename": filename, "percent": 100.0}
         
@@ -414,7 +581,7 @@ def background_hf_download(repo_id: str, filename: str, target_path: Path):
         threading.Thread(target=_clear_completed, daemon=True).start()
 
     except Exception as e:
-        print(f"[SilkloraAI Hub] Download error: {e}")
+        hub_logger.log("ERROR", f"Download failed for {filename}: {e}")
         temp_path.unlink(missing_ok=True)
         with state.download_lock:
             state.download_task = {"status": "failed", "filename": filename, "error": str(e)}
@@ -431,12 +598,17 @@ def background_hf_download(repo_id: str, filename: str, target_path: Path):
 # -------------------------------------------------------------
 @app.get("/health")
 @app.get("/v1/health")
-def health():
+def health(req: Request):
+    client_host = req.client.host if req.client else "unknown"
+    hub_logger.log("INFO", f"Health ping received from client: {client_host}")
     return {
         "status": "ok",
         "service": "SilkloraAI Local Hub",
         "active_model": state.active_model_name,
         "active_mmproj": state.active_mmproj_name,
+        "is_loading": state.is_loading,
+        "loading_step": state.loading_step,
+        "load_error": state.load_error,
         "llama_cpp_available": LLAMA_AVAILABLE,
         "uptime_sec": int(time.time() - state.start_time),
     }
@@ -472,6 +644,9 @@ async def chat_completions(req: Request):
     max_tokens = int(body.get("max_tokens", 2048))
     stop = body.get("stop", None)
 
+    client_host = req.client.host if req.client else "unknown"
+    hub_logger.log("INFO", f"Inference request from {client_host} (messages: {len(messages)}, stream: {stream})")
+
     if LLAMA_AVAILABLE and state.llama_instance is not None:
         try:
             if stream:
@@ -498,7 +673,8 @@ async def chat_completions(req: Request):
                 )
                 return JSONResponse(resp)
         except Exception as e:
-            traceback.print_exc()
+            trace_str = traceback.format_exc()
+            hub_logger.log("ERROR", f"Inference error: {e}\n{trace_str}")
             raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
 
     # Fallback simulation engine
@@ -567,15 +743,20 @@ async def chat_completions(req: Request):
         }
 
 # -------------------------------------------------------------
-# Hub Management APIs
+# Hub Management & Diagnostic APIs
 # -------------------------------------------------------------
 @app.get("/api/status")
 def get_status():
-    ips = get_local_ip_addresses()
-    primary_ip = ips[0] if ips else "127.0.0.1"
+    adapters = get_local_ip_addresses()
+    primary_ip = adapters[0]["ip"] if adapters else "127.0.0.1"
     mobile_url = f"http://{primary_ip}:{state.port}/v1"
     
     mem = psutil.virtual_memory()
+    
+    loading_elapsed = 0.0
+    if state.is_loading and state.load_start_time > 0:
+        loading_elapsed = round(time.time() - state.load_start_time, 1)
+
     return {
         "status": "online",
         "uptime_sec": int(time.time() - state.start_time),
@@ -586,14 +767,110 @@ def get_status():
         "active_mmproj": state.active_mmproj_name,
         "n_ctx": state.n_ctx,
         "n_gpu_layers": state.n_gpu_layers,
-        "local_ips": ips,
+        "network_adapters": adapters,
         "primary_ip": primary_ip,
         "mobile_url": mobile_url,
         "ram_total_gb": round(mem.total / (1024**3), 1),
         "ram_used_gb": round(mem.used / (1024**3), 1),
         "ram_percent": mem.percent,
         "download_task": state.download_task,
+        "is_loading": state.is_loading,
+        "loading_model_name": state.loading_model_name,
+        "loading_step": state.loading_step,
+        "loading_elapsed_sec": loading_elapsed,
+        "load_error": state.load_error,
+        "load_time_sec": state.load_time_sec,
     }
+
+@app.get("/api/logs")
+def get_recent_logs():
+    return {
+        "logs": hub_logger.get_entries(),
+        "is_loading": state.is_loading,
+        "load_error": state.load_error,
+    }
+
+@app.post("/api/logs/clear")
+def clear_logs_endpoint():
+    hub_logger.clear()
+    hub_logger.log("INFO", "Logs cleared by user.")
+    return {"ok": True}
+
+@app.get("/api/logs/download")
+def download_diagnostics_report():
+    """Generate and return a comprehensive text report for troubleshooting."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    hw = analyze_system_hardware()
+    adapters = get_local_ip_addresses()
+    models = scan_local_models()
+    log_lines = hub_logger.get_entries()
+
+    report = []
+    report.append("==================================================================")
+    report.append("    SilkloraAI Local Hub - System Diagnostic & Event Report")
+    report.append(f"    Generated: {timestamp}")
+    report.append("==================================================================")
+    report.append("")
+    report.append("[1. SYSTEM ENVIRONMENT]")
+    report.append(f"  - Operating System : {platform.system()} {platform.release()} ({platform.machine()})")
+    report.append(f"  - Python Binary    : {sys.executable}")
+    report.append(f"  - Python Version   : {platform.python_version()}")
+    report.append(f"  - Llama Engine     : {LLAMA_BACKEND} (Available: {LLAMA_AVAILABLE})")
+    report.append(f"  - Server Uptime    : {int(time.time() - state.start_time)} seconds")
+    report.append("")
+    report.append("[2. HARDWARE SPECIFICATIONS]")
+    report.append(f"  - CPU Arch / Cores : {hw['cpu']['arch']} - {hw['cpu']['cores']} cores / {hw['cpu']['threads']} threads")
+    report.append(f"  - System RAM Total : {hw['ram']['total_gb']} GB (Available: {hw['ram']['avail_gb']} GB)")
+    report.append(f"  - GPU Detected     : {hw['gpu']['name']}")
+    report.append(f"  - Dedicated VRAM   : {hw['gpu']['vram_total_gb']} GB Total (Free: {hw['gpu']['vram_free_gb']} GB)")
+    report.append(f"  - CUDA Ready       : {hw['gpu']['cuda_ready']}")
+    report.append(f"  - Assigned Tier    : {hw['tier']['level']}")
+    report.append("")
+    report.append("[3. NETWORK CONFIGURATION & MOBILE CONNECTION]")
+    report.append(f"  - Server Port      : {state.port}")
+    report.append("  - Network Adapters:")
+    for a in adapters:
+        report.append(f"      * {a['label']} -> {'(PRIMARY / RECOMMENDED)' if a['is_primary'] else ''}")
+    primary_ip = adapters[0]['ip'] if adapters else '127.0.0.1'
+    report.append(f"  - Mobile Base URL  : http://{primary_ip}:{state.port}/v1")
+    report.append(f"  - Direct Test URL  : http://{primary_ip}:{state.port}/health")
+    report.append("")
+    report.append("[4. LOCAL MODEL STORAGE (models/)]")
+    if models:
+        for m in models:
+            active_marker = " [ACTIVE]" if m['is_active'] else ""
+            type_marker = " [VISION MMPROJ]" if m['is_mmproj'] else " [LANGUAGE MODEL]"
+            report.append(f"  - {m['filename']} ({m['size_gb']} GB - {m['size_bytes']} bytes){type_marker}{active_marker}")
+    else:
+        report.append("  - (No .gguf models currently found in models/ folder)")
+    report.append("")
+    report.append("[5. ACTIVE INFERENCE STATE]")
+    report.append(f"  - Active Model     : {state.active_model_name}")
+    report.append(f"  - Active mmproj    : {state.active_mmproj_name or 'None'}")
+    report.append(f"  - Context Window   : {state.n_ctx}")
+    report.append(f"  - GPU Layers Offload: {state.n_gpu_layers}")
+    report.append(f"  - Is Loading Now   : {state.is_loading} ({state.loading_step or 'Idle'})")
+    report.append(f"  - Last Load Error  : {state.load_error or 'None'}")
+    report.append(f"  - Last Load Time   : {state.load_time_sec or 'N/A'}s")
+    report.append("")
+    report.append("[6. COMPLETE EVENT LOGS (Recent)]")
+    if log_lines:
+        for l in log_lines:
+            report.append(f"  {l}")
+    else:
+        report.append("  (No logs recorded yet)")
+    report.append("")
+    report.append("==================================================================")
+    report.append("    End of Diagnostic Report")
+    report.append("==================================================================")
+
+    content = "\n".join(report)
+    filename = f"silklora_diagnostic_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    return Response(
+        content=content,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename=\"{filename}\""}
+    )
 
 @app.get("/api/hardware")
 def get_hardware_analysis():
@@ -605,6 +882,7 @@ def list_local_models():
 
 @app.post("/api/models/load")
 async def load_model_endpoint(req: Request):
+    """Initiates non-blocking model load in background thread."""
     data = await req.json()
     model_name = data.get("model_name")
     mmproj_name = data.get("mmproj_name")
@@ -614,23 +892,25 @@ async def load_model_endpoint(req: Request):
     if not model_name:
         raise HTTPException(status_code=400, detail="model_name is required")
 
-    model_path = MODELS_DIR / model_name
-    mmproj_path = (MODELS_DIR / mmproj_name) if mmproj_name else None
+    if state.is_loading:
+        raise HTTPException(status_code=409, detail=f"Another model is currently loading: {state.loading_model_name}")
 
-    try:
-        load_gguf_model(
-            model_path=str(model_path),
-            mmproj_path=str(mmproj_path) if mmproj_path else None,
-            n_ctx=n_ctx,
-            n_gpu_layers=n_gpu_layers,
-        )
-        return {
-            "ok": True,
-            "active_model": state.active_model_name,
-            "active_mmproj": state.active_mmproj_name,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    hub_logger.log("INFO", f"Received load request for {model_name} (gpu_layers={n_gpu_layers}, ctx={n_ctx})")
+    
+    # Launch worker in background thread
+    t = threading.Thread(
+        target=async_load_worker,
+        args=(model_name, mmproj_name, n_ctx, n_gpu_layers),
+        daemon=True,
+    )
+    t.start()
+
+    return {
+        "ok": True,
+        "status": "loading",
+        "model_name": model_name,
+        "message": "Model load initiated in background.",
+    }
 
 @app.post("/api/models/unload")
 def unload_model_endpoint():
@@ -647,8 +927,8 @@ def delete_model_endpoint(filename: str):
         unload_current_model()
 
     file_path.unlink()
+    hub_logger.log("INFO", f"Deleted local model file: {filename}")
     
-    # Auto-clear download_task if it matches deleted file
     with state.download_lock:
         if state.download_task and state.download_task.get("filename") == filename:
             state.download_task = None
@@ -657,7 +937,6 @@ def delete_model_endpoint(filename: str):
 
 @app.get("/api/hf/search")
 def search_huggingface(q: str = ""):
-    """Search Hugging Face models by keyword or model name."""
     query = q.strip()
     if not query:
         return {"query": "", "results": []}
@@ -672,6 +951,7 @@ def search_huggingface(q: str = ""):
     search_term = query.replace("https://", "").replace("http://", "")
     url = f"https://huggingface.co/api/models?search={urllib.parse.quote(search_term)}&filter=gguf&sort=downloads&direction=-1&limit=25"
     try:
+        hub_logger.log("INFO", f"Searching HuggingFace: '{search_term}'...")
         res = requests.get(url, headers={"User-Agent": "SilkloraAI-Local-Hub/1.2"}, timeout=12)
         res.raise_for_status()
         items = res.json()
@@ -689,11 +969,11 @@ def search_huggingface(q: str = ""):
             })
         return {"query": query, "results": results}
     except Exception as e:
+        hub_logger.log("ERROR", f"HuggingFace search error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/hf/inspect")
 async def inspect_huggingface_repo(req: Request):
-    """Inspect a HuggingFace repository ID or URL and list available GGUF files with sizes and quantization advice."""
     data = await req.json()
     raw_input = data.get("repo_id_or_url", "").strip()
     if not raw_input:
@@ -707,6 +987,7 @@ async def inspect_huggingface_repo(req: Request):
 
     api_url = f"https://huggingface.co/api/models/{clean_repo}"
     try:
+        hub_logger.log("INFO", f"Inspecting HuggingFace repo: {clean_repo}")
         res = requests.get(api_url, headers={"User-Agent": "SilkloraAI-Local-Hub/1.2"}, timeout=15)
         if res.status_code == 404:
             raise HTTPException(status_code=404, detail=f"Repository not found on HuggingFace: {clean_repo}")
@@ -756,7 +1037,6 @@ async def inspect_huggingface_repo(req: Request):
                     "q_tag": q_tag,
                 })
 
-        # If repo is unquantized safetensors (like DavidAU) without GGUF files
         suggested_repos = []
         if not gguf_files:
             model_slug = clean_repo.split("/")[-1]
@@ -787,11 +1067,11 @@ async def inspect_huggingface_repo(req: Request):
             "suggested_gguf_repos": suggested_repos,
         }
     except requests.RequestException as e:
+        hub_logger.log("ERROR", f"HuggingFace query failed: {e}")
         raise HTTPException(status_code=500, detail=f"HuggingFace query failed: {str(e)}")
 
 @app.get("/api/hf/vision")
 def get_curated_vision_models():
-    """Curated multimodal Vision models with paired base model and mmproj projectors."""
     return {
         "catalog": [
             {
@@ -871,13 +1151,14 @@ async def start_hf_download(req: Request, background_tasks: BackgroundTasks):
 @app.post("/api/hf/cancel")
 def cancel_download():
     state.cancel_download_flag = True
+    hub_logger.log("INFO", "Cancel download signal emitted.")
     return {"ok": True, "message": "Cancelling download..."}
 
 @app.post("/api/enable-cuda")
 def enable_cuda():
     """Attempt background installation of CUDA-accelerated llama-cpp-python."""
     def _install():
-        print("[SilkloraAI Hub] Initiating CUDA llama-cpp-python installation...")
+        hub_logger.log("INFO", "Initiating CUDA llama-cpp-python installation...")
         try:
             subprocess.check_call([
                 sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall",
@@ -885,9 +1166,9 @@ def enable_cuda():
                 "--prefer-binary",
                 "--extra-index-url", "https://abetlen.github.io/llama-cpp-python/whl/cu121"
             ])
-            print("[SilkloraAI Hub] CUDA llama-cpp-python installed successfully.")
+            hub_logger.log("INFO", "CUDA llama-cpp-python installed successfully.")
         except Exception as e:
-            print(f"[SilkloraAI Hub] CUDA install failed: {e}")
+            hub_logger.log("ERROR", f"CUDA install failed: {e}")
 
     threading.Thread(target=_install, daemon=True).start()
     return {"ok": True, "message": "CUDA installation started in background."}
@@ -907,7 +1188,5 @@ def index_page():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     state.port = port
-    print("==================================================================")
-    print(f"  SilkloraAI Local AI Hub running at: http://localhost:{port}")
-    print("==================================================================")
+    hub_logger.log("INFO", f"SilkloraAI Local AI Hub server starting on port {port} (0.0.0.0:{port})...")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
