@@ -556,9 +556,46 @@ def delete_model_endpoint(filename: str):
     file_path.unlink()
     return {"ok": True, "deleted": filename}
 
+@app.get("/api/hf/search")
+def search_huggingface(q: str = ""):
+    """Search Hugging Face models by keyword or model name."""
+    query = q.strip()
+    if not query:
+        return {"query": "", "results": []}
+
+    # Extract model name if URL
+    if "huggingface.co/" in query:
+        query = query.split("huggingface.co/")[-1].strip("/")
+        if query.startswith("models/"):
+            query = query.replace("models/", "")
+        if "/" in query:
+            query = query.split("/")[-1]
+
+    search_term = query.replace("https://", "").replace("http://", "")
+    url = f"https://huggingface.co/api/models?search={urllib.parse.quote(search_term)}&filter=gguf&sort=downloads&direction=-1&limit=25"
+    try:
+        res = requests.get(url, headers={"User-Agent": "SilkloraAI-Local-Hub/1.0"}, timeout=12)
+        res.raise_for_status()
+        items = res.json()
+        results = []
+        for it in items:
+            repo_id = it.get("id") or it.get("modelId")
+            if not repo_id:
+                continue
+            results.append({
+                "repo_id": repo_id,
+                "downloads": it.get("downloads", 0),
+                "likes": it.get("likes", 0),
+                "author": repo_id.split("/")[0] if "/" in repo_id else "",
+                "name": repo_id.split("/")[-1] if "/" in repo_id else repo_id,
+            })
+        return {"query": query, "results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/hf/inspect")
 async def inspect_huggingface_repo(req: Request):
-    """Inspect a HuggingFace repository ID or URL and list available GGUF files."""
+    """Inspect a HuggingFace repository ID or URL and list available GGUF files with sizes and quantization advice."""
     data = await req.json()
     raw_input = data.get("repo_id_or_url", "").strip()
     if not raw_input:
@@ -575,9 +612,23 @@ async def inspect_huggingface_repo(req: Request):
     try:
         res = requests.get(api_url, headers={"User-Agent": "SilkloraAI-Local-Hub/1.0"}, timeout=15)
         if res.status_code == 404:
-            raise HTTPException(status_code=404, detail=f"Repository not found on HuggingFace: {clean_repo}")
+            raise HTTPException(status_code=404, detail=f"Репозиторий не найден на HuggingFace: {clean_repo}")
         res.raise_for_status()
         info = res.json()
+
+        # Attempt to get exact file sizes from tree API
+        tree_sizes = {}
+        try:
+            tree_url = f"https://huggingface.co/api/models/{clean_repo}/tree/main"
+            t_res = requests.get(tree_url, headers={"User-Agent": "SilkloraAI-Local-Hub/1.0"}, timeout=10)
+            if t_res.ok:
+                for f_obj in t_res.json():
+                    f_path = f_obj.get("path")
+                    f_size = f_obj.get("size")
+                    if f_path and f_size is not None:
+                        tree_sizes[f_path] = f_size
+        except Exception:
+            pass
         
         siblings = info.get("siblings", [])
         gguf_files = []
@@ -585,10 +636,50 @@ async def inspect_huggingface_repo(req: Request):
             rfilename = s.get("rfilename", "")
             if rfilename.lower().endswith(".gguf"):
                 is_mmproj = "mmproj" in rfilename.lower() or "projector" in rfilename.lower()
+                size_bytes = tree_sizes.get(rfilename, 0)
+                size_gb = round(size_bytes / (1024**3), 2) if size_bytes else None
+
+                q_tag = "standard"
+                fname_upper = rfilename.upper()
+                if is_mmproj:
+                    q_tag = "mmproj"
+                elif "Q4_K_M" in fname_upper or "Q4_K_S" in fname_upper:
+                    q_tag = "recommended"
+                elif "Q5_K_M" in fname_upper or "Q5_K_S" in fname_upper:
+                    q_tag = "high"
+                elif "Q8_0" in fname_upper or "Q8_1" in fname_upper:
+                    q_tag = "ultra"
+                elif "Q3_K" in fname_upper or "Q2_K" in fname_upper or "IQ3" in fname_upper:
+                    q_tag = "economy"
+
                 gguf_files.append({
                     "filename": rfilename,
                     "is_mmproj": is_mmproj,
+                    "size_bytes": size_bytes,
+                    "size_gb": size_gb,
+                    "q_tag": q_tag,
                 })
+
+        # If repo is unquantized safetensors (like DavidAU) without GGUF files
+        suggested_repos = []
+        if not gguf_files:
+            model_slug = clean_repo.split("/")[-1]
+            s_url = f"https://huggingface.co/api/models?search={urllib.parse.quote(model_slug)}&filter=gguf&sort=downloads&direction=-1&limit=15"
+            try:
+                s_res = requests.get(s_url, headers={"User-Agent": "SilkloraAI-Local-Hub/1.0"}, timeout=10)
+                if s_res.ok:
+                    for s_item in s_res.json():
+                        s_id = s_item.get("id") or s_item.get("modelId")
+                        if s_id and s_id != clean_repo:
+                            suggested_repos.append({
+                                "repo_id": s_id,
+                                "downloads": s_item.get("downloads", 0),
+                                "likes": s_item.get("likes", 0),
+                                "author": s_id.split("/")[0] if "/" in s_id else "",
+                                "name": s_id.split("/")[-1] if "/" in s_id else s_id,
+                            })
+            except Exception:
+                pass
 
         return {
             "repo_id": clean_repo,
@@ -596,9 +687,11 @@ async def inspect_huggingface_repo(req: Request):
             "downloads": info.get("downloads", 0),
             "likes": info.get("likes", 0),
             "files": gguf_files,
+            "has_gguf": len(gguf_files) > 0,
+            "suggested_gguf_repos": suggested_repos,
         }
     except requests.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Failed to query HuggingFace: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка запроса к HuggingFace: {str(e)}")
 
 @app.post("/api/hf/download")
 async def start_hf_download(req: Request, background_tasks: BackgroundTasks):
@@ -765,6 +858,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
         .btn-danger:hover { background: rgba(244, 63, 94, 0.3); }
 
+        .chip-btn {
+            background: var(--bg-card); border: 1px solid var(--border);
+            color: var(--text-main); padding: 7px 14px; border-radius: 20px;
+            font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.2s;
+        }
+        .chip-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .repo-card {
+            background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: 14px; padding: 16px; display: flex; justify-content: space-between; align-items: center;
+            transition: all 0.2s;
+        }
+        .repo-card:hover { border-color: var(--accent); background: var(--bg-card-hover); }
+        .tag-badge {
+            display: inline-block; padding: 2px 8px; border-radius: 12px;
+            font-size: 11px; font-weight: 600; font-family: 'JetBrains Mono', monospace;
+        }
+        .tag-recommended { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+        .tag-high { background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
+        .tag-ultra { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+        .tag-economy { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+        .tag-mmproj { background: rgba(6, 182, 212, 0.2); color: #22d3ee; border: 1px solid rgba(6, 182, 212, 0.3); }
+
         /* Tables & Lists */
         .model-list { display: flex; flex-direction: column; gap: 10px; }
         .model-item {
@@ -925,14 +1040,37 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <section id="tab-hf" class="hidden">
             <div class="card">
                 <div class="card-header">
-                    <div class="card-title">Загрузка моделей из репозитория HuggingFace</div>
+                    <div class="card-title">Поиск и загрузка моделей с HuggingFace</div>
                 </div>
-                <p style="font-size:13px; color:var(--text-muted); margin-bottom:14px;">
-                    Укажите идентификатор репозитория HuggingFace (например: <code>bartowski/Llama-3.2-3B-Instruct-GGUF</code> или <code>Qwen/Qwen2.5-7B-Instruct-GGUF</code>):
+                <p style="font-size:13px; color:var(--text-muted); margin-bottom:14px; line-height:1.6;">
+                    Введите название модели (например: <code>Mistral Nemo</code>, <code>HERETIC</code>, <code>Llama 3</code>) или вставьте прямую ссылку / ID репозитория с HuggingFace:
                 </p>
+
+                <!-- Search Input -->
                 <div class="input-row">
-                    <input type="text" id="hf-input" placeholder="Идентификатор репозитория HuggingFace..." value="bartowski/Llama-3.2-3B-Instruct-GGUF" />
-                    <button class="btn-primary" onclick="inspectHfRepo()">Найти файлы .gguf</button>
+                    <input type="text" id="hf-input" placeholder="Поиск модели (например: Mistral Nemo, HERETIC, Llama 3) или ссылка..." value="Mistral-Nemo-2407-12B-Thinking-Claude-Gemini-GPT5.2-Uncensored-HERETIC" onkeydown="if(event.key==='Enter') searchOrInspectHf()" />
+                    <button class="btn-primary" onclick="searchOrInspectHf()">Найти модель</button>
+                </div>
+
+                <!-- Recommended RP & Vision Presets -->
+                <div style="margin-bottom:18px;">
+                    <div style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--text-dim); margin-bottom:8px; letter-spacing:0.04em;">
+                        Популярные модели для ролевого отыгрыша и анализа фото:
+                    </div>
+                    <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                        <button class="chip-btn" onclick="quickSelect('Mistral-Nemo-2407-12B-Thinking-Claude-Gemini-GPT5.2-Uncensored-HERETIC')">
+                            Mistral-Nemo 12B HERETIC (Без цензуры)
+                        </button>
+                        <button class="chip-btn" onclick="quickSelect('bartowski/Llama-3.1-8B-Instruct-GGUF')">
+                            Llama-3.1 8B Instruct (Универсальная)
+                        </button>
+                        <button class="chip-btn" onclick="quickSelect('Qwen/Qwen2.5-7B-Instruct-GGUF')">
+                            Qwen-2.5 7B Instruct (Отличный русский)
+                        </button>
+                        <button class="chip-btn" onclick="quickSelect('openbmb/MiniCPM-V-2_6-gguf')">
+                            MiniCPM-V 2.6 (Текст + Vision фото)
+                        </button>
+                    </div>
                 </div>
 
                 <!-- Active Download Progress -->
@@ -1135,11 +1273,80 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             }
         }
 
-        async function inspectHfRepo() {
-            const input = document.getElementById('hf-input').value.trim();
-            if (!input) return;
+        async function searchOrInspectHf(forceQuery) {
+            const query = (forceQuery || document.getElementById('hf-input').value).trim();
+            if (!query) return;
+            document.getElementById('hf-input').value = query;
+
+            // Direct repo check: contains huggingface.co or has user/repo pattern with GGUF/gguf
+            const isDirectRepo = query.includes('huggingface.co/') || (query.includes('/') && (query.toUpperCase().includes('GGUF') || query.endsWith('.gguf')));
+
+            if (isDirectRepo) {
+                await inspectHfRepo(query);
+            } else {
+                await searchHfModels(query);
+            }
+        }
+
+        async function quickSelect(repoOrTerm) {
+            document.getElementById('hf-input').value = repoOrTerm;
+            await searchOrInspectHf(repoOrTerm);
+        }
+
+        async function searchHfModels(query) {
             const resEl = document.getElementById('hf-results');
-            resEl.innerHTML = '<div style="color:var(--text-muted); font-size:13px;">Запрос к HuggingFace API...</div>';
+            resEl.innerHTML = '<div style="color:var(--text-muted); font-size:13px; padding:12px;">Поиск моделей GGUF на HuggingFace...</div>';
+
+            try {
+                const res = await fetch(`/api/hf/search?q=${encodeURIComponent(query)}`);
+                const data = await res.json();
+                if (!res.ok) {
+                    resEl.innerHTML = `<div style="color:var(--danger); font-size:13px; padding:12px;">Ошибка поиска: ${data.detail}</div>`;
+                    return;
+                }
+
+                if (!data.results || data.results.length === 0) {
+                    resEl.innerHTML = `
+                        <div style="background:var(--bg-card); padding:18px; border-radius:14px; border:1px solid var(--border);">
+                            <div style="color:var(--warning); font-size:14px; font-weight:600; margin-bottom:6px;">Моделей GGUF по запросу "${query}" не найдено.</div>
+                            <div style="color:var(--text-muted); font-size:12px; line-height:1.6;">Попробуйте упростить запрос (например: "Mistral", "HERETIC", "Llama") или выберите одну из проверенных моделей выше.</div>
+                        </div>
+                    `;
+                    return;
+                }
+
+                let html = `<div style="margin-bottom:14px; font-size:14px; font-weight:700;">Найдено ${data.results.length} вариантов GGUF для "${query}":</div><div style="display:flex; flex-direction:column; gap:10px;">`;
+                data.results.forEach(r => {
+                    const dlK = r.downloads > 1000 ? (r.downloads / 1000).toFixed(1) + 'k' : r.downloads;
+                    html += `
+                        <div class="repo-card">
+                            <div style="flex:1; min-width:0; margin-right:12px;">
+                                <div style="font-weight:700; font-size:14px; color:#fff; word-break:break-all;">${r.repo_id}</div>
+                                <div style="font-size:12px; color:var(--text-muted); margin-top:4px; display:flex; gap:12px;">
+                                    <span>Скачиваний: <b style="color:#a78bfa;">${dlK}</b></span>
+                                    <span>Лайков: <b style="color:#f43f5e;">${r.likes}</b></span>
+                                    <span>Автор: <b style="color:#cbd5e1;">${r.author}</b></span>
+                                </div>
+                            </div>
+                            <button class="btn-primary" style="padding:8px 16px; font-size:12px; white-space:nowrap;" onclick="inspectHfRepo('${r.repo_id}')">
+                                Выбрать квантовки
+                            </button>
+                        </div>
+                    `;
+                });
+                html += '</div>';
+                resEl.innerHTML = html;
+            } catch (err) {
+                resEl.innerHTML = `<div style="color:var(--danger); font-size:13px; padding:12px;">Сетевая ошибка: ${err.message}</div>`;
+            }
+        }
+
+        async function inspectHfRepo(repoId) {
+            const input = (repoId || document.getElementById('hf-input').value).trim();
+            if (!input) return;
+            document.getElementById('hf-input').value = input;
+            const resEl = document.getElementById('hf-results');
+            resEl.innerHTML = '<div style="color:var(--text-muted); font-size:13px; padding:12px;">Получение структуры репозитория и размеров файлов...</div>';
 
             try {
                 const res = await fetch('/api/hf/inspect', {
@@ -1149,33 +1356,96 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 });
                 const data = await res.json();
                 if (!res.ok) {
-                    resEl.innerHTML = `<div style="color:var(--danger); font-size:13px;">Ошибка: ${data.detail}</div>`;
+                    resEl.innerHTML = `<div style="color:var(--danger); font-size:13px; padding:12px;">Ошибка: ${data.detail}</div>`;
                     return;
                 }
 
-                if (data.files.length === 0) {
-                    resEl.innerHTML = `<div style="color:var(--warning); font-size:13px;">В этом репозитории не найдено .gguf файлов.</div>`;
+                // If this is a safetensors repo (like DavidAU) with 0 GGUF files:
+                if (!data.has_gguf) {
+                    let html = `
+                        <div style="background:rgba(245, 158, 11, 0.1); border:1px solid rgba(245, 158, 11, 0.3); border-radius:14px; padding:18px; margin-bottom:16px;">
+                            <div style="font-weight:700; font-size:14px; color:#fbbf24; margin-bottom:6px;">Внимание: исходные веса safetensors (PyTorch)</div>
+                            <div style="font-size:12px; color:#cbd5e1; line-height:1.6;">
+                                Репозиторий <b>${data.repo_id}</b> содержит несжатые исходные веса safetensors. Они не запускаются локально через движок GGUF.
+                                <br>Ниже автоматически найдены готовые квантованные <b>GGUF-версии</b> этой модели:
+                            </div>
+                        </div>
+                    `;
+
+                    if (data.suggested_gguf_repos && data.suggested_gguf_repos.length > 0) {
+                        html += `<div style="margin-bottom:12px; font-weight:700; font-size:14px;">Рекомендуемые GGUF-репозитории:</div><div style="display:flex; flex-direction:column; gap:10px;">`;
+                        data.suggested_gguf_repos.forEach(s => {
+                            const dlK = s.downloads > 1000 ? (s.downloads / 1000).toFixed(1) + 'k' : s.downloads;
+                            html += `
+                                <div class="repo-card">
+                                    <div style="flex:1; min-width:0; margin-right:12px;">
+                                        <div style="font-weight:700; font-size:14px; color:#fff; word-break:break-all;">${s.repo_id}</div>
+                                        <div style="font-size:12px; color:var(--text-muted); margin-top:4px; display:flex; gap:12px;">
+                                            <span>Скачиваний: <b style="color:#a78bfa;">${dlK}</b></span>
+                                            <span>Лайков: <b style="color:#f43f5e;">${s.likes}</b></span>
+                                        </div>
+                                    </div>
+                                    <button class="btn-primary" style="padding:8px 16px; font-size:12px; white-space:nowrap;" onclick="inspectHfRepo('${s.repo_id}')">
+                                        Открыть файлы
+                                    </button>
+                                </div>
+                            `;
+                        });
+                        html += '</div>';
+                    } else {
+                        html += `<div style="color:var(--text-muted); font-size:13px; padding:12px;">Готовые GGUF-конверсии не найдены. Попробуйте поискать по сокращенному названию через поиск.</div>`;
+                    }
+                    resEl.innerHTML = html;
                     return;
                 }
 
-                let html = `<div style="margin-bottom:12px; font-weight:700;">Найдено ${data.files.length} GGUF квантовок в ${data.repo_id}:</div><div class="model-list">`;
+                // If GGUF files found:
+                let html = `
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+                        <div>
+                            <div style="font-weight:700; font-size:15px; color:#fff;">${data.repo_id}</div>
+                            <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">Доступно файлов: ${data.files.length}</div>
+                        </div>
+                        <button class="chip-btn" onclick="searchOrInspectHf('${data.repo_id.split('/')[0]}')">Все модели автора</button>
+                    </div>
+                    <div class="model-list">
+                `;
+
                 data.files.forEach(f => {
+                    let badgeHtml = '';
+                    if (f.q_tag === 'recommended') {
+                        badgeHtml = '<span class="tag-badge tag-recommended">Рекомендуется (Оптимальный баланс)</span>';
+                    } else if (f.q_tag === 'high') {
+                        badgeHtml = '<span class="tag-badge tag-high">Высокое качество</span>';
+                    } else if (f.q_tag === 'ultra') {
+                        badgeHtml = '<span class="tag-badge tag-ultra">Максимальный размер Q8</span>';
+                    } else if (f.q_tag === 'economy') {
+                        badgeHtml = '<span class="tag-badge tag-economy">Экономный (для 8 ГБ RAM)</span>';
+                    } else if (f.q_tag === 'mmproj') {
+                        badgeHtml = '<span class="tag-badge tag-mmproj">Vision проектор зрения</span>';
+                    }
+
+                    const sizeLabel = f.size_gb ? `${f.size_gb} ГБ` : '';
+
                     html += `
                         <div class="model-item">
-                            <div class="model-info">
-                                <div class="model-name">
-                                    <span>${f.filename}</span>
-                                    ${f.is_mmproj ? '<span class="badge badge-vision">Vision mmproj</span>' : '<span class="badge badge-text">Квантовка</span>'}
+                            <div class="model-info" style="flex:1; min-width:0; margin-right:12px;">
+                                <div class="model-name" style="margin-bottom:4px; word-break:break-all;">
+                                    <span style="font-family:'JetBrains Mono'; font-size:13px;">${f.filename}</span>
+                                    ${badgeHtml}
                                 </div>
+                                ${sizeLabel ? `<div style="font-size:12px; color:var(--text-muted);">Размер файла: <b style="color:#a78bfa;">${sizeLabel}</b></div>` : ''}
                             </div>
-                            <button class="btn-primary" style="padding:6px 14px; font-size:12px;" onclick="startDownload('${data.repo_id}', '${f.filename}')">Скачать</button>
+                            <button class="btn-primary" style="padding:7px 16px; font-size:12px; white-space:nowrap;" onclick="startDownload('${data.repo_id}', '${f.filename}')">
+                                Скачать в models/
+                            </button>
                         </div>
                     `;
                 });
                 html += '</div>';
                 resEl.innerHTML = html;
             } catch (err) {
-                resEl.innerHTML = `<div style="color:var(--danger); font-size:13px;">Ошибка: ${err.message}</div>`;
+                resEl.innerHTML = `<div style="color:var(--danger); font-size:13px; padding:12px;">Ошибка: ${err.message}</div>`;
             }
         }
 

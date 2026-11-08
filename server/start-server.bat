@@ -180,11 +180,21 @@ if !ERRORLEVEL! neq 0 (
     "%RUN_EXE%" %RUN_ARGS% -m pip install --user -r requirements.txt --prefer-binary
 )
 
-:: Check / install CPU prebuilt llama-cpp-python
+:: Check / install llama-cpp-python with NVIDIA CUDA acceleration if available
 "%RUN_EXE%" %RUN_ARGS% -c "import llama_cpp" >nul 2>&1
 if !ERRORLEVEL! neq 0 (
-    echo Installing prebuilt llama-cpp-python for GGUF model inference...
-    "%RUN_EXE%" %RUN_ARGS% -m pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu >nul 2>&1
+    where nvidia-smi >nul 2>nul
+    if !ERRORLEVEL! equ 0 (
+        echo NVIDIA GPU detected. Installing CUDA-accelerated llama-cpp-python...
+        "%RUN_EXE%" %RUN_ARGS% -m pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+        if !ERRORLEVEL! neq 0 (
+            echo Notice: CUDA package install returned non-zero code, falling back to CPU version...
+            "%RUN_EXE%" %RUN_ARGS% -m pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu >nul 2>&1
+        )
+    ) else (
+        echo Installing CPU-optimized llama-cpp-python...
+        "%RUN_EXE%" %RUN_ARGS% -m pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu >nul 2>&1
+    )
 )
 
 echo.
