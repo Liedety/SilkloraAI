@@ -1,11 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cleanArtifacts, extractEmotionAndCleanResponse } from '../src/services/ai.ts';
+import {
+  cleanArtifacts,
+  extractEmotionAndCleanResponse,
+  normalizeLocalServerUrl,
+  getEffectiveAiConfig,
+} from '../src/services/ai.ts';
 import { buildSystemPrompt, DEFAULT_CORE_SYSTEM_PROMPT } from '../src/services/promptBuilder.ts';
 import { translations } from '../src/i18n/index.ts';
 import { normalizeLabel, calculateNodeScore, findDuplicateNodes, selectNodesToPrune, isSignificantTurn } from '../src/services/memoryGraph.ts';
 import { getLocalizedTextStyle, DEFAULT_STYLES, DEFAULT_THEME, APP_THEMES } from '../src/db/index.ts';
-import type { Character, Group, MemoryNode, MemoryEdge, TextStylePreset } from '../src/types/index.ts';
+import type { Character, Group, MemoryNode, MemoryEdge, TextStylePreset, AppSettings, ApiKeyConfig } from '../src/types/index.ts';
 
 test('cleanArtifacts: strips empty {} brackets and Tavern tokens', () => {
   const dirty = 'Привет! {} Как твои дела? { ... } {{user}} смотрит на {{char}}. }';
@@ -882,5 +887,103 @@ test('buildSystemPrompt: guides emotion expression, provides non-neutral example
   assert.match(prompt, /### MANDATORY EMOTION SPRITE REMINDER:/, 'Should contain recency emotion reminder at prompt end');
   assert.match(prompt, /<thought>[\s\S]*?<\/thought>/, 'Should contain thoughts monologue block');
 });
+
+test('normalizeLocalServerUrl: formats IP and host into valid OpenAI /v1 endpoint', () => {
+  // Bare IP:port
+  assert.strictEqual(
+    normalizeLocalServerUrl('192.168.1.55:8080'),
+    'http://192.168.1.55:8080/v1'
+  );
+
+  // http without /v1
+  assert.strictEqual(
+    normalizeLocalServerUrl('http://192.168.1.55:8080'),
+    'http://192.168.1.55:8080/v1'
+  );
+
+  // http with trailing slash
+  assert.strictEqual(
+    normalizeLocalServerUrl('http://192.168.1.55:8080/'),
+    'http://192.168.1.55:8080/v1'
+  );
+
+  // Already complete
+  assert.strictEqual(
+    normalizeLocalServerUrl('http://192.168.1.55:8080/v1'),
+    'http://192.168.1.55:8080/v1'
+  );
+
+  // With trailing slash on /v1/
+  assert.strictEqual(
+    normalizeLocalServerUrl('http://192.168.1.55:8080/v1/'),
+    'http://192.168.1.55:8080/v1'
+  );
+
+  // Custom https host
+  assert.strictEqual(
+    normalizeLocalServerUrl('https://ai-pc.local:1234'),
+    'https://ai-pc.local:1234/v1'
+  );
+
+  // Empty string fallback
+  assert.strictEqual(
+    normalizeLocalServerUrl(''),
+    'http://192.168.1.55:8080/v1'
+  );
+});
+
+test('getEffectiveAiConfig: returns local hub custom config when aiEngineMode is local', () => {
+  const settings: Partial<AppSettings> = {
+    aiEngineMode: 'local',
+    localHubUrl: 'http://192.168.1.100:8080/v1',
+    textModel: 'deepseek/deepseek-chat',
+  };
+
+  const cloudKey: ApiKeyConfig = {
+    id: 'key-1',
+    name: 'OpenRouter',
+    provider: 'openrouter',
+    key: 'sk-or-test-key',
+    isActive: true,
+  };
+
+  const localConfig = getEffectiveAiConfig(settings as AppSettings, cloudKey);
+  assert.strictEqual(localConfig.isLocal, true);
+  assert.strictEqual(localConfig.textModel, 'local-model');
+  assert.strictEqual(localConfig.apiKeyConfig?.provider, 'custom');
+  assert.strictEqual(localConfig.apiKeyConfig?.baseUrl, 'http://192.168.1.100:8080/v1');
+
+  // When aiEngineMode is cloud, returns cloudKey and settings textModel
+  const cloudSettings: Partial<AppSettings> = {
+    aiEngineMode: 'cloud',
+    textModel: 'deepseek/deepseek-chat',
+  };
+  const cloudConfig = getEffectiveAiConfig(cloudSettings as AppSettings, cloudKey);
+  assert.strictEqual(cloudConfig.isLocal, false);
+  assert.strictEqual(cloudConfig.textModel, 'deepseek/deepseek-chat');
+  assert.strictEqual(cloudConfig.apiKeyConfig?.id, 'key-1');
+  assert.strictEqual(cloudConfig.apiKeyConfig?.key, 'sk-or-test-key');
+});
+
+test('Multimodal Vision format: creates valid image_url payload structure', () => {
+  const photoBase64 = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD...';
+  const userText = 'Что изображено на этом фото?';
+
+  const userTurn = {
+    role: 'user',
+    content: [
+      { type: 'text', text: userText },
+      { type: 'image_url', image_url: { url: photoBase64 } },
+    ],
+  };
+
+  assert.strictEqual(userTurn.role, 'user');
+  assert.strictEqual(Array.isArray(userTurn.content), true);
+  assert.strictEqual(userTurn.content[0].type, 'text');
+  assert.strictEqual(userTurn.content[0].text, userText);
+  assert.strictEqual(userTurn.content[1].type, 'image_url');
+  assert.strictEqual(userTurn.content[1].image_url?.url, photoBase64);
+});
+
 
 
