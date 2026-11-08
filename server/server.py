@@ -108,14 +108,32 @@ LLAMA_BACKEND = "none"
 
 if os.name == "nt":
     for p in [
-        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\bin",
         r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin",
         r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0\bin",
         r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin",
     ]:
         if os.path.exists(p):
             try:
                 os.add_dll_directory(p)
+            except Exception:
+                pass
+    for sp in sys.path:
+        if "site-packages" in sp or "dist-packages" in sp:
+            try:
+                nvidia_dir = os.path.join(sp, "nvidia")
+                if os.path.isdir(nvidia_dir):
+                    for root, dirs, files in os.walk(nvidia_dir):
+                        if "bin" in dirs:
+                            bpath = os.path.join(root, "bin")
+                            try:
+                                os.add_dll_directory(bpath)
+                            except Exception:
+                                pass
             except Exception:
                 pass
 
@@ -1185,8 +1203,25 @@ def index_page():
         return HTMLResponse(content=DASHBOARD_FILE.read_text(encoding="utf-8"))
     return HTMLResponse(content="<h1>SilkloraAI Local Hub</h1><p>dashboard.html not found</p>", status_code=500)
 
+def free_port(target_port: int):
+    try:
+        current_pid = os.getpid()
+        for conn in psutil.net_connections(kind="inet"):
+            if conn.laddr.port == target_port and conn.status == "LISTEN":
+                if conn.pid and conn.pid != current_pid:
+                    try:
+                        proc = psutil.Process(conn.pid)
+                        hub_logger.log("WARNING", f"Port {target_port} was held by PID {conn.pid} ({proc.name()}). Terminating old instance...")
+                        proc.kill()
+                        proc.wait(timeout=3)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     state.port = port
+    free_port(port)
     hub_logger.log("INFO", f"SilkloraAI Local AI Hub server starting on port {port} (0.0.0.0:{port})...")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

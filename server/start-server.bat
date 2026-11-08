@@ -9,11 +9,6 @@ echo          SilkloraAI Local AI Hub - Windows Launcher
 echo ==========================================================
 echo.
 
-:: 0. Release port 8080 from any previous frozen process
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr :8080 ^| findstr LISTENING') do (
-    echo Terminating previous server process holding port 8080 (PID %%a)...
-    taskkill /f /pid %%a >nul 2>&1
-)
 
 set "PY_EXE="
 set "PY_ARGS="
@@ -207,20 +202,25 @@ if !ERRORLEVEL! neq 0 (
 :: Check / install llama-cpp-python
 "%RUN_EXE%" %RUN_ARGS% -c "from llama_cpp import Llama" >nul 2>&1
 if !ERRORLEVEL! neq 0 (
-    echo Verifying llama-cpp-python inference engine...
+    echo Checking llama-cpp-python inference engine...
+    set "USE_CUDA="
     where nvidia-smi >nul 2>nul
     if !ERRORLEVEL! equ 0 (
-        echo NVIDIA GPU detected. Testing CUDA-accelerated llama-cpp-python...
+        if exist "%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA" (
+            set "USE_CUDA=1"
+        )
+    )
+    if defined USE_CUDA (
+        echo NVIDIA CUDA Toolkit detected. Installing CUDA-accelerated llama-cpp-python...
         "%RUN_EXE%" %RUN_ARGS% -m pip install --upgrade --force-reinstall llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
         "%RUN_EXE%" %RUN_ARGS% -c "from llama_cpp import Llama" >nul 2>&1
         if !ERRORLEVEL! neq 0 (
-            echo Notice: CUDA runtime libraries (cudart64_12.dll) not found in system.
-            echo Automatically switching to reliable CPU-optimized llama-cpp-python...
+            echo Notice: CUDA runtime libraries not accessible. Switching to CPU-optimized llama-cpp-python...
             "%RUN_EXE%" %RUN_ARGS% -m pip install --upgrade --force-reinstall llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
         )
     ) else (
-        echo Installing CPU-optimized llama-cpp-python...
-        "%RUN_EXE%" %RUN_ARGS% -m pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+        echo Installing reliable CPU-optimized llama-cpp-python...
+        "%RUN_EXE%" %RUN_ARGS% -m pip install --upgrade --force-reinstall llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
     )
 )
 
