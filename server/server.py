@@ -314,7 +314,7 @@ def analyze_system_hardware() -> Dict[str, Any]:
     }
 
 def get_local_ip_addresses() -> List[Dict[str, Any]]:
-    """Enumerate network adapters and prioritize real Wi-Fi / LAN IPs over virtual adapters."""
+    """Enumerate network adapters and prioritize real Wi-Fi / LAN IPs over virtual adapters and VPNs."""
     default_ip = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -333,9 +333,11 @@ def get_local_ip_addresses() -> List[Dict[str, Any]]:
         stats = psutil.net_if_stats()
         for iface_name, iface_addrs in addrs.items():
             iface_lower = iface_name.lower()
-            is_virtual = any(k in iface_lower for k in [
+            is_virtual_name = any(k in iface_lower for k in [
                 "virtual", "vbox", "vmware", "wsl", "vethernet", "loopback", 
-                "bluetooth", "pseudo", "docker", "hyper-v", "tailscale", "zerotier", "tap"
+                "bluetooth", "pseudo", "docker", "hyper-v", "tailscale", "zerotier", 
+                "tap", "tun", "wintun", "clash", "meta", "mihomo", "sing-box", 
+                "wireguard", "openvpn", "vpn", "proxy", "securesocket", "ppp"
             ])
             is_wifi = any(k in iface_lower for k in ["wi-fi", "wifi", "wlan", "wireless", "802.11", "wlp"])
             stat = stats.get(iface_name)
@@ -346,12 +348,22 @@ def get_local_ip_addresses() -> List[Dict[str, Any]]:
                     ip = addr.address
                     if ip and not ip.startswith("127.") and ip not in seen_ips:
                         seen_ips.add(ip)
+                        is_virtual_ip = (
+                            ip.startswith("198.18.") or 
+                            ip.startswith("198.19.") or 
+                            ip.startswith("169.254.") or 
+                            ip.startswith("100.64.")
+                        )
+                        is_virtual = is_virtual_name or is_virtual_ip
                         is_primary = (ip == default_ip)
+                        
                         label = f"{ip} ({iface_name})"
                         if is_wifi:
-                            label += " [Wi-Fi]"
+                            label += " [Wi-Fi - Recommended]"
                         elif is_virtual:
-                            label += " [Virtual]"
+                            label += " [Virtual VPN/Proxy]"
+                        elif "ethernet" in iface_lower or "eth" in iface_lower or "lan" in iface_lower:
+                            label += " [Ethernet LAN]"
                         
                         results.append({
                             "ip": ip,
@@ -367,11 +379,33 @@ def get_local_ip_addresses() -> List[Dict[str, Any]]:
 
     def _score(item):
         score = 0
-        if item["is_primary"]: score += 100
-        if item["is_wifi"]: score += 50
-        if not item["is_virtual"]: score += 25
-        if item["ip"].startswith("192.168."): score += 15
-        if item["is_up"]: score += 5
+        if item["is_virtual"]:
+            score -= 1000
+        else:
+            if item["is_wifi"]:
+                score += 500
+            elif "ethernet" in item["interface"].lower() or "eth" in item["interface"].lower() or "lan" in item["interface"].lower():
+                score += 300
+            else:
+                score += 200
+
+            if item["ip"].startswith("192.168."):
+                score += 150
+            elif item["ip"].startswith("10."):
+                score += 100
+            elif item["ip"].startswith("172."):
+                try:
+                    oct2 = int(item["ip"].split(".")[1])
+                    if 16 <= oct2 <= 31:
+                        score += 100
+                except Exception:
+                    pass
+
+            if item["is_up"]:
+                score += 50
+            if item["is_primary"]:
+                score += 25
+
         return -score
 
     results.sort(key=_score)

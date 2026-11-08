@@ -535,6 +535,14 @@
                                 <label style="font-size:0.75rem; color:var(--text-muted); font-weight:600;" id="tSelectIpLabel">Network Adapter (IP):</label>
                                 <select class="select" id="selIp" onchange="updateQr()" style="margin-top:0.35rem;"></select>
                             </div>
+                            <div id="boxVpnNotice" style="display:none; background:rgba(99, 102, 241, 0.08); border:1px solid rgba(99, 102, 241, 0.25); border-radius:8px; padding:0.6rem;">
+                                <div style="font-size:0.75rem; font-weight:700; color:#a5b4fc; margin-bottom:0.2rem;">
+                                    VPN / Proxy (Clash, etc.) detected
+                                </div>
+                                <div style="font-size:0.72rem; color:var(--text-muted); line-height:1.35;">
+                                    Virtual adapter IPs (like 198.18.x.x) cannot be reached from mobile phones. Ensure your local Wi-Fi router IP (usually 192.168.x.x) is selected above.
+                                </div>
+                            </div>
                             <div>
                                 <label style="font-size:0.75rem; color:var(--text-muted); font-weight:600;" id="tTargetUrlLabel">Mobile App Base URL:</label>
                                 <div class="code-box" style="margin-top:0.35rem;">
@@ -1142,6 +1150,13 @@
             const url = "http://" + ip + ":8080/v1";
             document.getElementById("lblMobileUrl").innerText = url;
 
+            const pLink = document.getElementById("linkPhoneDirectTest");
+            if (pLink) {
+                const testUrl = "http://" + ip + ":8080/health";
+                pLink.href = testUrl;
+                pLink.innerText = testUrl;
+            }
+
             const qrContainer = document.getElementById("qrContainer");
             qrContainer.innerHTML = "";
             if (typeof QRCode !== 'undefined') {
@@ -1194,12 +1209,16 @@
                 // IP selector with interface details
                 const sel = document.getElementById("selIp");
                 if (sel.options.length === 0 && data.network_adapters) {
+                    let hasVirtual = false;
                     data.network_adapters.forEach(a => {
                         const opt = document.createElement("option");
                         opt.value = a.ip;
                         opt.innerText = a.label + (a.is_primary ? " [PRIMARY]" : "");
                         sel.appendChild(opt);
+                        if (a.is_virtual) hasVirtual = true;
                     });
+                    const vpnBox = document.getElementById("boxVpnNotice");
+                    if (vpnBox) vpnBox.style.display = hasVirtual ? "block" : "none";
                     updateQr();
                 }
 
