@@ -7,4 +7,10 @@ android/build
 *.apk
 .temp
 .agents
+__pycache__
+*.py[cod]
+venv/
+server/venv/
+server/models/*.gguf
+server/models/*.downloading
 
