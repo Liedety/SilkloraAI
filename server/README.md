@@ -1,62 +1,66 @@
-# SilkloraAI Local AI Hub (PC Server)
+# SilkloraAI Local AI Hub (PC Desktop Server)
 
-Компактный сервер для рабочих станций на Windows и Linux. Обеспечивает локальное исполнение моделей формата GGUF (текст и мультимодальный анализ изображений через проектор mmproj) с прямым подключением мобильного клиента SilkloraAI по локальной сети.
-
----
-
-## Архитектура и возможности
-
-* **Встроенный веб-интерфейс**: панель управления открывается в браузере при старте сервера (`http://localhost:8080`).
-* **Локальная сеть**: сервер слушает интерфейс `0.0.0.0:8080`, автоматически определяет локальный IP-адрес ПК в сети и формирует Base URL для подключения мобильного приложения (например, `http://192.168.1.55:8080/v1`).
-* **Интеграция с HuggingFace**: загрузка любых репозиториев GGUF по идентификатору или ссылке с отображением квантовок и индикацией прогресса скачивания.
-* **Текстовый инференс и Vision**: одновременная загрузка основной языковой модели и проектора зрения `mmproj` для распознавания изображений.
-* **Централизованное управление**: активная модель и проектор выбираются на ПК; мобильный клиент принимает параметры автоматически.
-* **OpenAI-совместимый API**: реализация эндпоинтов `/v1/chat/completions` (с поддержкой Server-Sent Events стриминга), `/v1/models` и `/v1/health`.
+High-performance, standalone inference server for Windows and Linux workstations. Powers local execution of quantized GGUF language models and multimodal Vision projectors (mmproj) with direct Wi-Fi connectivity for the SilkloraAI mobile application.
 
 ---
 
-## Порядок запуска
+## Key Features & Architecture
+
+* **Embedded Web Dashboard**: Modern 5-tab browser management console served on `http://localhost:8080`.
+* **Hardware Profiler**: Real-time inspection of CPU cores/threads, system RAM, NVIDIA GPU model, and dedicated VRAM via `nvidia-smi`. Automatically computes hardware tiers and tailored model recommendations.
+* **GPU & CUDA Acceleration**: Automatically offloads model layers (`n_gpu_layers = -1`) directly to NVIDIA GPU VRAM using CUDA 12.1 prebuilt wheels.
+* **Instant QR Code Connectivity**: Displays a high-contrast QR code on the desktop screen. The mobile app scans it with the camera to configure the exact PC IP and test connectivity automatically.
+* **Hugging Face Model Store**: Search models by keyword, inspect GGUF quantization files, download with real-time speed progress, and auto-detect unquantized repositories with one-click GGUF suggestions.
+* **Dedicated Vision Catalog**: Curated multimodal models (MiniCPM-V 2.6, LLaVA 1.5, Moondream 2, Qwen2-VL) with paired base model and `mmproj` projector downloads.
+* **OpenAI-Compatible API**: Implements `/v1/chat/completions` (with Server-Sent Events streaming and multimodal Vision `image_url`), `/v1/models`, and `/v1/health`.
+* **Bilingual UI**: English by default with an instant `[ EN | RU ]` toggle in the dashboard header.
+
+---
+
+## Quick Start Guide
 
 ### Windows
-1. Убедитесь, что установлен Python 3.10 или новее с официального сайта python.org (с флагом "Add Python to PATH").
-2. Запустите скрипт:
+1. Run the launcher script:
    ```cmd
    start-server.bat
    ```
-3. Скрипт проверит окружение, установит необходимые пакеты и запустит веб-панель по адресу `http://localhost:8080`.
+2. The launcher automatically:
+   - Detects or downloads Python 3.11 runtime if missing.
+   - Installs required packages from `requirements.txt`.
+   - Auto-detects NVIDIA GPUs and installs CUDA-accelerated `llama-cpp-python`.
+   - Configures the Windows Defender Firewall inbound rule for port 8080.
+   - Opens the web dashboard at `http://localhost:8080`.
 
 ### Linux / macOS
-1. Запустите исполняемый bash-скрипт:
+1. Grant execute permissions (if needed) and run:
    ```bash
+   chmod +x start-server.sh
    ./start-server.sh
    ```
-2. Панель мониторинга и управления откроется на `http://localhost:8080`.
+2. Open `http://localhost:8080` in your web browser.
 
 ---
 
-## Конфигурация аппаратного ускорения (GPU)
+## Connecting the Mobile App
 
-По умолчанию сервер запускается на CPU. Для перевода слоев модели в память видеокарты (NVIDIA CUDA / Apple Metal):
-
-### NVIDIA CUDA (Windows):
-```cmd
-call venv\Scripts\activate
-set CMAKE_ARGS=-DGGML_CUDA=on
-pip install llama-cpp-python --force-reinstall --no-cache-dir --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
-```
-
-### NVIDIA CUDA (Linux):
-```bash
-source venv/bin/activate
-CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python --force-reinstall --no-cache-dir
-```
+1. Ensure your smartphone and PC are connected to the same Wi-Fi network.
+2. In the PC dashboard (`http://localhost:8080`), locate the QR code on the **Overview & Connect** tab.
+3. Open the **SilkloraAI** app on your phone &rarr; Navigate to **Settings** &rarr; Tap **Scan QR Code**.
+4. Point your phone camera at the PC screen. The IP address will populate automatically, and the app will verify the connection.
 
 ---
 
-## Подключение в мобильном приложении SilkloraAI
+## Hardware Tiers & Recommendations
 
-1. Откройте приложение SilkloraAI на мобильном устройстве.
-2. Перейдите в раздел "Настройки".
-3. Переключите режим инференса на "Локальный сервер (ПК)".
-4. Введите Base URL сервера (например: `http://192.168.1.55:8080/v1`).
-5. Нажмите "Проверить соединение". После подтверждения статуса и отклика приложение готово к работе с активной моделью на ПК.
+* **Tier Ultra (16+ GB VRAM)**: Complete GPU offload for 12B to 14B models (Mistral-Nemo 12B HERETIC, Qwen 2.5 14B Instruct, MiniCPM-V 2.6).
+* **Tier High (8 - 12 GB VRAM)**: Complete GPU offload for 8B to 12B models (Mistral-Nemo 12B Q4_K_M, Llama 3.1 8B Instruct).
+* **Tier Medium (4 - 6 GB VRAM)**: Recommended for 3B to 8B models (Llama 3.2 3B, Qwen 2.5 3B, Moondream 2 1.8B).
+* **Tier CPU Mode**: Optimized CPU execution with multithreading for 1B to 3B models.
+
+---
+
+## Server Updates
+
+To update server files in an existing installation:
+1. Extract the updated `server.zip` into your server folder, selecting **Replace files**.
+2. Your downloaded models in `models/` and existing `python_runtime` or `venv` are preserved. No re-downloading of Python is required.

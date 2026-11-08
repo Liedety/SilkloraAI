@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 SilkloraAI Local AI Hub - Standalone Desktop Server (Windows / Linux / macOS)
-Lightweight OpenAI-compatible inference server for local GGUF models & Vision projectors (mmproj).
+High-performance OpenAI-compatible inference server for local GGUF models & Vision projectors (mmproj).
 """
 
 import os
@@ -25,17 +25,18 @@ def auto_install_dependencies():
             missing.append(pkg_spec)
     
     if missing:
-        print(f"[SilkloraAI Hub] Missing packages detected: {', '.join(missing)}")
-        print("[SilkloraAI Hub] Installing dependencies automatically...")
+        missing_str = ", ".join(missing)
+        print(f"[SilkloraAI Hub] Missing dependencies detected: {missing_str}")
+        print("[SilkloraAI Hub] Installing required dependencies via pip...")
         try:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "--prefer-binary", *missing])
             print("[SilkloraAI Hub] Dependencies successfully installed.")
         except Exception:
             try:
                 subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "--prefer-binary", *missing])
-                print("[SilkloraAI Hub] Dependencies successfully installed with --user flag.")
+                print("[SilkloraAI Hub] Dependencies installed with --user flag.")
             except Exception as e:
-                print(f"[SilkloraAI Hub] Notice: Failed to auto-install dependencies: {e}")
+                print(f"[SilkloraAI Hub] Warning: Could not auto-install dependencies: {e}")
 
 auto_install_dependencies()
 
@@ -45,18 +46,21 @@ import socket
 import threading
 import traceback
 import urllib.parse
+import platform
+import shutil
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 import requests
 import psutil
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # Optional llama-cpp-python import with automatic installation attempt
 LLAMA_AVAILABLE = False
+LLAMA_BACKEND = "none"
 try:
     import llama_cpp
     from llama_cpp import Llama
@@ -65,9 +69,10 @@ try:
     except ImportError:
         pass
     LLAMA_AVAILABLE = True
+    LLAMA_BACKEND = "installed"
 except ImportError:
     try:
-        print("[SilkloraAI Hub] Attempting to install prebuilt llama-cpp-python for CPU inference...")
+        print("[SilkloraAI Hub] Attempting to install prebuilt llama-cpp-python...")
         subprocess.check_call([
             sys.executable, "-m", "pip", "install",
             "llama-cpp-python",
@@ -81,15 +86,19 @@ except ImportError:
         except ImportError:
             pass
         LLAMA_AVAILABLE = True
-        print("[SilkloraAI Hub] llama-cpp-python is installed and active.")
+        LLAMA_BACKEND = "cpu_prebuilt"
+        print("[SilkloraAI Hub] llama-cpp-python successfully initialized.")
     except Exception:
         LLAMA_AVAILABLE = False
+        LLAMA_BACKEND = "none"
 
 BASE_DIR = Path(__file__).resolve().parent
 MODELS_DIR = BASE_DIR / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
+DASHBOARD_FILE = BASE_DIR / "dashboard.html"
+QRCODE_FILE = BASE_DIR / "qrcode.min.js"
 
-app = FastAPI(title="SilkloraAI Local AI Hub", version="1.0.0")
+app = FastAPI(title="SilkloraAI Local AI Hub", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -99,7 +108,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global State
 class ServerState:
     def __init__(self):
         self.lock = threading.Lock()
@@ -120,11 +128,112 @@ class ServerState:
 
 state = ServerState()
 
+def analyze_system_hardware() -> Dict[str, Any]:
+    """Inspect host hardware (RAM, CPU, NVIDIA GPU / VRAM) and compute model compatibility tiers."""
+    ram = psutil.virtual_memory()
+    total_ram_gb = round(ram.total / (1024**3), 1)
+    avail_ram_gb = round(ram.available / (1024**3), 1)
+    cpu_cores = psutil.cpu_count(logical=False) or 4
+    cpu_threads = psutil.cpu_count(logical=True) or 8
+
+    gpu = {
+        "has_gpu": False,
+        "name": "CPU Only",
+        "vram_total_gb": 0.0,
+        "vram_free_gb": 0.0,
+        "cuda_ready": False,
+    }
+
+    nvsmi = shutil.which("nvidia-smi")
+    if not nvsmi and os.name == "nt":
+        for cand in [
+            r"C:\Windows\System32\nvidia-smi.exe",
+            r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+        ]:
+            if os.path.exists(cand):
+                nvsmi = cand
+                break
+
+    if nvsmi:
+        try:
+            out = subprocess.check_output(
+                [nvsmi, "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"],
+                universal_newlines=True, timeout=3
+            ).strip()
+            if out:
+                line = out.split("\n")[0]
+                parts = [p.strip() for p in line.split(",")]
+                gpu["has_gpu"] = True
+                gpu["name"] = parts[0]
+                gpu["vram_total_gb"] = round(int(parts[1]) / 1024, 1)
+                gpu["vram_free_gb"] = round(int(parts[2]) / 1024, 1)
+                gpu["cuda_ready"] = True
+        except Exception:
+            pass
+
+    vram = gpu["vram_total_gb"]
+    if vram >= 15.0:
+        tier_level = "Ultra (16+ GB VRAM)"
+        max_model_param = "12B - 20B Models"
+        recommended_quant = "Q5_K_M or Q8_0"
+        summary_en = f"Dedicated NVIDIA GPU with {vram} GB VRAM. Can run 12B to 14B models with 100% VRAM offload."
+        summary_ru = f"Мощная видеокарта с {vram} ГБ VRAM. Полная выгрузка моделей 12B-14B в видеопамять."
+        presets = [
+            {"name": "Mistral-Nemo 12B HERETIC", "repo": "mradermacher/Mistral-Nemo-2407-12B-Thinking-Claude-Gemini-GPT5.2-Uncensored-HERETIC-GGUF", "desc_en": "Top RP model without censorship (12B Q5_K_M ~9.2GB)", "desc_ru": "Лучшая RP модель без цензуры (12B Q5_K_M ~9.2ГБ)", "badge": "12B Q5_K_M"},
+            {"name": "Qwen 2.5 14B Instruct", "repo": "Qwen/Qwen2.5-14B-Instruct-GGUF", "desc_en": "Advanced 14B multilingual model (~9.8GB)", "desc_ru": "Продвинутая модель 14B с отличным русским (~9.8ГБ)", "badge": "14B Q4_K_M"},
+            {"name": "MiniCPM-V 2.6 (Vision 8B)", "repo": "openbmb/MiniCPM-V-2_6-gguf", "desc_en": "Multimodal Vision model with mmproj (~5.8GB)", "desc_ru": "Мультимодальная модель с проектором mmproj (~5.8ГБ)", "badge": "Vision 8B"},
+        ]
+    elif vram >= 7.5:
+        tier_level = "High (8 - 12 GB VRAM)"
+        max_model_param = "8B - 12B Models"
+        recommended_quant = "Q4_K_M"
+        summary_en = f"Dedicated NVIDIA GPU with {vram} GB VRAM. Optimal for 8B to 12B models (Q4_K_M) with complete VRAM offload."
+        summary_ru = f"Дискретная видеокарта с {vram} ГБ VRAM. Оптимально для моделей 8B-12B (Q4_K_M) с полной выгрузкой в GPU."
+        presets = [
+            {"name": "Mistral-Nemo 12B HERETIC", "repo": "mradermacher/Mistral-Nemo-2407-12B-Thinking-Claude-Gemini-GPT5.2-Uncensored-HERETIC-GGUF", "desc_en": "Top RP model without censorship (12B Q4_K_M ~8.1GB)", "desc_ru": "Лучшая RP модель без цензуры (12B Q4_K_M ~8.1ГБ)", "badge": "12B Q4_K_M"},
+            {"name": "Llama 3.1 8B Instruct", "repo": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF", "desc_en": "Universal 8B model (~5.5GB VRAM)", "desc_ru": "Универсальная модель 8B (~5.5ГБ VRAM)", "badge": "8B Q4_K_M"},
+            {"name": "MiniCPM-V 2.6 (Vision 8B)", "repo": "openbmb/MiniCPM-V-2_6-gguf", "desc_en": "Multimodal Vision model with mmproj (~5.8GB)", "desc_ru": "Мультимодальная модель с проектором mmproj (~5.8ГБ)", "badge": "Vision 8B"},
+        ]
+    elif vram >= 4.0:
+        tier_level = "Medium (4 - 6 GB VRAM)"
+        max_model_param = "3B - 8B Models"
+        recommended_quant = "Q4_K_M (3B) / Q3_K_M (8B)"
+        summary_en = f"Dedicated GPU with {vram} GB VRAM. Recommended for 3B-4B models or 8B models with partial offloading."
+        summary_ru = f"Видеокарта с {vram} ГБ VRAM. Рекомендуются модели 3B-4B или 8B с частичной выгрузкой слоев."
+        presets = [
+            {"name": "Llama 3.2 3B Instruct", "repo": "bartowski/Llama-3.2-3B-Instruct-GGUF", "desc_en": "Fast 3B model (fits 100% in VRAM ~2.2GB)", "desc_ru": "Быстрая модель 3B (100% помещается в VRAM ~2.2ГБ)", "badge": "3B Q4_K_M"},
+            {"name": "Qwen 2.5 3B Instruct", "repo": "Qwen/Qwen2.5-3B-Instruct-GGUF", "desc_en": "Smart 3B model with great multilingual support (~2.2GB)", "desc_ru": "Умная модель 3B с отличным русским языком (~2.2ГБ)", "badge": "3B Q4_K_M"},
+            {"name": "Moondream 2 (Vision 1.8B)", "repo": "vikhyatk/moondream2", "desc_en": "Ultra-lightweight 1.8B Vision model (~1.4GB)", "desc_ru": "Ультралегкая модель зрения 1.8B (~1.4ГБ)", "badge": "Vision 1.8B"},
+        ]
+    else:
+        tier_level = "CPU Mode"
+        max_model_param = "1B - 7B Models"
+        recommended_quant = "Q4_K_M (3B) / Q3_K_M (7B)"
+        summary_en = f"Inference will run on CPU ({cpu_cores} physical cores) using {total_ram_gb} GB RAM."
+        summary_ru = f"Инференс на процессоре ({cpu_cores} ядер) с использованием {total_ram_gb} ГБ RAM."
+        presets = [
+            {"name": "Llama 3.2 3B Instruct", "repo": "bartowski/Llama-3.2-3B-Instruct-GGUF", "desc_en": "Fast and responsive on CPU (~2.2GB RAM)", "desc_ru": "Быстрая модель на процессоре (~2.2ГБ RAM)", "badge": "3B Q4_K_M"},
+            {"name": "Qwen 2.5 3B Instruct", "repo": "Qwen/Qwen2.5-3B-Instruct-GGUF", "desc_en": "Efficient bilingual 3B model (~2.2GB)", "desc_ru": "Эффективная двуязычная модель 3B (~2.2ГБ)", "badge": "3B Q4_K_M"},
+            {"name": "Llama 3.2 1B Instruct", "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF", "desc_en": "Ultra-fast 1B model (~0.9GB RAM)", "desc_ru": "Сверхбыстрая модель 1B (~0.9ГБ RAM)", "badge": "1B Q4_K_M"},
+        ]
+
+    return {
+        "ram": {"total_gb": total_ram_gb, "avail_gb": avail_ram_gb},
+        "cpu": {"cores": cpu_cores, "threads": cpu_threads, "arch": platform.machine()},
+        "gpu": gpu,
+        "tier": {
+            "level": tier_level,
+            "max_model_param": max_model_param,
+            "recommended_quant": recommended_quant,
+            "summary_en": summary_en,
+            "summary_ru": summary_ru,
+            "presets": presets,
+        }
+    }
+
 def get_local_ip_addresses() -> List[str]:
-    """Retrieve all non-loopback local IPv4 addresses (Wi-Fi, LAN)."""
     ip_list = []
     try:
-        # Method 1: Connecting a dummy UDP socket to identify primary outbound interface
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0.1)
         try:
@@ -139,7 +248,6 @@ def get_local_ip_addresses() -> List[str]:
     except Exception:
         pass
 
-    # Method 2: Scan network interfaces with psutil
     try:
         addrs = psutil.net_if_addrs()
         for iface_name, iface_addrs in addrs.items():
@@ -147,59 +255,39 @@ def get_local_ip_addresses() -> List[str]:
                 if addr.family == socket.AF_INET:
                     ip = addr.address
                     if ip and not ip.startswith("127.") and ip not in ip_list:
-                        # Prioritize 192.168.x.x or 10.x.x.x
                         if ip.startswith("192.168.") or ip.startswith("10.") or ip.startswith("172."):
+                            ip_list.insert(0, ip)
+                        else:
                             ip_list.append(ip)
     except Exception:
         pass
 
-    if not ip_list:
-        ip_list.append("127.0.0.1")
-    return ip_list
-
-def generate_svg_qr(text: str) -> str:
-    """Generate a clean compact inline SVG QR code without external dependencies."""
-    # We create a simple visual QR card representation with text
-    safe_text = urllib.parse.quote(text)
-    # Using public lightweight SVG data or stylized card
-    return f"""
-    <div style="background:#ffffff; padding:12px; border-radius:12px; display:inline-block; text-align:center;">
-        <img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={safe_text}&bgcolor=ffffff&color=141126" 
-             alt="QR Code" width="160" height="160" style="display:block; margin:0 auto; border-radius:8px;" 
-             onerror="this.style.display='none'; this.nextElementSibling.style.display='block';" />
-        <div style="display:none; color:#141126; font-size:11px; font-family:monospace; padding:8px;">
-            {text}
-        </div>
-    </div>
-    """
+    return ip_list or ["127.0.0.1"]
 
 def scan_local_models() -> List[Dict[str, Any]]:
-    """Scan the models directory for .gguf files."""
     models = []
     if not MODELS_DIR.exists():
         return models
 
-    for file_path in sorted(MODELS_DIR.glob("**/*.gguf")):
+    for file_path in MODELS_DIR.glob("*.gguf"):
         size_bytes = file_path.stat().st_size
-        size_mb = size_bytes / (1024 * 1024)
-        size_gb = size_bytes / (1024 * 1024 * 1024)
-        size_str = f"{size_gb:.2f} GB" if size_gb >= 1.0 else f"{size_mb:.1f} MB"
-        
-        lower_name = file_path.name.lower()
-        is_mmproj = "mmproj" in lower_name or "projector" in lower_name or "clip" in lower_name
+        size_gb = round(size_bytes / (1024**3), 2)
+        is_mmproj = "mmproj" in file_path.name.lower() or "projector" in file_path.name.lower()
+        is_active = (str(file_path) == state.active_model_path) or (str(file_path) == state.active_mmproj_path)
         
         models.append({
-            "name": file_path.name,
+            "filename": file_path.name,
             "path": str(file_path),
-            "size_str": size_str,
+            "size_gb": size_gb,
             "size_bytes": size_bytes,
             "is_mmproj": is_mmproj,
-            "is_active": (str(file_path) == state.active_model_path or str(file_path) == state.active_mmproj_path),
+            "is_active": is_active,
         })
+    
+    models.sort(key=lambda x: (x["is_mmproj"], x["filename"].lower()))
     return models
 
 def unload_current_model():
-    """Safely unload the current Llama instance to free VRAM/RAM."""
     with state.lock:
         if state.llama_instance is not None:
             del state.llama_instance
@@ -208,15 +296,12 @@ def unload_current_model():
         state.active_model_name = "None (No model loaded)"
         state.active_mmproj_path = None
         state.active_mmproj_name = None
-        # Force garbage collection
-        import gc
-        gc.collect()
+        print("[SilkloraAI Hub] Active model unloaded from memory.")
 
 def load_gguf_model(model_path: str, mmproj_path: Optional[str] = None, n_ctx: int = 4096, n_gpu_layers: int = -1):
-    """Load a GGUF model and optional mmproj projector into memory."""
-    unload_current_model()
-    
     with state.lock:
+        unload_current_model()
+        
         state.n_ctx = n_ctx
         state.n_gpu_layers = n_gpu_layers
         p_model = Path(model_path)
@@ -238,9 +323,9 @@ def load_gguf_model(model_path: str, mmproj_path: Optional[str] = None, n_ctx: i
                 try:
                     chat_handler = Llava15ChatHandler(clip_model_path=state.active_mmproj_path)
                 except Exception as e:
-                    print(f"Warning: Failed to initialize Llava15ChatHandler ({e}), loading pure model.")
+                    print(f"[SilkloraAI Hub] Notice: Failed to init Llava15ChatHandler ({e}), loading text only.")
             
-            print(f"Loading GGUF Model: {state.active_model_name} (layers={n_gpu_layers}, ctx={n_ctx})...")
+            print(f"[SilkloraAI Hub] Loading GGUF Model: {state.active_model_name} (gpu_layers={n_gpu_layers}, ctx={n_ctx})...")
             state.llama_instance = Llama(
                 model_path=state.active_model_path,
                 n_ctx=n_ctx,
@@ -248,13 +333,10 @@ def load_gguf_model(model_path: str, mmproj_path: Optional[str] = None, n_ctx: i
                 chat_handler=chat_handler,
                 verbose=False,
             )
-            print(f"Successfully loaded model: {state.active_model_name}")
+            print(f"[SilkloraAI Hub] Successfully loaded: {state.active_model_name}")
         else:
-            print(f"[Simulation Mode] Selected: {state.active_model_name} (llama-cpp-python not installed)")
+            print(f"[SilkloraAI Hub] [Simulation Mode] Selected: {state.active_model_name} (llama-cpp-python not compiled)")
 
-# -------------------------------------------------------------
-# Background Hugging Face Downloader
-# -------------------------------------------------------------
 def background_hf_download(repo_id: str, filename: str, target_path: Path):
     download_url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
     temp_path = target_path.with_suffix(".downloading")
@@ -268,33 +350,39 @@ def background_hf_download(repo_id: str, filename: str, target_path: Path):
             "downloaded_bytes": 0,
             "total_bytes": 0,
             "percent": 0.0,
-            "speed_mbps": 0.0,
+            "speed_mb": 0.0,
             "error": None,
         }
 
     try:
-        headers = {"User-Agent": "SilkloraAI-Local-Hub/1.0"}
-        res = requests.get(download_url, headers=headers, stream=True, timeout=30)
-        res.raise_for_status()
+        print(f"[SilkloraAI Hub] Starting download: {filename} from {repo_id}...")
+        headers = {"User-Agent": "SilkloraAI-Local-Hub/1.2"}
+        resp = requests.get(download_url, headers=headers, stream=True, timeout=30)
+        resp.raise_for_status()
 
-        total_size = int(res.headers.get("content-length", 0))
+        total_size = int(resp.headers.get("content-length", 0))
         with state.download_lock:
             if state.download_task:
                 state.download_task["total_bytes"] = total_size
 
         downloaded = 0
         start_time = time.time()
-        last_calc_time = start_time
-        last_calc_bytes = 0
+        last_update = time.time()
 
         with open(temp_path, "wb") as f:
-            for chunk in res.iter_content(chunk_size=1024 * 1024): # 1MB chunks
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
                 if state.cancel_download_flag:
-                    f.close()
-                    if temp_path.exists():
-                        temp_path.unlink()
+                    print(f"[SilkloraAI Hub] Download cancelled: {filename}")
+                    temp_path.unlink(missing_ok=True)
                     with state.download_lock:
-                        state.download_task = None
+                        state.download_task = {"status": "cancelled", "filename": filename}
+                    
+                    def _clear_cancelled():
+                        time.sleep(4)
+                        with state.download_lock:
+                            if state.download_task and state.download_task.get("status") == "cancelled":
+                                state.download_task = None
+                    threading.Thread(target=_clear_cancelled, daemon=True).start()
                     return
 
                 if chunk:
@@ -302,31 +390,41 @@ def background_hf_download(repo_id: str, filename: str, target_path: Path):
                     downloaded += len(chunk)
                     
                     now = time.time()
-                    elapsed = now - last_calc_time
-                    if elapsed >= 0.5:
-                        speed = (downloaded - last_calc_bytes) / (elapsed * 1024 * 1024)
-                        last_calc_time = now
-                        last_calc_bytes = downloaded
-                        percent = (downloaded / total_size * 100.0) if total_size > 0 else 0.0
+                    if now - last_update >= 0.5:
+                        elapsed = now - start_time
+                        speed = (downloaded / (1024 * 1024)) / (elapsed if elapsed > 0 else 1)
+                        pct = round((downloaded / total_size) * 100, 1) if total_size > 0 else 0.0
                         with state.download_lock:
                             if state.download_task:
                                 state.download_task["downloaded_bytes"] = downloaded
-                                state.download_task["percent"] = round(percent, 1)
-                                state.download_task["speed_mbps"] = round(speed, 2)
+                                state.download_task["percent"] = pct
+                                state.download_task["speed_mb"] = round(speed, 2)
+                        last_update = now
 
         temp_path.rename(target_path)
+        print(f"[SilkloraAI Hub] Download complete: {filename}")
         with state.download_lock:
-            if state.download_task:
-                state.download_task["status"] = "completed"
-                state.download_task["percent"] = 100.0
-                state.download_task["downloaded_bytes"] = total_size
+            state.download_task = {"status": "completed", "filename": filename, "percent": 100.0}
+        
+        def _clear_completed():
+            time.sleep(4)
+            with state.download_lock:
+                if state.download_task and state.download_task.get("status") == "completed":
+                    state.download_task = None
+        threading.Thread(target=_clear_completed, daemon=True).start()
+
     except Exception as e:
-        if temp_path.exists():
-            temp_path.unlink()
+        print(f"[SilkloraAI Hub] Download error: {e}")
+        temp_path.unlink(missing_ok=True)
         with state.download_lock:
-            if state.download_task:
-                state.download_task["status"] = "error"
-                state.download_task["error"] = str(e)
+            state.download_task = {"status": "failed", "filename": filename, "error": str(e)}
+        
+        def _clear_failed():
+            time.sleep(4)
+            with state.download_lock:
+                if state.download_task and state.download_task.get("status") == "failed":
+                    state.download_task = None
+        threading.Thread(target=_clear_failed, daemon=True).start()
 
 # -------------------------------------------------------------
 # REST & OpenAI Compatible API Endpoints
@@ -374,7 +472,6 @@ async def chat_completions(req: Request):
     max_tokens = int(body.get("max_tokens", 2048))
     stop = body.get("stop", None)
 
-    # If llama-cpp-python is available and model is loaded
     if LLAMA_AVAILABLE and state.llama_instance is not None:
         try:
             if stream:
@@ -404,19 +501,12 @@ async def chat_completions(req: Request):
             traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
 
-    # Fallback simulation engine if llama_cpp not installed or no model loaded yet
+    # Fallback simulation engine
     model_name = state.active_model_name
-    simulated_reply = (
-        f"Локальный сервер SilkloraAI активен.\n\n"
-        f"Текущая модель: {model_name}.\n"
-    )
+    simulated_reply = f"SilkloraAI Local Hub is active.\n\nCurrent model: {model_name}.\n"
     if not LLAMA_AVAILABLE:
-        simulated_reply += (
-            "\n[Системное сообщение]: Библиотека llama-cpp-python не установлена в текущем окружении. "
-            "Для запуска локальных весов GGUF скомпилируйте библиотеку согласно инструкциям в README."
-        )
+        simulated_reply += "\n[System Notice]: llama-cpp-python is not installed in the current environment. Please install or enable CUDA."
 
-    # Check for image_url in messages
     has_image = False
     for msg in messages:
         c = msg.get("content")
@@ -426,7 +516,7 @@ async def chat_completions(req: Request):
                     has_image = True
                     break
     if has_image:
-        simulated_reply += "\n[Vision]: Распознавание входного изображения через проектор mmproj."
+        simulated_reply += "\n[Vision]: Processing visual input through mmproj projector."
 
     if stream:
         def mock_sse():
@@ -477,7 +567,7 @@ async def chat_completions(req: Request):
         }
 
 # -------------------------------------------------------------
-# PC Dashboard Management APIs
+# Hub Management APIs
 # -------------------------------------------------------------
 @app.get("/api/status")
 def get_status():
@@ -485,18 +575,17 @@ def get_status():
     primary_ip = ips[0] if ips else "127.0.0.1"
     mobile_url = f"http://{primary_ip}:{state.port}/v1"
     
-    # System memory info
     mem = psutil.virtual_memory()
-    
     return {
-        "status": "running",
-        "active_model": state.active_model_name,
-        "active_mmproj": state.active_mmproj_name,
-        "is_model_loaded": state.active_model_path is not None,
+        "status": "online",
+        "uptime_sec": int(time.time() - state.start_time),
         "llama_cpp_available": LLAMA_AVAILABLE,
+        "llama_backend": LLAMA_BACKEND,
+        "active_model": state.active_model_name,
+        "active_model_path": state.active_model_path,
+        "active_mmproj": state.active_mmproj_name,
         "n_ctx": state.n_ctx,
         "n_gpu_layers": state.n_gpu_layers,
-        "port": state.port,
         "local_ips": ips,
         "primary_ip": primary_ip,
         "mobile_url": mobile_url,
@@ -505,6 +594,10 @@ def get_status():
         "ram_percent": mem.percent,
         "download_task": state.download_task,
     }
+
+@app.get("/api/hardware")
+def get_hardware_analysis():
+    return analyze_system_hardware()
 
 @app.get("/api/models")
 def list_local_models():
@@ -554,6 +647,12 @@ def delete_model_endpoint(filename: str):
         unload_current_model()
 
     file_path.unlink()
+    
+    # Auto-clear download_task if it matches deleted file
+    with state.download_lock:
+        if state.download_task and state.download_task.get("filename") == filename:
+            state.download_task = None
+
     return {"ok": True, "deleted": filename}
 
 @app.get("/api/hf/search")
@@ -563,7 +662,6 @@ def search_huggingface(q: str = ""):
     if not query:
         return {"query": "", "results": []}
 
-    # Extract model name if URL
     if "huggingface.co/" in query:
         query = query.split("huggingface.co/")[-1].strip("/")
         if query.startswith("models/"):
@@ -574,7 +672,7 @@ def search_huggingface(q: str = ""):
     search_term = query.replace("https://", "").replace("http://", "")
     url = f"https://huggingface.co/api/models?search={urllib.parse.quote(search_term)}&filter=gguf&sort=downloads&direction=-1&limit=25"
     try:
-        res = requests.get(url, headers={"User-Agent": "SilkloraAI-Local-Hub/1.0"}, timeout=12)
+        res = requests.get(url, headers={"User-Agent": "SilkloraAI-Local-Hub/1.2"}, timeout=12)
         res.raise_for_status()
         items = res.json()
         results = []
@@ -601,7 +699,6 @@ async def inspect_huggingface_repo(req: Request):
     if not raw_input:
         raise HTTPException(status_code=400, detail="Repository ID or URL is required")
 
-    # Clean URL or input
     clean_repo = raw_input
     if "huggingface.co/" in clean_repo:
         clean_repo = clean_repo.split("huggingface.co/")[-1].strip("/")
@@ -610,17 +707,16 @@ async def inspect_huggingface_repo(req: Request):
 
     api_url = f"https://huggingface.co/api/models/{clean_repo}"
     try:
-        res = requests.get(api_url, headers={"User-Agent": "SilkloraAI-Local-Hub/1.0"}, timeout=15)
+        res = requests.get(api_url, headers={"User-Agent": "SilkloraAI-Local-Hub/1.2"}, timeout=15)
         if res.status_code == 404:
-            raise HTTPException(status_code=404, detail=f"Репозиторий не найден на HuggingFace: {clean_repo}")
+            raise HTTPException(status_code=404, detail=f"Repository not found on HuggingFace: {clean_repo}")
         res.raise_for_status()
         info = res.json()
 
-        # Attempt to get exact file sizes from tree API
         tree_sizes = {}
         try:
             tree_url = f"https://huggingface.co/api/models/{clean_repo}/tree/main"
-            t_res = requests.get(tree_url, headers={"User-Agent": "SilkloraAI-Local-Hub/1.0"}, timeout=10)
+            t_res = requests.get(tree_url, headers={"User-Agent": "SilkloraAI-Local-Hub/1.2"}, timeout=10)
             if t_res.ok:
                 for f_obj in t_res.json():
                     f_path = f_obj.get("path")
@@ -666,7 +762,7 @@ async def inspect_huggingface_repo(req: Request):
             model_slug = clean_repo.split("/")[-1]
             s_url = f"https://huggingface.co/api/models?search={urllib.parse.quote(model_slug)}&filter=gguf&sort=downloads&direction=-1&limit=15"
             try:
-                s_res = requests.get(s_url, headers={"User-Agent": "SilkloraAI-Local-Hub/1.0"}, timeout=10)
+                s_res = requests.get(s_url, headers={"User-Agent": "SilkloraAI-Local-Hub/1.2"}, timeout=10)
                 if s_res.ok:
                     for s_item in s_res.json():
                         s_id = s_item.get("id") or s_item.get("modelId")
@@ -691,7 +787,67 @@ async def inspect_huggingface_repo(req: Request):
             "suggested_gguf_repos": suggested_repos,
         }
     except requests.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка запроса к HuggingFace: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"HuggingFace query failed: {str(e)}")
+
+@app.get("/api/hf/vision")
+def get_curated_vision_models():
+    """Curated multimodal Vision models with paired base model and mmproj projectors."""
+    return {
+        "catalog": [
+            {
+                "id": "minicpm-v-2.6",
+                "name": "MiniCPM-V 2.6 (8B)",
+                "author": "openbmb",
+                "description_en": "High performance multimodal model with state-of-the-art visual comprehension and Russian OCR/conversation.",
+                "description_ru": "Мощная мультимодальная модель с превосходным пониманием картинок, распознаванием русского текста и диалогом.",
+                "vram_rec": "8+ GB VRAM",
+                "repo_id": "openbmb/MiniCPM-V-2_6-gguf",
+                "base_file": "ggml-model-Q4_K_M.gguf",
+                "base_size_gb": 5.5,
+                "mmproj_file": "mmproj-model-f16.gguf",
+                "mmproj_size_gb": 0.6,
+            },
+            {
+                "id": "llava-1.5-7b",
+                "name": "LLaVA 1.5 (7B)",
+                "author": "mys",
+                "description_en": "Popular versatile vision model for general photo description and visual Q&A.",
+                "description_ru": "Популярная универсальная модель для описания фотографий и ответов на вопросы по изображениям.",
+                "vram_rec": "6-8 GB VRAM",
+                "repo_id": "mys/ggml_llava-v1.5-7b",
+                "base_file": "ggml-model-q4_k.gguf",
+                "base_size_gb": 4.1,
+                "mmproj_file": "mmproj-model-f16.gguf",
+                "mmproj_size_gb": 0.6,
+            },
+            {
+                "id": "moondream2-1.8b",
+                "name": "Moondream 2 (1.8B)",
+                "author": "vikhyatk",
+                "description_en": "Ultra-lightweight 1.8B vision model designed to run smoothly on lower-spec hardware and CPUs.",
+                "description_ru": "Ультралегкая компактная модель 1.8B для работы на слабых видеокартах или процессоре.",
+                "vram_rec": "3-4 GB VRAM / CPU",
+                "repo_id": "vikhyatk/moondream2",
+                "base_file": "moondream2-text-model-f16.gguf",
+                "base_size_gb": 1.4,
+                "mmproj_file": "moondream2-mmproj-f16.gguf",
+                "mmproj_size_gb": 0.5,
+            },
+            {
+                "id": "qwen2-vl-7b",
+                "name": "Qwen2-VL (7B)",
+                "author": "Qwen",
+                "description_en": "Advanced visual reasoning model capable of analyzing high-resolution images and complex diagrams.",
+                "description_ru": "Продвинутая модель визуального рассуждения с поддержкой высокого разрешения и схем.",
+                "vram_rec": "8-12 GB VRAM",
+                "repo_id": "Qwen/Qwen2-VL-7B-Instruct-GGUF",
+                "base_file": "qwen2-vl-7b-instruct-q4_k_m.gguf",
+                "base_size_gb": 4.8,
+                "mmproj_file": "mmproj-Qwen2-VL-7B-Instruct-f16.gguf",
+                "mmproj_size_gb": 0.8,
+            }
+        ]
+    }
 
 @app.post("/api/hf/download")
 async def start_hf_download(req: Request, background_tasks: BackgroundTasks):
@@ -717,853 +873,41 @@ def cancel_download():
     state.cancel_download_flag = True
     return {"ok": True, "message": "Cancelling download..."}
 
-# -------------------------------------------------------------
-# Embedded Web Dashboard UI
-# -------------------------------------------------------------
-DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SilkloraAI — Local AI Hub</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg-base: #0a0814;
-            --bg-surface: #141126;
-            --bg-card: #1c1836;
-            --bg-card-hover: #252047;
-            --border: #2e2854;
-            --accent: #8b5cf6;
-            --accent-hover: #7c3aed;
-            --accent-glow: rgba(139, 92, 246, 0.25);
-            --success: #10b981;
-            --danger: #f43f5e;
-            --warning: #f59e0b;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-            --text-dim: #64748b;
-        }
-
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body {
-            font-family: 'Plus Jakarta Sans', sans-serif;
-            background-color: var(--bg-base);
-            color: var(--text-main);
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-        }
-
-        header {
-            background: rgba(20, 17, 38, 0.85);
-            backdrop-filter: blur(12px);
-            border-bottom: 1px solid var(--border);
-            padding: 16px 32px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            position: sticky;
-            top: 0;
-            z-index: 50;
-        }
-
-        .logo-wrap { display: flex; align-items: center; gap: 12px; }
-        .logo-icon {
-            width: 36px; height: 36px;
-            background: linear-gradient(135deg, #8b5cf6, #d946ef);
-            border-radius: 10px;
-            display: flex; align-items: center; justify-content: center;
-            font-weight: 700; font-size: 18px; color: #fff;
-            box-shadow: 0 4px 14px var(--accent-glow);
-        }
-        .logo-title { font-weight: 700; font-size: 18px; letter-spacing: -0.02em; }
-        .logo-tag {
-            font-size: 11px; padding: 2px 8px; border-radius: 20px;
-            background: rgba(139, 92, 246, 0.2); color: #c4b5fd;
-            border: 1px solid rgba(139, 92, 246, 0.3);
-            font-family: 'JetBrains Mono', monospace; font-weight: 600;
-        }
-
-        .status-pill {
-            display: flex; align-items: center; gap: 8px;
-            background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3);
-            padding: 6px 14px; border-radius: 24px; font-size: 12px; font-weight: 600; color: #34d399;
-        }
-        .pulse-dot {
-            width: 8px; height: 8px; border-radius: 50%;
-            background: #10b981; box-shadow: 0 0 10px #10b981;
-            animation: pulse 2s infinite;
-        }
-        @keyframes pulse { 0%{opacity:1; transform:scale(1);} 50%{opacity:0.4; transform:scale(1.2);} 100%{opacity:1; transform:scale(1);} }
-
-        main { flex: 1; max-width: 1200px; margin: 0 auto; width: 100%; padding: 24px 20px; }
-
-        /* Navigation Tabs */
-        .tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 24px; }
-        .tab-btn {
-            background: transparent; border: none; color: var(--text-muted);
-            padding: 10px 18px; border-radius: 10px; font-size: 14px; font-weight: 600;
-            cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 8px;
-        }
-        .tab-btn:hover { background: var(--bg-surface); color: var(--text-main); }
-        .tab-btn.active {
-            background: var(--accent); color: #fff;
-            box-shadow: 0 4px 14px var(--accent-glow);
-        }
-
-        .card {
-            background: var(--bg-surface); border: 1px solid var(--border);
-            border-radius: 18px; padding: 24px; margin-bottom: 20px;
-            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
-        }
-        .card-header {
-            display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px;
-        }
-        .card-title { font-size: 16px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px; }
-
-        /* Network Banner */
-        .net-grid { display: grid; grid-template-columns: 1fr auto; gap: 24px; align-items: center; }
-        @media(max-width: 768px) { .net-grid { grid-template-columns: 1fr; } }
-        .ip-box {
-            background: var(--bg-base); border: 1px solid var(--border);
-            border-radius: 14px; padding: 16px; display: flex; align-items: center; justify-content: space-between;
-        }
-        .ip-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); font-weight: 700; margin-bottom: 4px; }
-        .ip-val { font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 600; color: #a78bfa; }
-        .btn-copy {
-            background: var(--accent); color: #fff; border: none; padding: 8px 16px;
-            border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s;
-        }
-        .btn-copy:hover { background: var(--accent-hover); }
-
-        /* Inputs & Buttons */
-        .input-row { display: flex; gap: 10px; margin-bottom: 14px; }
-        input[type="text"], select {
-            flex: 1; background: var(--bg-base); border: 1px solid var(--border);
-            color: var(--text-main); padding: 12px 16px; border-radius: 10px;
-            font-size: 14px; outline: none; transition: border-color 0.2s;
-        }
-        input[type="text"]:focus, select:focus { border-color: var(--accent); }
-        .btn-primary {
-            background: var(--accent); color: #fff; border: none; padding: 12px 22px;
-            border-radius: 10px; font-weight: 600; font-size: 14px; cursor: pointer; transition: all 0.2s;
-            display: inline-flex; align-items: center; gap: 8px;
-        }
-        .btn-primary:hover { background: var(--accent-hover); }
-        .btn-danger {
-            background: rgba(244, 63, 94, 0.15); color: #fb7185; border: 1px solid rgba(244, 63, 94, 0.3);
-            padding: 8px 14px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer;
-        }
-        .btn-danger:hover { background: rgba(244, 63, 94, 0.3); }
-
-        .chip-btn {
-            background: var(--bg-card); border: 1px solid var(--border);
-            color: var(--text-main); padding: 7px 14px; border-radius: 20px;
-            font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.2s;
-        }
-        .chip-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
-        .repo-card {
-            background: var(--bg-card); border: 1px solid var(--border);
-            border-radius: 14px; padding: 16px; display: flex; justify-content: space-between; align-items: center;
-            transition: all 0.2s;
-        }
-        .repo-card:hover { border-color: var(--accent); background: var(--bg-card-hover); }
-        .tag-badge {
-            display: inline-block; padding: 2px 8px; border-radius: 12px;
-            font-size: 11px; font-weight: 600; font-family: 'JetBrains Mono', monospace;
-        }
-        .tag-recommended { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
-        .tag-high { background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
-        .tag-ultra { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
-        .tag-economy { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
-        .tag-mmproj { background: rgba(6, 182, 212, 0.2); color: #22d3ee; border: 1px solid rgba(6, 182, 212, 0.3); }
-
-        /* Tables & Lists */
-        .model-list { display: flex; flex-direction: column; gap: 10px; }
-        .model-item {
-            background: var(--bg-card); border: 1px solid var(--border);
-            border-radius: 12px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between;
-            transition: all 0.2s;
-        }
-        .model-item:hover { background: var(--bg-card-hover); border-color: rgba(139, 92, 246, 0.4); }
-        .model-item.active { border-color: var(--accent); background: rgba(139, 92, 246, 0.12); }
-        .model-info { display: flex; flex-direction: column; gap: 4px; }
-        .model-name { font-weight: 600; font-size: 14px; color: #fff; display: flex; align-items: center; gap: 8px; }
-        .model-meta { font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
-        .badge {
-            font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 6px; text-transform: uppercase;
-        }
-        .badge-active { background: rgba(16, 185, 129, 0.2); color: #34d399; }
-        .badge-vision { background: rgba(217, 70, 239, 0.2); color: #f472b6; }
-        .badge-text { background: rgba(56, 189, 248, 0.2); color: #38bdf8; }
-
-        /* Progress Bar */
-        .progress-box {
-            background: var(--bg-base); border: 1px solid var(--border);
-            border-radius: 12px; padding: 16px; margin-top: 14px;
-        }
-        .progress-track {
-            background: var(--bg-card); height: 8px; border-radius: 4px;
-            overflow: hidden; margin: 8px 0;
-        }
-        .progress-bar {
-            height: 100%; background: linear-gradient(90deg, #8b5cf6, #d946ef);
-            width: 0%; transition: width 0.3s;
-        }
-
-        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 20px; }
-        .stat-card {
-            background: var(--bg-surface); border: 1px solid var(--border);
-            border-radius: 14px; padding: 16px;
-        }
-        .stat-label { font-size: 12px; color: var(--text-muted); font-weight: 500; margin-bottom: 6px; }
-        .stat-val { font-size: 20px; font-weight: 700; color: #fff; font-family: 'JetBrains Mono', monospace; }
-
-        .hidden { display: none !important; }
-    </style>
-</head>
-<body>
-    <header>
-        <div class="logo-wrap">
-            <div class="logo-icon">S</div>
-            <div>
-                <div style="display:flex; align-items:center; gap:8px;">
-                    <span class="logo-title">SilkloraAI</span>
-                    <span class="logo-tag">Local AI Hub</span>
-                </div>
-            </div>
-        </div>
-        <div class="status-pill">
-            <span class="pulse-dot"></span>
-            <span id="server-status-text">Сервер активен (порт 8080)</span>
-        </div>
-    </header>
-
-    <main>
-        <div class="tabs">
-            <button class="tab-btn active" onclick="switchTab('tab-status')">Статус и соединение</button>
-            <button class="tab-btn" onclick="switchTab('tab-models')">Локальные модели</button>
-            <button class="tab-btn" onclick="switchTab('tab-hf')">HuggingFace Hub</button>
-            <button class="tab-btn" onclick="switchTab('tab-test')">Тестирование модели</button>
-        </div>
-
-        <!-- TAB 1: STATUS & CONNECTION -->
-        <section id="tab-status">
-            <div class="stat-grid">
-                <div class="stat-card">
-                    <div class="stat-label">Активная текстовая модель</div>
-                    <div class="stat-val" id="stat-model" style="font-size:15px; color:#a78bfa;">Загрузка...</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">Проектор зрения (Vision)</div>
-                    <div class="stat-val" id="stat-vision" style="font-size:15px; color:#f472b6;">Не подключен</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">Оперативная память (RAM)</div>
-                    <div class="stat-val" id="stat-ram">...</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">Движок инференса</div>
-                    <div class="stat-val" id="stat-engine" style="font-size:15px;">llama-cpp-python</div>
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-title">Параметры подключения мобильного клиента</div>
-                </div>
-                <div class="net-grid">
-                    <div>
-                        <p style="font-size:13px; color:var(--text-muted); margin-bottom:14px; line-height:1.6;">
-                            Убедитесь, что мобильное устройство и компьютер подключены к одной локальной сети (Wi-Fi). В мобильном приложении перейдите в <b>Настройки → Локальный сервер</b> и укажите Base URL:
-                        </p>
-                        <div class="ip-box">
-                            <div>
-                                <div class="ip-label">Адрес локального сервера (Base URL)</div>
-                                <div class="ip-val" id="mobile-url-display">http://192.168.1.55:8080/v1</div>
-                            </div>
-                            <button class="btn-copy" onclick="copyMobileUrl()">Копировать</button>
-                        </div>
-                        <div style="margin-top:12px; font-size:12px; color:var(--text-dim);">
-                            Все обнаруженные сетевые IP ПК: <span id="all-ips" style="font-family:'JetBrains Mono'; color:#cbd5e1;"></span>
-                        </div>
-                    </div>
-                    <div id="qr-container" style="display:flex; justify-content:center;">
-                        <!-- QR code rendered here -->
-                    </div>
-                </div>
-            </div>
-
-            <!-- Active Model Loader Controls -->
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-title">Управление активной моделью</div>
-                </div>
-                <p style="font-size:13px; color:var(--text-muted); margin-bottom:16px;">
-                    Выбор активной модели выполняется на рабочей станции. Мобильный клиент автоматически направляет запросы к загруженной модели.
-                </p>
-                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px; margin-bottom:16px;">
-                    <div>
-                        <label style="display:block; font-size:12px; font-weight:600; color:var(--text-muted); margin-bottom:6px;">Основная модель для текста и RP (GGUF):</label>
-                        <select id="select-main-model"></select>
-                    </div>
-                    <div>
-                        <label style="display:block; font-size:12px; font-weight:600; color:var(--text-muted); margin-bottom:6px;">Проектор зрения mmproj (для анализа фото):</label>
-                        <select id="select-mmproj-model">
-                            <option value="">Без проектора зрения (только текст)</option>
-                        </select>
-                    </div>
-                </div>
-                <div style="display:flex; gap:12px; align-items:center;">
-                    <button class="btn-primary" onclick="loadSelectedModels()">Загрузить модель в память</button>
-                    <button class="btn-danger" onclick="unloadModel()">Выгрузить из памяти</button>
-                </div>
-            </div>
-        </section>
-
-        <!-- TAB 2: LOCAL MODELS -->
-        <section id="tab-models" class="hidden">
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-title">Файлы моделей в каталоге server/models</div>
-                    <button class="btn-primary" onclick="fetchLocalModels()">Обновить список</button>
-                </div>
-                <div id="local-models-list" class="model-list">
-                    <div style="color:var(--text-muted); font-size:13px; padding:12px;">Поиск моделей...</div>
-                </div>
-            </div>
-        </section>
-
-        <!-- TAB 3: HUGGINGFACE HUB -->
-        <section id="tab-hf" class="hidden">
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-title">Поиск и загрузка моделей с HuggingFace</div>
-                </div>
-                <p style="font-size:13px; color:var(--text-muted); margin-bottom:14px; line-height:1.6;">
-                    Введите название модели (например: <code>Mistral Nemo</code>, <code>HERETIC</code>, <code>Llama 3</code>) или вставьте прямую ссылку / ID репозитория с HuggingFace:
-                </p>
-
-                <!-- Search Input -->
-                <div class="input-row">
-                    <input type="text" id="hf-input" placeholder="Поиск модели (например: Mistral Nemo, HERETIC, Llama 3) или ссылка..." value="Mistral-Nemo-2407-12B-Thinking-Claude-Gemini-GPT5.2-Uncensored-HERETIC" onkeydown="if(event.key==='Enter') searchOrInspectHf()" />
-                    <button class="btn-primary" onclick="searchOrInspectHf()">Найти модель</button>
-                </div>
-
-                <!-- Recommended RP & Vision Presets -->
-                <div style="margin-bottom:18px;">
-                    <div style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--text-dim); margin-bottom:8px; letter-spacing:0.04em;">
-                        Популярные модели для ролевого отыгрыша и анализа фото:
-                    </div>
-                    <div style="display:flex; flex-wrap:wrap; gap:8px;">
-                        <button class="chip-btn" onclick="quickSelect('Mistral-Nemo-2407-12B-Thinking-Claude-Gemini-GPT5.2-Uncensored-HERETIC')">
-                            Mistral-Nemo 12B HERETIC (Без цензуры)
-                        </button>
-                        <button class="chip-btn" onclick="quickSelect('bartowski/Llama-3.1-8B-Instruct-GGUF')">
-                            Llama-3.1 8B Instruct (Универсальная)
-                        </button>
-                        <button class="chip-btn" onclick="quickSelect('Qwen/Qwen2.5-7B-Instruct-GGUF')">
-                            Qwen-2.5 7B Instruct (Отличный русский)
-                        </button>
-                        <button class="chip-btn" onclick="quickSelect('openbmb/MiniCPM-V-2_6-gguf')">
-                            MiniCPM-V 2.6 (Текст + Vision фото)
-                        </button>
-                    </div>
-                </div>
-
-                <!-- Active Download Progress -->
-                <div id="hf-download-box" class="progress-box hidden">
-                    <div style="display:flex; justify-content:space-between; font-size:13px; font-weight:600;">
-                        <span id="dl-filename">Скачивание...</span>
-                        <span id="dl-speed" style="font-family:'JetBrains Mono'; color:#a78bfa;">0 MB/s</span>
-                    </div>
-                    <div class="progress-track">
-                        <div class="progress-bar" id="dl-bar"></div>
-                    </div>
-                    <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim);">
-                        <span id="dl-progress-text">0 / 0 MB (0%)</span>
-                        <button class="btn-danger" onclick="cancelHfDownload()" style="padding:4px 8px; font-size:11px;">Отменить</button>
-                    </div>
-                </div>
-
-                <div id="hf-results" style="margin-top:20px;"></div>
-            </div>
-        </section>
-
-        <!-- TAB 4: TEST GENERATION -->
-        <section id="tab-test" class="hidden">
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-title">Проверка инференса активной модели</div>
-                </div>
-                <div class="input-row">
-                    <input type="text" id="test-prompt" value="*Смотрит с интересом* Здравствуй. Кто ты?" />
-                    <button class="btn-primary" onclick="runTestGeneration()">Отправить запрос</button>
-                </div>
-                <div style="background:var(--bg-base); border:1px solid var(--border); border-radius:12px; padding:16px; min-height:120px; font-family:'JetBrains Mono', monospace; font-size:13px; white-space:pre-wrap; line-height:1.6;" id="test-output">
-Ожидание запроса...
-                </div>
-            </div>
-        </section>
-    </main>
-
-    <script>
-        let currentStatus = null;
-
-        function switchTab(tabId) {
-            document.querySelectorAll('main > section').forEach(s => s.classList.add('hidden'));
-            document.getElementById(tabId).classList.remove('hidden');
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-            event.target.classList.add('active');
-
-            if (tabId === 'tab-models') fetchLocalModels();
-        }
-
-        async function fetchStatus() {
-            try {
-                const res = await fetch('/api/status');
-                const data = await res.json();
-                currentStatus = data;
-
-                document.getElementById('stat-model').innerText = data.active_model || 'Не загружена';
-                document.getElementById('stat-vision').innerText = data.active_mmproj || 'Не подключен';
-                document.getElementById('stat-ram').innerText = `${data.ram_used_gb} / ${data.ram_total_gb} GB (${data.ram_percent}%)`;
-                document.getElementById('stat-engine').innerText = data.llama_cpp_available ? 'llama-cpp-python (GPU/CPU)' : 'Симуляция (нужен llama-cpp)';
-                
-                document.getElementById('mobile-url-display').innerText = data.mobile_url;
-                document.getElementById('all-ips').innerText = data.local_ips.join(', ');
-
-                // QR code
-                const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=${encodeURIComponent(data.mobile_url)}&bgcolor=ffffff&color=141126`;
-                document.getElementById('qr-container').innerHTML = `
-                    <div style="background:#fff; padding:8px; border-radius:12px; display:inline-block;">
-                        <img src="${qrUrl}" width="120" height="120" style="display:block; border-radius:6px;" alt="QR" />
-                    </div>
-                `;
-
-                // Update active download if any
-                const dl = data.download_task;
-                const dlBox = document.getElementById('hf-download-box');
-                if (dl && dl.status === 'downloading') {
-                    dlBox.classList.remove('hidden');
-                    document.getElementById('dl-filename').innerText = `Скачивание: ${dl.filename}`;
-                    document.getElementById('dl-speed').innerText = `${dl.speed_mbps} MB/s`;
-                    document.getElementById('dl-bar').style.width = `${dl.percent}%`;
-                    const dlMb = (dl.downloaded_bytes / (1024*1024)).toFixed(1);
-                    const totMb = (dl.total_bytes / (1024*1024)).toFixed(1);
-                    document.getElementById('dl-progress-text').innerText = `${dlMb} / ${totMb} MB (${dl.percent}%)`;
-                } else if (dl && dl.status === 'completed') {
-                    dlBox.classList.remove('hidden');
-                    document.getElementById('dl-filename').innerText = `Загрузка завершена: ${dl.filename}`;
-                    document.getElementById('dl-bar').style.width = `100%`;
-                    document.getElementById('dl-speed').innerText = 'Готово';
-                    setTimeout(() => dlBox.classList.add('hidden'), 4000);
-                } else {
-                    dlBox.classList.add('hidden');
-                }
-            } catch (err) {
-                console.error(err);
-            }
-        }
-
-        async function fetchLocalModels() {
-            try {
-                const res = await fetch('/api/models');
-                const data = await res.json();
-                const listEl = document.getElementById('local-models-list');
-                const selMain = document.getElementById('select-main-model');
-                const selMmproj = document.getElementById('select-mmproj-model');
-
-                selMain.innerHTML = '';
-                selMmproj.innerHTML = '<option value="">Без проектора зрения (только текст)</option>';
-
-                if (data.models.length === 0) {
-                    listEl.innerHTML = '<div style="color:var(--text-muted); font-size:13px; padding:12px;">В папке server/models пока нет .gguf файлов. Скачайте их через вкладку HuggingFace Hub!</div>';
-                    selMain.innerHTML = '<option value="">Нет скачанных моделей</option>';
-                    return;
-                }
-
-                listEl.innerHTML = '';
-                data.models.forEach(m => {
-                    // Populate selects
-                    if (!m.is_mmproj) {
-                        const opt = document.createElement('option');
-                        opt.value = m.name;
-                        opt.innerText = `${m.name} (${m.size_str})`;
-                        if (m.is_active) opt.selected = true;
-                        selMain.appendChild(opt);
-                    } else {
-                        const opt = document.createElement('option');
-                        opt.value = m.name;
-                        opt.innerText = `[Vision mmproj] ${m.name} (${m.size_str})`;
-                        if (m.is_active) opt.selected = true;
-                        selMmproj.appendChild(opt);
-                    }
-
-                    // Populate list card
-                    const item = document.createElement('div');
-                    item.className = `model-item ${m.is_active ? 'active' : ''}`;
-                    item.innerHTML = `
-                        <div class="model-info">
-                            <div class="model-name">
-                                <span>${m.name}</span>
-                                ${m.is_active ? '<span class="badge badge-active">Активна</span>' : ''}
-                                ${m.is_mmproj ? '<span class="badge badge-vision">Vision mmproj</span>' : '<span class="badge badge-text">RP Модель</span>'}
-                            </div>
-                            <div class="model-meta">Размер: ${m.size_str}</div>
-                        </div>
-                        <div style="display:flex; gap:8px;">
-                            <button class="btn-danger" onclick="deleteLocalModel('${m.name}')">Удалить</button>
-                        </div>
-                    `;
-                    listEl.appendChild(item);
-                });
-            } catch (err) {
-                console.error(err);
-            }
-        }
-
-        async function loadSelectedModels() {
-            const model = document.getElementById('select-main-model').value;
-            const mmproj = document.getElementById('select-mmproj-model').value;
-            if (!model) {
-                alert('Выберите модель для запуска');
-                return;
-            }
-            try {
-                const res = await fetch('/api/models/load', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ model_name: model, mmproj_name: mmproj || null })
-                });
-                const data = await res.json();
-                if (data.ok) {
-                    alert(`Модель ${data.active_model} успешно активирована!`);
-                    fetchStatus();
-                    fetchLocalModels();
-                } else {
-                    alert('Ошибка загрузки: ' + JSON.stringify(data));
-                }
-            } catch (err) {
-                alert('Ошибка: ' + err.message);
-            }
-        }
-
-        async function unloadModel() {
-            try {
-                await fetch('/api/models/unload', { method: 'POST' });
-                alert('Модель выгружена из памяти');
-                fetchStatus();
-                fetchLocalModels();
-            } catch (err) {
-                alert('Ошибка: ' + err.message);
-            }
-        }
-
-        async function deleteLocalModel(name) {
-            if (!confirm(`Удалить файл ${name}?`)) return;
-            try {
-                await fetch(`/api/models/${name}`, { method: 'DELETE' });
-                fetchLocalModels();
-                fetchStatus();
-            } catch (err) {
-                alert(err.message);
-            }
-        }
-
-        async function searchOrInspectHf(forceQuery) {
-            const query = (forceQuery || document.getElementById('hf-input').value).trim();
-            if (!query) return;
-            document.getElementById('hf-input').value = query;
-
-            // Direct repo check: contains huggingface.co or has user/repo pattern with GGUF/gguf
-            const isDirectRepo = query.includes('huggingface.co/') || (query.includes('/') && (query.toUpperCase().includes('GGUF') || query.endsWith('.gguf')));
-
-            if (isDirectRepo) {
-                await inspectHfRepo(query);
-            } else {
-                await searchHfModels(query);
-            }
-        }
-
-        async function quickSelect(repoOrTerm) {
-            document.getElementById('hf-input').value = repoOrTerm;
-            await searchOrInspectHf(repoOrTerm);
-        }
-
-        async function searchHfModels(query) {
-            const resEl = document.getElementById('hf-results');
-            resEl.innerHTML = '<div style="color:var(--text-muted); font-size:13px; padding:12px;">Поиск моделей GGUF на HuggingFace...</div>';
-
-            try {
-                const res = await fetch(`/api/hf/search?q=${encodeURIComponent(query)}`);
-                const data = await res.json();
-                if (!res.ok) {
-                    resEl.innerHTML = `<div style="color:var(--danger); font-size:13px; padding:12px;">Ошибка поиска: ${data.detail}</div>`;
-                    return;
-                }
-
-                if (!data.results || data.results.length === 0) {
-                    resEl.innerHTML = `
-                        <div style="background:var(--bg-card); padding:18px; border-radius:14px; border:1px solid var(--border);">
-                            <div style="color:var(--warning); font-size:14px; font-weight:600; margin-bottom:6px;">Моделей GGUF по запросу "${query}" не найдено.</div>
-                            <div style="color:var(--text-muted); font-size:12px; line-height:1.6;">Попробуйте упростить запрос (например: "Mistral", "HERETIC", "Llama") или выберите одну из проверенных моделей выше.</div>
-                        </div>
-                    `;
-                    return;
-                }
-
-                let html = `<div style="margin-bottom:14px; font-size:14px; font-weight:700;">Найдено ${data.results.length} вариантов GGUF для "${query}":</div><div style="display:flex; flex-direction:column; gap:10px;">`;
-                data.results.forEach(r => {
-                    const dlK = r.downloads > 1000 ? (r.downloads / 1000).toFixed(1) + 'k' : r.downloads;
-                    html += `
-                        <div class="repo-card">
-                            <div style="flex:1; min-width:0; margin-right:12px;">
-                                <div style="font-weight:700; font-size:14px; color:#fff; word-break:break-all;">${r.repo_id}</div>
-                                <div style="font-size:12px; color:var(--text-muted); margin-top:4px; display:flex; gap:12px;">
-                                    <span>Скачиваний: <b style="color:#a78bfa;">${dlK}</b></span>
-                                    <span>Лайков: <b style="color:#f43f5e;">${r.likes}</b></span>
-                                    <span>Автор: <b style="color:#cbd5e1;">${r.author}</b></span>
-                                </div>
-                            </div>
-                            <button class="btn-primary" style="padding:8px 16px; font-size:12px; white-space:nowrap;" onclick="inspectHfRepo('${r.repo_id}')">
-                                Выбрать квантовки
-                            </button>
-                        </div>
-                    `;
-                });
-                html += '</div>';
-                resEl.innerHTML = html;
-            } catch (err) {
-                resEl.innerHTML = `<div style="color:var(--danger); font-size:13px; padding:12px;">Сетевая ошибка: ${err.message}</div>`;
-            }
-        }
-
-        async function inspectHfRepo(repoId) {
-            const input = (repoId || document.getElementById('hf-input').value).trim();
-            if (!input) return;
-            document.getElementById('hf-input').value = input;
-            const resEl = document.getElementById('hf-results');
-            resEl.innerHTML = '<div style="color:var(--text-muted); font-size:13px; padding:12px;">Получение структуры репозитория и размеров файлов...</div>';
-
-            try {
-                const res = await fetch('/api/hf/inspect', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ repo_id_or_url: input })
-                });
-                const data = await res.json();
-                if (!res.ok) {
-                    resEl.innerHTML = `<div style="color:var(--danger); font-size:13px; padding:12px;">Ошибка: ${data.detail}</div>`;
-                    return;
-                }
-
-                // If this is a safetensors repo (like DavidAU) with 0 GGUF files:
-                if (!data.has_gguf) {
-                    let html = `
-                        <div style="background:rgba(245, 158, 11, 0.1); border:1px solid rgba(245, 158, 11, 0.3); border-radius:14px; padding:18px; margin-bottom:16px;">
-                            <div style="font-weight:700; font-size:14px; color:#fbbf24; margin-bottom:6px;">Внимание: исходные веса safetensors (PyTorch)</div>
-                            <div style="font-size:12px; color:#cbd5e1; line-height:1.6;">
-                                Репозиторий <b>${data.repo_id}</b> содержит несжатые исходные веса safetensors. Они не запускаются локально через движок GGUF.
-                                <br>Ниже автоматически найдены готовые квантованные <b>GGUF-версии</b> этой модели:
-                            </div>
-                        </div>
-                    `;
-
-                    if (data.suggested_gguf_repos && data.suggested_gguf_repos.length > 0) {
-                        html += `<div style="margin-bottom:12px; font-weight:700; font-size:14px;">Рекомендуемые GGUF-репозитории:</div><div style="display:flex; flex-direction:column; gap:10px;">`;
-                        data.suggested_gguf_repos.forEach(s => {
-                            const dlK = s.downloads > 1000 ? (s.downloads / 1000).toFixed(1) + 'k' : s.downloads;
-                            html += `
-                                <div class="repo-card">
-                                    <div style="flex:1; min-width:0; margin-right:12px;">
-                                        <div style="font-weight:700; font-size:14px; color:#fff; word-break:break-all;">${s.repo_id}</div>
-                                        <div style="font-size:12px; color:var(--text-muted); margin-top:4px; display:flex; gap:12px;">
-                                            <span>Скачиваний: <b style="color:#a78bfa;">${dlK}</b></span>
-                                            <span>Лайков: <b style="color:#f43f5e;">${s.likes}</b></span>
-                                        </div>
-                                    </div>
-                                    <button class="btn-primary" style="padding:8px 16px; font-size:12px; white-space:nowrap;" onclick="inspectHfRepo('${s.repo_id}')">
-                                        Открыть файлы
-                                    </button>
-                                </div>
-                            `;
-                        });
-                        html += '</div>';
-                    } else {
-                        html += `<div style="color:var(--text-muted); font-size:13px; padding:12px;">Готовые GGUF-конверсии не найдены. Попробуйте поискать по сокращенному названию через поиск.</div>`;
-                    }
-                    resEl.innerHTML = html;
-                    return;
-                }
-
-                // If GGUF files found:
-                let html = `
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
-                        <div>
-                            <div style="font-weight:700; font-size:15px; color:#fff;">${data.repo_id}</div>
-                            <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">Доступно файлов: ${data.files.length}</div>
-                        </div>
-                        <button class="chip-btn" onclick="searchOrInspectHf('${data.repo_id.split('/')[0]}')">Все модели автора</button>
-                    </div>
-                    <div class="model-list">
-                `;
-
-                data.files.forEach(f => {
-                    let badgeHtml = '';
-                    if (f.q_tag === 'recommended') {
-                        badgeHtml = '<span class="tag-badge tag-recommended">Рекомендуется (Оптимальный баланс)</span>';
-                    } else if (f.q_tag === 'high') {
-                        badgeHtml = '<span class="tag-badge tag-high">Высокое качество</span>';
-                    } else if (f.q_tag === 'ultra') {
-                        badgeHtml = '<span class="tag-badge tag-ultra">Максимальный размер Q8</span>';
-                    } else if (f.q_tag === 'economy') {
-                        badgeHtml = '<span class="tag-badge tag-economy">Экономный (для 8 ГБ RAM)</span>';
-                    } else if (f.q_tag === 'mmproj') {
-                        badgeHtml = '<span class="tag-badge tag-mmproj">Vision проектор зрения</span>';
-                    }
-
-                    const sizeLabel = f.size_gb ? `${f.size_gb} ГБ` : '';
-
-                    html += `
-                        <div class="model-item">
-                            <div class="model-info" style="flex:1; min-width:0; margin-right:12px;">
-                                <div class="model-name" style="margin-bottom:4px; word-break:break-all;">
-                                    <span style="font-family:'JetBrains Mono'; font-size:13px;">${f.filename}</span>
-                                    ${badgeHtml}
-                                </div>
-                                ${sizeLabel ? `<div style="font-size:12px; color:var(--text-muted);">Размер файла: <b style="color:#a78bfa;">${sizeLabel}</b></div>` : ''}
-                            </div>
-                            <button class="btn-primary" style="padding:7px 16px; font-size:12px; white-space:nowrap;" onclick="startDownload('${data.repo_id}', '${f.filename}')">
-                                Скачать в models/
-                            </button>
-                        </div>
-                    `;
-                });
-                html += '</div>';
-                resEl.innerHTML = html;
-            } catch (err) {
-                resEl.innerHTML = `<div style="color:var(--danger); font-size:13px; padding:12px;">Ошибка: ${err.message}</div>`;
-            }
-        }
-
-        async function startDownload(repoId, filename) {
-            try {
-                const res = await fetch('/api/hf/download', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ repo_id: repoId, filename: filename })
-                });
-                const data = await res.json();
-                if (res.ok) {
-                    fetchStatus();
-                } else {
-                    alert(data.detail);
-                }
-            } catch (err) {
-                alert(err.message);
-            }
-        }
-
-        async function cancelHfDownload() {
-            await fetch('/api/hf/cancel', { method: 'POST' });
-        }
-
-        async function runTestGeneration() {
-            const prompt = document.getElementById('test-prompt').value;
-            const outEl = document.getElementById('test-output');
-            outEl.innerText = 'Генерация ответа...';
-
-            try {
-                const res = await fetch('/v1/chat/completions', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        messages: [{ role: 'user', content: prompt }],
-                        stream: true
-                    })
-                });
-
-                const reader = res.body.getReader();
-                const decoder = new TextDecoder('utf-8');
-                outEl.innerText = '';
-                let buffer = '';
-
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    buffer += decoder.decode(value, { stream: true });
-                    const lines = buffer.split('\\n');
-                    buffer = lines.pop() || '';
-
-                    for (const line of lines) {
-                        const trimmed = line.trim();
-                        if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
-                            try {
-                                const parsed = JSON.parse(trimmed.slice(6));
-                                const delta = parsed.choices?.[0]?.delta?.content;
-                                if (delta) outEl.innerText += delta;
-                            } catch {}
-                        }
-                    }
-                }
-            } catch (err) {
-                outEl.innerText = 'Ошибка: ' + err.message;
-            }
-        }
-
-        function copyMobileUrl() {
-            const url = document.getElementById('mobile-url-display').innerText;
-            navigator.clipboard.writeText(url);
-            alert('Скопировано в буфер обмена: ' + url);
-        }
-
-        // Initialize & poll status
-        fetchStatus();
-        fetchLocalModels();
-        setInterval(fetchStatus, 2000);
-    </script>
-</body>
-</html>
-"""
+@app.post("/api/enable-cuda")
+def enable_cuda():
+    """Attempt background installation of CUDA-accelerated llama-cpp-python."""
+    def _install():
+        print("[SilkloraAI Hub] Initiating CUDA llama-cpp-python installation...")
+        try:
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall",
+                "llama-cpp-python",
+                "--prefer-binary",
+                "--extra-index-url", "https://abetlen.github.io/llama-cpp-python/whl/cu121"
+            ])
+            print("[SilkloraAI Hub] CUDA llama-cpp-python installed successfully.")
+        except Exception as e:
+            print(f"[SilkloraAI Hub] CUDA install failed: {e}")
+
+    threading.Thread(target=_install, daemon=True).start()
+    return {"ok": True, "message": "CUDA installation started in background."}
+
+@app.get("/qrcode.min.js")
+def get_qrcode_js():
+    if QRCODE_FILE.exists():
+        return FileResponse(QRCODE_FILE, media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="qrcode.min.js not found")
 
 @app.get("/", response_class=HTMLResponse)
-def index():
-    return HTMLResponse(content=DASHBOARD_HTML)
-
-def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="SilkloraAI Local AI Hub Server")
-    parser.add_argument("--port", type=int, default=8080, help="Port to listen on (default: 8080)")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host interface (default: 0.0.0.0)")
-    parser.add_argument("--no-browser", action="store_true", help="Do not open browser automatically")
-    args = parser.parse_args()
-
-    state.port = args.port
-    ips = get_local_ip_addresses()
-    primary_ip = ips[0] if ips else "127.0.0.1"
-
-    print("=" * 60)
-    print("  SilkloraAI Local AI Hub - PC Server")
-    print("=" * 60)
-    print(f"  Web Dashboard:   http://localhost:{args.port}")
-    print(f"  Mobile Base URL: http://{primary_ip}:{args.port}/v1")
-    print(f"  Listening on:    {args.host}:{args.port}")
-    print("=" * 60)
-
-    if not args.no_browser:
-        def open_browser():
-            time.sleep(1.2)
-            try:
-                import webbrowser
-                webbrowser.open(f"http://localhost:{args.port}")
-            except Exception:
-                pass
-        threading.Thread(target=open_browser, daemon=True).start()
-
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+def index_page():
+    if DASHBOARD_FILE.exists():
+        return HTMLResponse(content=DASHBOARD_FILE.read_text(encoding="utf-8"))
+    return HTMLResponse(content="<h1>SilkloraAI Local Hub</h1><p>dashboard.html not found</p>", status_code=500)
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 8080))
+    state.port = port
+    print("==================================================================")
+    print(f"  SilkloraAI Local AI Hub running at: http://localhost:{port}")
+    print("==================================================================")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

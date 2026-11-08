@@ -24,6 +24,7 @@ import {
   Activity,
   Info,
   Shield,
+  Scan,
 } from 'lucide-react';
 import { db, DEFAULT_THEME, APP_THEMES, getLocalizedTextStyle } from '../db';
 import type {
@@ -38,6 +39,7 @@ import { translations } from '../i18n';
 import { fetchAvailableModels, fetchVisionModels, pingLocalServer, normalizeLocalServerUrl } from '../services/ai';
 import { DEFAULT_CORE_SYSTEM_PROMPT } from '../services/promptBuilder';
 import { ChatPreviewCard } from '../components/ChatPreviewCard';
+import { QrScannerModal } from '../components/QrScannerModal';
 
 interface SettingsViewProps {
   language: Language;
@@ -98,6 +100,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           await db.settings.update('default', { localHubUrl: normalized });
         }
       }
+    } catch (err: any) {
+      setPingResult({
+        ok: false,
+        pingMs: 0,
+        error: err.message || 'Error',
+      });
+    } finally {
+      setIsPinging(false);
+    }
+  };
+
+  const [showQrScanner, setShowQrScanner] = useState(false);
+
+  const handleQrScanSuccess = async (scannedUrl: string) => {
+    const normalized = normalizeLocalServerUrl(scannedUrl);
+    setLocalServerUrl(normalized);
+    await db.settings.update('default', { localHubUrl: normalized });
+    setIsPinging(true);
+    setPingResult(null);
+    try {
+      const res = await pingLocalServer(normalized);
+      setPingResult(res);
     } catch (err: any) {
       setPingResult({
         ok: false,
@@ -496,10 +520,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </p>
 
             {/* Server Address Input & Ping Button */}
-            <div className="space-y-2">
-              <label className="block text-xs font-semibold text-slate-300">
-                {t.localServerUrlLabel}
-              </label>
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between">
+                <label className="block text-xs font-semibold text-slate-300">
+                  {t.localServerUrlLabel}
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowQrScanner(true)}
+                  className="flex items-center gap-1.5 px-2.5 py-1 bg-silk-800 hover:bg-silk-750 border border-violet-500/30 hover:border-violet-400/60 text-violet-300 rounded-lg text-[11px] font-medium transition-all active:scale-95 shadow-sm"
+                >
+                  <Scan className="w-3.5 h-3.5 text-violet-400" />
+                  <span>{t.scanQrCode}</span>
+                </button>
+              </div>
+
               <input
                 type="text"
                 value={localServerUrl}
@@ -1461,6 +1496,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* QR Code Camera Scanner Modal */}
+      <QrScannerModal
+        isOpen={showQrScanner}
+        onClose={() => setShowQrScanner(false)}
+        onScanSuccess={handleQrScanSuccess}
+        title={t.scanQrTitle}
+        hint={t.scanQrHint}
+      />
     </div>
   );
 };

@@ -12,9 +12,9 @@ echo.
 set "PY_EXE="
 set "PY_ARGS="
 
-:: 0. Check for local bundled/downloaded runtime
+:: 0. Check for existing local bundled/downloaded runtime
 if exist "%~dp0python_runtime\python.exe" (
-    "%~dp0python_runtime\python.exe" -c "import sys; sys.exit(0)" >nul 2>&1
+    "%~dp0python_runtime\python.exe" -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
     if !ERRORLEVEL! equ 0 (
         set "PY_EXE=%~dp0python_runtime\python.exe"
         set "PY_ARGS="
@@ -22,35 +22,17 @@ if exist "%~dp0python_runtime\python.exe" (
     )
 )
 
-:: 1. Try standard python in PATH
-where python >nul 2>nul
-if !ERRORLEVEL! equ 0 (
-    python -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
+:: 1. Check for existing working venv
+if exist "venv\Scripts\python.exe" (
+    "venv\Scripts\python.exe" -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
     if !ERRORLEVEL! equ 0 (
-        set "PY_EXE=python"
+        set "PY_EXE=venv\Scripts\python.exe"
         set "PY_ARGS="
         goto :python_found
     )
 )
 
-:: 2. Try Python Launcher py -3 or py
-where py >nul 2>nul
-if !ERRORLEVEL! equ 0 (
-    py -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
-    if !ERRORLEVEL! equ 0 (
-        set "PY_EXE=py"
-        set "PY_ARGS=-3"
-        goto :python_found
-    )
-    py -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
-    if !ERRORLEVEL! equ 0 (
-        set "PY_EXE=py"
-        set "PY_ARGS="
-        goto :python_found
-    )
-)
-
-:: 3. Try standard installation folders in AppData and Program Files
+:: 2. Check standard installation folders in AppData and Program Files
 for /d %%D in ("%LOCALAPPDATA%\Programs\Python\Python3*") do (
     if exist "%%~D\python.exe" (
         "%%~D\python.exe" -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
@@ -84,7 +66,35 @@ for /d %%D in ("%ProgramFiles(x86)%\Python3*") do (
     )
 )
 
-:: 4. Automatic setup: download and install standalone Python 3.11 runtime
+:: 3. Try Python Launcher py -3 or py
+where py >nul 2>nul
+if !ERRORLEVEL! equ 0 (
+    py -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        set "PY_EXE=py"
+        set "PY_ARGS=-3"
+        goto :python_found
+    )
+    py -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        set "PY_EXE=py"
+        set "PY_ARGS="
+        goto :python_found
+    )
+)
+
+:: 4. Try standard python in PATH (verify it is real and not the 0-byte Windows Store stub)
+where python >nul 2>nul
+if !ERRORLEVEL! equ 0 (
+    python -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        set "PY_EXE=python"
+        set "PY_ARGS="
+        goto :python_found
+    )
+)
+
+:: 5. Automatic setup: download and install standalone Python 3.11 runtime
 echo Python 3 was not detected on this system.
 echo Automatically downloading Python 3.11 runtime for Windows...
 echo Please wait, downloading installer...
@@ -152,15 +162,16 @@ set "RUN_EXE="
 set "RUN_ARGS="
 
 if exist "venv\Scripts\python.exe" (
-    echo Using existing virtual environment: venv
+    echo Using existing virtual environment in venv.
     set "RUN_EXE=venv\Scripts\python.exe"
     set "RUN_ARGS="
 ) else if exist "%~dp0python_runtime\python.exe" (
-    echo Using local runtime environment.
+    echo Using local runtime environment in python_runtime.
     set "RUN_EXE=%~dp0python_runtime\python.exe"
     set "RUN_ARGS="
 ) else (
     echo Initializing virtual environment in venv...
+    if exist "venv" rmdir /s /q "venv" >nul 2>&1
     "%PY_EXE%" %PY_ARGS% -m venv venv >nul 2>&1
     if exist "venv\Scripts\python.exe" (
         echo Virtual environment successfully initialized.
@@ -171,6 +182,13 @@ if exist "venv\Scripts\python.exe" (
         set "RUN_EXE=%PY_EXE%"
         set "RUN_ARGS=%PY_ARGS%"
     )
+)
+
+:: Ensure pip is installed
+"%RUN_EXE%" %RUN_ARGS% -m pip --version >nul 2>&1
+if !ERRORLEVEL! neq 0 (
+    echo Installing pip...
+    "%RUN_EXE%" %RUN_ARGS% -m ensurepip --default-pip >nul 2>&1
 )
 
 echo Installing / verifying dependencies from requirements.txt...
@@ -195,6 +213,12 @@ if !ERRORLEVEL! neq 0 (
         echo Installing CPU-optimized llama-cpp-python...
         "%RUN_EXE%" %RUN_ARGS% -m pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu >nul 2>&1
     )
+)
+
+:: Automatically configure Windows Defender Firewall rule for port 8080
+netsh advfirewall firewall show rule name="SilkloraAI Local Hub" >nul 2>&1
+if !ERRORLEVEL! neq 0 (
+    netsh advfirewall firewall add rule name="SilkloraAI Local Hub" dir=in action=allow protocol=TCP localport=8080 profile=any >nul 2>&1
 )
 
 echo.
