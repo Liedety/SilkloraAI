@@ -138,6 +138,21 @@ if os.name == "nt":
                 pass
 
 try:
+    # Ensure CUDA DLLs are linked into llama_cpp/lib if nvidia packages are installed
+    for sp in sys.path:
+        nvidia_dir = Path(sp) / "nvidia"
+        if nvidia_dir.exists():
+            for dll in nvidia_dir.glob("**/bin/*.dll"):
+                if dll.name.lower() in ("cudart64_12.dll", "cublas64_12.dll", "cublaslt64_12.dll"):
+                    for ldir in [Path(sp) / "llama_cpp" / "lib"]:
+                        if ldir.exists():
+                            dst = ldir / dll.name
+                            if not dst.exists() or dst.stat().st_size == 0:
+                                try:
+                                    shutil.copy2(dll, dst)
+                                except Exception:
+                                    pass
+
     import llama_cpp
     from llama_cpp import Llama
     try:
@@ -145,8 +160,13 @@ try:
     except ImportError:
         pass
     LLAMA_AVAILABLE = True
-    LLAMA_BACKEND = "installed"
-    hub_logger.log("INFO", f"llama-cpp-python initialized successfully (version: {getattr(llama_cpp, '__version__', 'unknown')})")
+    has_gpu = False
+    try:
+        has_gpu = bool(llama_cpp.llama_supports_gpu_offload())
+    except Exception:
+        pass
+    LLAMA_BACKEND = "NVIDIA CUDA (GPU)" if has_gpu else "CPU only (No CUDA)"
+    hub_logger.log("INFO", f"llama-cpp-python initialized: {LLAMA_BACKEND} (version: {getattr(llama_cpp, '__version__', 'unknown')})")
 except (ImportError, OSError, Exception) as e:
     hub_logger.log("WARNING", f"llama-cpp-python failed to load ({e}). Attempting fallback to clean CPU prebuilt wheel...")
     try:
@@ -165,7 +185,7 @@ except (ImportError, OSError, Exception) as e:
         except ImportError:
             pass
         LLAMA_AVAILABLE = True
-        LLAMA_BACKEND = "cpu_prebuilt"
+        LLAMA_BACKEND = "CPU only (Fallback)"
         hub_logger.log("INFO", "Clean CPU-optimized llama-cpp-python successfully initialized.")
     except Exception as e2:
         LLAMA_AVAILABLE = False
@@ -1208,17 +1228,32 @@ def cancel_download():
 
 @app.post("/api/enable-cuda")
 def enable_cuda():
-    """Attempt background installation of CUDA-accelerated llama-cpp-python."""
+    """Attempt background installation of CUDA-accelerated llama-cpp-python and runtime DLLs."""
     def _install():
-        hub_logger.log("INFO", "Initiating CUDA llama-cpp-python installation...")
+        hub_logger.log("INFO", "Initiating NVIDIA CUDA 12 runtime and cuBLAS installation...")
         try:
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install",
+                "nvidia-cuda-runtime-cu12", "nvidia-cublas-cu12",
+                "--prefer-binary"
+            ])
+            hub_logger.log("INFO", "Installing CUDA-accelerated llama-cpp-python...")
             subprocess.check_call([
                 sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall",
                 "llama-cpp-python",
                 "--prefer-binary",
                 "--extra-index-url", "https://abetlen.github.io/llama-cpp-python/whl/cu121"
             ])
-            hub_logger.log("INFO", "CUDA llama-cpp-python installed successfully.")
+            # Link DLLs
+            for sp in sys.path:
+                nvidia_dir = Path(sp) / "nvidia"
+                if nvidia_dir.exists():
+                    for dll in nvidia_dir.glob("**/bin/*.dll"):
+                        if dll.name.lower() in ("cudart64_12.dll", "cublas64_12.dll", "cublaslt64_12.dll"):
+                            for ldir in [Path(sp) / "llama_cpp" / "lib"]:
+                                if ldir.exists():
+                                    shutil.copy2(dll, ldir / dll.name)
+            hub_logger.log("INFO", "NVIDIA CUDA 12 engine successfully configured.")
         except Exception as e:
             hub_logger.log("ERROR", f"CUDA install failed: {e}")
 
