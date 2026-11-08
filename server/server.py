@@ -107,6 +107,13 @@ LLAMA_AVAILABLE = False
 LLAMA_BACKEND = "none"
 
 if os.name == "nt":
+    py_dir = os.path.dirname(sys.executable)
+    if os.path.isdir(py_dir):
+        try:
+            os.add_dll_directory(py_dir)
+        except Exception:
+            pass
+
     for p in [
         r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin",
         r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\bin",
@@ -122,9 +129,16 @@ if os.name == "nt":
                 os.add_dll_directory(p)
             except Exception:
                 pass
+
     for sp in sys.path:
         if "site-packages" in sp or "dist-packages" in sp:
             try:
+                lld = os.path.join(sp, "llama_cpp", "lib")
+                if os.path.isdir(lld):
+                    try:
+                        os.add_dll_directory(lld)
+                    except Exception:
+                        pass
                 nvidia_dir = os.path.join(sp, "nvidia")
                 if os.path.isdir(nvidia_dir):
                     for root, dirs, files in os.walk(nvidia_dir):
@@ -137,21 +151,13 @@ if os.name == "nt":
             except Exception:
                 pass
 
+    try:
+        from link_cuda import ensure_cuda_dlls
+        ensure_cuda_dlls()
+    except Exception:
+        pass
+
 try:
-    # Ensure CUDA DLLs are linked into llama_cpp/lib if nvidia packages are installed
-    for sp in sys.path:
-        nvidia_dir = Path(sp) / "nvidia"
-        if nvidia_dir.exists():
-            for dll in nvidia_dir.glob("**/bin/*.dll"):
-                if dll.name.lower() in ("cudart64_12.dll", "cublas64_12.dll", "cublaslt64_12.dll"):
-                    for ldir in [Path(sp) / "llama_cpp" / "lib"]:
-                        if ldir.exists():
-                            dst = ldir / dll.name
-                            if not dst.exists() or dst.stat().st_size == 0:
-                                try:
-                                    shutil.copy2(dll, dst)
-                                except Exception:
-                                    pass
 
     import llama_cpp
     from llama_cpp import Llama

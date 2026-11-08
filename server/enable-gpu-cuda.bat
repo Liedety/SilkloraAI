@@ -30,34 +30,31 @@ if exist "%~dp0python_runtime\python.exe" (
     )
 )
 
-echo [1/3] Installing NVIDIA CUDA 12 & cuBLAS runtime libraries via pip...
+echo [1/3] Installing NVIDIA CUDA 12 runtime & cuBLAS packages via pip...
 "%PY_EXE%" %PY_ARGS% -m pip install nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 --prefer-binary
-if !ERRORLEVEL! neq 0 (
-    echo Warning: Pip installation returned warning, continuing...
-)
 
 echo.
 echo [2/3] Installing CUDA-accelerated llama-cpp-python engine...
 "%PY_EXE%" %PY_ARGS% -m pip install --upgrade --force-reinstall llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
 
 echo.
-echo [3/3] Linking CUDA DLLs into inference engine directory...
-"%PY_EXE%" %PY_ARGS% -c "import os, sys, shutil; from pathlib import Path; import llama_cpp; lib_dir = Path(llama_cpp.__file__).parent / 'lib'; lib_dir.mkdir(parents=True, exist_ok=True); [(shutil.copy2(dll, lib_dir / dll.name), print('  Linked: ' + dll.name)) for sp in sys.path if (Path(sp) / 'nvidia').exists() for dll in (Path(sp) / 'nvidia').glob('**/bin/*.dll') if dll.name.lower() in ('cudart64_12.dll', 'cublas64_12.dll', 'cublaslt64_12.dll')]; print('  CUDA DLL linking completed.')"
-
-echo.
-echo ==========================================================
-echo Testing GPU engine initialization...
-"%PY_EXE%" %PY_ARGS% -c "from llama_cpp import Llama; import llama_cpp; print('SUCCESS: NVIDIA CUDA engine loaded! GPU offload support:', llama_cpp.llama_supports_gpu_offload())"
+echo [3/3] Linking CUDA DLLs and testing GPU inference engine...
+"%PY_EXE%" %PY_ARGS% link_cuda.py
 
 if !ERRORLEVEL! equ 0 (
     echo.
+    echo ==========================================================
     echo [SUCCESS] NVIDIA GPU acceleration is now fully activated!
-    echo When you load a model with GPU Layers = -1, it will load into your 8 GB VRAM.
+    echo When you load a model with GPU Layers = -1, it will load
+    echo directly into your 8 GB VRAM.
+    echo ==========================================================
 ) else (
     echo.
-    echo Notice: Automatic test returned non-zero code. Please run start-server.bat to inspect.
+    echo ==========================================================
+    echo Configuration finished with code !ERRORLEVEL!.
+    echo Please review log output above.
+    echo ==========================================================
 )
 
-echo ==========================================================
 echo.
 pause
