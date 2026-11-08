@@ -22,6 +22,8 @@ import {
   Monitor,
   Wifi,
   Activity,
+  Info,
+  Shield,
 } from 'lucide-react';
 import { db, DEFAULT_THEME, APP_THEMES, getLocalizedTextStyle } from '../db';
 import type {
@@ -568,7 +570,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
             {/* Model Management Notice */}
             <div className="p-3 rounded-xl bg-silk-850/70 border border-silk-800 text-[11px] text-slate-400 flex items-start gap-2">
-              <span className="text-violet-400 mt-0.5">ℹ️</span>
+              <Info className="w-4 h-4 text-violet-400 shrink-0 mt-0.5" />
               <p className="leading-relaxed">
                 {t.localModelManagedOnPc}
               </p>
@@ -576,8 +578,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
             {/* Step-by-Step Wi-Fi Setup Guide */}
             <div className="p-3.5 rounded-xl bg-silk-850 border border-silk-800 space-y-2.5">
-              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
-                <span>📶</span>
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
+                <Wifi className="w-4 h-4 text-violet-400 shrink-0" />
                 <span>{t.wifiGuideTitle}</span>
               </div>
               <ul className="text-[11px] text-slate-400 space-y-2 leading-relaxed">
@@ -598,8 +600,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <span>{t.wifiStep4}</span>
                 </li>
               </ul>
-              <div className="pt-2 border-t border-silk-800/80 text-[10px] text-slate-500 italic">
-                🛡️ {t.wifiFirewallTip}
+              <div className="flex items-start gap-1.5 pt-2 border-t border-silk-800/80 text-[10px] text-slate-500">
+                <Shield className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-400" />
+                <span>{t.wifiFirewallTip}</span>
               </div>
             </div>
           </div>

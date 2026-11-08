@@ -357,13 +357,13 @@ async def chat_completions(req: Request):
     # Fallback simulation engine if llama_cpp not installed or no model loaded yet
     model_name = state.active_model_name
     simulated_reply = (
-        f"Привет! Это локальный сервер SilkloraAI.\n\n"
+        f"Локальный сервер SilkloraAI активен.\n\n"
         f"Текущая модель: {model_name}.\n"
     )
     if not LLAMA_AVAILABLE:
         simulated_reply += (
-            "\n[Примечание]: Модуль `llama-cpp-python` еще не скомпилирован на этом ПК. "
-            "Установите его через `pip install llama-cpp-python` для запуска реальных весов GGUF."
+            "\n[Системное сообщение]: Библиотека llama-cpp-python не установлена в текущем окружении. "
+            "Для запуска локальных весов GGUF скомпилируйте библиотеку согласно инструкциям в README."
         )
 
     # Check for image_url in messages
@@ -376,7 +376,7 @@ async def chat_completions(req: Request):
                     has_image = True
                     break
     if has_image:
-        simulated_reply += "\n*Внимательно рассматривает отправленное изображение через Vision проектор.*"
+        simulated_reply += "\n[Vision]: Распознавание входного изображения через проектор mmproj."
 
     if stream:
         def mock_sse():
@@ -778,10 +778,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     <main>
         <div class="tabs">
-            <button class="tab-btn active" onclick="switchTab('tab-status')">🖥️ Статус и Связь</button>
-            <button class="tab-btn" onclick="switchTab('tab-models')">📦 Локальные модели</button>
-            <button class="tab-btn" onclick="switchTab('tab-hf')">🤗 HuggingFace Hub</button>
-            <button class="tab-btn" onclick="switchTab('tab-test')">⚡ Проверка генерации</button>
+            <button class="tab-btn active" onclick="switchTab('tab-status')">Статус и соединение</button>
+            <button class="tab-btn" onclick="switchTab('tab-models')">Локальные модели</button>
+            <button class="tab-btn" onclick="switchTab('tab-hf')">HuggingFace Hub</button>
+            <button class="tab-btn" onclick="switchTab('tab-test')">Тестирование модели</button>
         </div>
 
         <!-- TAB 1: STATUS & CONNECTION -->
@@ -807,12 +807,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
             <div class="card">
                 <div class="card-header">
-                    <div class="card-title">📡 Подключение мобильного приложения SilkloraAI по Wi-Fi</div>
+                    <div class="card-title">Параметры подключения мобильного клиента</div>
                 </div>
                 <div class="net-grid">
                     <div>
                         <p style="font-size:13px; color:var(--text-muted); margin-bottom:14px; line-height:1.6;">
-                            Убедитесь, что ваш телефон и компьютер подключены к одной Wi-Fi сети. В мобильном приложении перейдите в <b>Настройки → [ 🖥️ Локальный ИИ ]</b> и введите адрес:
+                            Убедитесь, что мобильное устройство и компьютер подключены к одной локальной сети (Wi-Fi). В мобильном приложении перейдите в <b>Настройки → Локальный сервер</b> и укажите Base URL:
                         </p>
                         <div class="ip-box">
                             <div>
@@ -834,25 +834,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <!-- Active Model Loader Controls -->
             <div class="card">
                 <div class="card-header">
-                    <div class="card-title">🎯 Выбор и запуск активной модели на ПК</div>
+                    <div class="card-title">Управление активной моделью</div>
                 </div>
                 <p style="font-size:13px; color:var(--text-muted); margin-bottom:16px;">
-                    Выбор модели происходит <b>строго на компьютере</b>. Телефон просто подключается и использует выбранную здесь модель.
+                    Выбор активной модели выполняется на рабочей станции. Мобильный клиент автоматически направляет запросы к загруженной модели.
                 </p>
                 <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px; margin-bottom:16px;">
                     <div>
-                        <label style="display:block; font-size:12px; font-weight:600; color:var(--text-muted); margin-bottom:6px;">Основная модель для отыгрыша (GGUF):</label>
+                        <label style="display:block; font-size:12px; font-weight:600; color:var(--text-muted); margin-bottom:6px;">Основная модель для текста и RP (GGUF):</label>
                         <select id="select-main-model"></select>
                     </div>
                     <div>
-                        <label style="display:block; font-size:12px; font-weight:600; color:var(--text-muted); margin-bottom:6px;">Проектор зрения mmproj (для фото):</label>
+                        <label style="display:block; font-size:12px; font-weight:600; color:var(--text-muted); margin-bottom:6px;">Проектор зрения mmproj (для анализа фото):</label>
                         <select id="select-mmproj-model">
                             <option value="">Без проектора зрения (только текст)</option>
                         </select>
                     </div>
                 </div>
                 <div style="display:flex; gap:12px; align-items:center;">
-                    <button class="btn-primary" onclick="loadSelectedModels()">🚀 Загрузить модель в память</button>
+                    <button class="btn-primary" onclick="loadSelectedModels()">Загрузить модель в память</button>
                     <button class="btn-danger" onclick="unloadModel()">Выгрузить из памяти</button>
                 </div>
             </div>
@@ -862,8 +862,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <section id="tab-models" class="hidden">
             <div class="card">
                 <div class="card-header">
-                    <div class="card-title">📁 Скачанные локальные модели в папке server/models</div>
-                    <button class="btn-primary" onclick="fetchLocalModels()">🔄 Обновить список</button>
+                    <div class="card-title">Файлы моделей в каталоге server/models</div>
+                    <button class="btn-primary" onclick="fetchLocalModels()">Обновить список</button>
                 </div>
                 <div id="local-models-list" class="model-list">
                     <div style="color:var(--text-muted); font-size:13px; padding:12px;">Поиск моделей...</div>
@@ -875,13 +875,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <section id="tab-hf" class="hidden">
             <div class="card">
                 <div class="card-header">
-                    <div class="card-title">🤗 Загрузка любых моделей с HuggingFace</div>
+                    <div class="card-title">Загрузка моделей из репозитория HuggingFace</div>
                 </div>
                 <p style="font-size:13px; color:var(--text-muted); margin-bottom:14px;">
-                    Вставьте ID любого репозитория или прямую ссылку на модель с HuggingFace (например: <code>bartowski/Llama-3.2-3B-Instruct-GGUF</code> или <code>Qwen/Qwen2.5-7B-Instruct-GGUF</code>):
+                    Укажите идентификатор репозитория HuggingFace (например: <code>bartowski/Llama-3.2-3B-Instruct-GGUF</code> или <code>Qwen/Qwen2.5-7B-Instruct-GGUF</code>):
                 </p>
                 <div class="input-row">
-                    <input type="text" id="hf-input" placeholder="Вставьте ID репозитория или ссылку HuggingFace..." value="bartowski/Llama-3.2-3B-Instruct-GGUF" />
+                    <input type="text" id="hf-input" placeholder="Идентификатор репозитория HuggingFace..." value="bartowski/Llama-3.2-3B-Instruct-GGUF" />
                     <button class="btn-primary" onclick="inspectHfRepo()">Найти файлы .gguf</button>
                 </div>
 
@@ -908,7 +908,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <section id="tab-test" class="hidden">
             <div class="card">
                 <div class="card-header">
-                    <div class="card-title">⚡ Тест ответа загруженной модели прямо в браузере</div>
+                    <div class="card-title">Проверка инференса активной модели</div>
                 </div>
                 <div class="input-row">
                     <input type="text" id="test-prompt" value="*Смотрит с интересом* Здравствуй. Кто ты?" />
@@ -968,7 +968,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     document.getElementById('dl-progress-text').innerText = `${dlMb} / ${totMb} MB (${dl.percent}%)`;
                 } else if (dl && dl.status === 'completed') {
                     dlBox.classList.remove('hidden');
-                    document.getElementById('dl-filename').innerText = `✅ Загружено: ${dl.filename}`;
+                    document.getElementById('dl-filename').innerText = `Загрузка завершена: ${dl.filename}`;
                     document.getElementById('dl-bar').style.width = `100%`;
                     document.getElementById('dl-speed').innerText = 'Готово';
                     setTimeout(() => dlBox.classList.add('hidden'), 4000);
@@ -1118,7 +1118,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                                     ${f.is_mmproj ? '<span class="badge badge-vision">Vision mmproj</span>' : '<span class="badge badge-text">Квантовка</span>'}
                                 </div>
                             </div>
-                            <button class="btn-primary" style="padding:6px 14px; font-size:12px;" onclick="startDownload('${data.repo_id}', '${f.filename}')">⬇️ Скачать</button>
+                            <button class="btn-primary" style="padding:6px 14px; font-size:12px;" onclick="startDownload('${data.repo_id}', '${f.filename}')">Скачать</button>
                         </div>
                     `;
                 });

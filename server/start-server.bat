@@ -1,47 +1,75 @@
 @echo off
-chcp 65001 > nul
+setlocal EnableExtensions
+cd /d "%~dp0"
 title SilkloraAI Local AI Hub Server
 
 echo ==========================================================
-echo          SilkloraAI Local AI Hub - Launcher (Windows)
+echo          SilkloraAI Local AI Hub - Windows Launcher
 echo ==========================================================
 echo.
 
+set "PY_CMD="
+
 where python >nul 2>nul
-if %errorlevel% neq 0 (
-    echo ОШИБКА: Python не найден в системе.
-    echo Пожалуйста, установите Python 3.10+ с официального сайта python.org
-    echo и не забудьте отметить галочку "Add Python to PATH".
-    pause
-    exit /b 1
+if %ERRORLEVEL% equ 0 (
+    set "PY_CMD=python"
+    goto :found_python
 )
 
-cd /d "%~dp0"
+where py >nul 2>nul
+if %ERRORLEVEL% equ 0 (
+    set "PY_CMD=py -3"
+    goto :found_python
+)
 
-if not exist "venv" (
-    echo Создание виртуального окружения venv...
-    python -m venv venv
-    if %errorlevel% neq 0 (
-        echo Ошибка создания venv.
+for /d %%D in ("%LOCALAPPDATA%\Programs\Python\Python3*") do (
+    if exist "%%~D\python.exe" (
+        set "PY_CMD=%%~D\python.exe"
+        goto :found_python
+    )
+)
+
+for /d %%D in ("%ProgramFiles%\Python3*") do (
+    if exist "%%~D\python.exe" (
+        set "PY_CMD=%%~D\python.exe"
+        goto :found_python
+    )
+)
+
+echo ERROR: Python 3 was not detected in PATH or default directories.
+echo Please install Python 3.10 or newer from https://www.python.org/
+echo Ensure the option "Add Python to PATH" is checked during setup.
+echo.
+pause
+exit /b 1
+
+:found_python
+echo Python binary located: %PY_CMD%
+
+if not exist "venv\Scripts\python.exe" (
+    echo Initializing virtual environment in venv...
+    %PY_CMD% -m venv venv
+    if %ERRORLEVEL% neq 0 (
+        echo Failed to create virtual environment.
         pause
         exit /b 1
     )
 )
 
-echo Активация виртуального окружения...
-call venv\Scripts\activate.bat
-
-echo Проверка и обновление зависимостей...
-python -m pip install -q --upgrade pip
-pip install -q -r requirements.txt
+echo Verifying Python package dependencies...
+call "venv\Scripts\python.exe" -m pip install -q --upgrade pip
+call "venv\Scripts\python.exe" -m pip install -q -r requirements.txt
+if %ERRORLEVEL% neq 0 (
+    echo Notice: pip installation returned non-zero code. Attempting to start server...
+)
 
 echo.
-echo Запуск сервера Silklora Local AI Hub...
+echo Launching SilkloraAI Local AI Hub server on port 8080...
 echo.
-python server.py %*
+call "venv\Scripts\python.exe" server.py %*
 
-if %errorlevel% neq 0 (
+if %ERRORLEVEL% neq 0 (
     echo.
-    echo Сервер остановлен с ошибкой.
+    echo Server process exited with code %ERRORLEVEL%.
     pause
 )
