@@ -535,6 +535,14 @@
                                 <label style="font-size:0.75rem; color:var(--text-muted); font-weight:600;" id="tSelectIpLabel">Network Adapter (IP):</label>
                                 <select class="select" id="selIp" onchange="updateQr()" style="margin-top:0.35rem;"></select>
                             </div>
+                            <div id="boxVpnSelectedWarning" style="display:none; background:rgba(239, 68, 68, 0.12); border:1px solid rgba(239, 68, 68, 0.4); border-radius:8px; padding:0.6rem;">
+                                <div style="font-size:0.75rem; font-weight:700; color:#f87171; margin-bottom:0.2rem;" id="tVpnSelectedWarnTitle">
+                                    Attention: Virtual VPN IP selected!
+                                </div>
+                                <div style="font-size:0.72rem; color:#fca5a5; line-height:1.35;" id="tVpnSelectedWarnDesc">
+                                    Phones cannot connect to virtual VPN/loopback addresses (198.18.x.x). Please select your Wi-Fi/LAN IP (usually 192.168.x.x) from the dropdown above.
+                                </div>
+                            </div>
                             <div id="boxVpnNotice" style="display:none; background:rgba(99, 102, 241, 0.08); border:1px solid rgba(99, 102, 241, 0.25); border-radius:8px; padding:0.6rem;">
                                 <div style="font-size:0.75rem; font-weight:700; color:#a5b4fc; margin-bottom:0.2rem;">
                                     VPN / Proxy (Clash, etc.) detected
@@ -1009,8 +1017,10 @@
                 tLogsTitle: "System Event Logs & Troubleshooting",
                 tBtnDownloadReport: "Download Diagnostic Report (.txt)",
                 tLogsDesc: "Click 'Download Diagnostic Report' to save a full event log text file to send to the assistant for instant diagnosis.",
+                tVpnSelectedWarnTitle: "Attention: Virtual VPN IP selected!",
+                tVpnSelectedWarnDesc: "Phones cannot connect to virtual VPN/loopback addresses (198.18.x.x). Please select your Wi-Fi/LAN IP (usually 192.168.x.x) from the dropdown above.",
                 tFwFixTitle: "Windows Firewall & Wi-Fi Check",
-                tFwFixDesc: "If your phone cannot connect, run setup-firewall.bat as Administrator in the server folder, and ensure your Wi-Fi is set to Private network.",
+                tFwFixDesc: "start-server.bat automatically configures Windows Firewall to permit incoming port 8080. Ensure your Wi-Fi network profile in Windows is set to Private.",
                 tDirectPhoneTestTitle: "Direct Phone Browser Test",
                 tDirectPhoneTestDesc: "Open this link directly in Chrome/Safari on your phone to verify if your phone can reach the PC:",
                 tModelLoadFailedTitle: "Model Loading Error:",
@@ -1091,8 +1101,10 @@
                 tLogsTitle: "Системные логи и диагностика",
                 tBtnDownloadReport: "Скачать диагностический отчет (.txt)",
                 tLogsDesc: "Нажмите кнопку 'Скачать диагностический отчет', чтобы сохранить файл логов и отправить его помощнику для точного анализа.",
+                tVpnSelectedWarnTitle: "Внимание: Выбран виртуальный адрес VPN!",
+                tVpnSelectedWarnDesc: "Телефон не сможет подключиться к виртуальному адресу VPN (198.18.x.x). Пожалуйста, выберите в списке выше ваш настоящий адрес Wi-Fi или Ethernet (начинается на 192.168.x.x)!",
                 tFwFixTitle: "Проверка брандмауэра и Wi-Fi",
-                tFwFixDesc: "Если телефон не подключается, запустите setup-firewall.bat от имени Администратора и убедитесь, что сеть Wi-Fi в Windows настроена как Частная (Private).",
+                tFwFixDesc: "start-server.bat автоматически настраивает брандмауэр Windows для порта 8080. Убедитесь, что ваше Wi-Fi подключение в Windows настроено как 'Частная сеть' (Private).",
                 tDirectPhoneTestTitle: "Прямой тест в браузере телефона",
                 tDirectPhoneTestDesc: "Откройте эту ссылку в браузере телефона (Chrome/Safari), чтобы проверить доступность ПК по сети:",
                 tModelLoadFailedTitle: "Ошибка загрузки модели:",
@@ -1149,6 +1161,12 @@
             const ip = sel.value || "127.0.0.1";
             const url = "http://" + ip + ":8080/v1";
             document.getElementById("lblMobileUrl").innerText = url;
+
+            const isVirt = ip.startsWith("198.18.") || ip.startsWith("198.19.") || ip.startsWith("169.254.") || ip.startsWith("127.");
+            const vpnWarn = document.getElementById("boxVpnSelectedWarning");
+            if (vpnWarn) {
+                vpnWarn.style.display = isVirt ? "block" : "none";
+            }
 
             const pLink = document.getElementById("linkPhoneDirectTest");
             if (pLink) {
@@ -1213,7 +1231,11 @@
                     data.network_adapters.forEach(a => {
                         const opt = document.createElement("option");
                         opt.value = a.ip;
-                        opt.innerText = a.label + (a.is_primary ? " [PRIMARY]" : "");
+                        const tag = a.is_primary ? " [RECOMMENDED]" : "";
+                        opt.innerText = a.label + tag;
+                        if (a.ip === data.primary_ip || a.is_primary) {
+                            opt.selected = true;
+                        }
                         sel.appendChild(opt);
                         if (a.is_virtual) hasVirtual = true;
                     });
@@ -1244,7 +1266,9 @@
                     if (eBanner) eBanner.style.display = "none";
                     if (btnLoad) {
                         btnLoad.disabled = true;
-                        btnLoad.innerText = `Loading (${data.loading_elapsed_sec}s)...`;
+                        const s = document.getElementById("tBtnLoadConfirm");
+                        const loadingWord = currentLang === 'ru' ? 'Загрузка' : 'Loading';
+                        if (s) s.innerText = `${loadingWord} (${data.loading_elapsed_sec}s)...`;
                     }
                 } else {
                     if (lBanner) lBanner.style.display = "none";
@@ -1256,9 +1280,14 @@
                     } else {
                         if (eBanner) eBanner.style.display = "none";
                     }
-                    if (btnLoad && !btnLoad.disabled && btnLoad.innerText.includes("Loading")) {
+                    if (btnLoad) {
                         btnLoad.disabled = false;
-                        btnLoad.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg> <span>${i18n[currentLang].tBtnLoadConfirm}</span>`;
+                        const s = document.getElementById("tBtnLoadConfirm");
+                        if (s) {
+                            s.innerText = i18n[currentLang].tBtnLoadConfirm;
+                        } else {
+                            btnLoad.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg> <span id="tBtnLoadConfirm">${i18n[currentLang].tBtnLoadConfirm}</span>`;
+                        }
                     }
                 }
 
@@ -1447,6 +1476,13 @@
                 return;
             }
 
+            const btn = document.getElementById("btnHfSearch");
+            const oldText = btn ? btn.innerText : "";
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = currentLang === 'ru' ? "Поиск..." : "Searching...";
+            }
+
             const resBox = document.getElementById("hfResultsBox");
             resBox.style.display = "block";
             resBox.innerHTML = "<div style='color:var(--text-dim); padding:1rem;'>Searching Hugging Face...</div>";
@@ -1476,6 +1512,11 @@
                 `;
             } catch (e) {
                 resBox.innerHTML = "<div style='color:var(--danger); padding:1rem;'>Search failed: " + e.message + "</div>";
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerText = oldText || (currentLang === 'ru' ? "Найти" : "Search");
+                }
             }
         }
 
@@ -1633,8 +1674,9 @@
             }
 
             const btn = document.getElementById("btnLoadModel");
-            btn.disabled = true;
-            btn.innerText = "Initiating load...";
+            if (btn) btn.disabled = true;
+            const span = document.getElementById("tBtnLoadConfirm");
+            if (span) span.innerText = currentLang === 'ru' ? "Загрузка..." : "Initiating load...";
 
             try {
                 const res = await fetch("/api/models/load", {
@@ -1653,8 +1695,12 @@
                 fetchLogs();
             } catch (e) {
                 alert("Error: " + e.message);
-                btn.disabled = false;
-                btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg> <span>${i18n[currentLang].tBtnLoadConfirm}</span>`;
+                if (btn) btn.disabled = false;
+                if (span) {
+                    span.innerText = i18n[currentLang].tBtnLoadConfirm;
+                } else if (btn) {
+                    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg> <span id="tBtnLoadConfirm">${i18n[currentLang].tBtnLoadConfirm}</span>`;
+                }
             }
         }
 
@@ -1665,9 +1711,21 @@
         }
 
         async function unloadModel() {
-            await fetch("/api/models/unload", { method: "POST" });
-            fetchStatus();
-            fetchLocalModels();
+            const btn = document.getElementById("btnUnloadModel");
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = currentLang === 'ru' ? "Выгрузка..." : "Unloading...";
+            }
+            try {
+                await fetch("/api/models/unload", { method: "POST" });
+                fetchStatus();
+                fetchLocalModels();
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerText = i18n[currentLang].btnUnloadModel;
+                }
+            }
         }
 
         async function deleteModel(filename) {
@@ -1678,23 +1736,30 @@
 
         async function enableCuda() {
             const btn = document.getElementById("btnEnableCuda");
+            if (!btn) return;
             btn.disabled = true;
-            btn.innerText = "Installing CUDA Backend...";
-            await fetch("/api/enable-cuda", { method: "POST" });
-            setTimeout(() => {
-                btn.disabled = false;
-                btn.innerText = i18n[currentLang].tBtnReinstallCuda;
-                fetchStatus();
-            }, 5000);
+            const span = document.getElementById("tBtnReinstallCuda");
+            if (span) span.innerText = currentLang === 'ru' ? "Установка CUDA..." : "Installing CUDA Backend...";
+            try {
+                await fetch("/api/enable-cuda", { method: "POST" });
+            } finally {
+                setTimeout(() => {
+                    btn.disabled = false;
+                    if (span) span.innerText = i18n[currentLang].tBtnReinstallCuda;
+                    fetchStatus();
+                }, 5000);
+            }
         }
 
         // Test Chat Functionality
         let chatMessages = [];
         async function sendChatMessage() {
             const inp = document.getElementById("inpChatMsg");
+            const btn = document.getElementById("btnChatSend");
             const text = inp.value.trim();
             if (!text) return;
             inp.value = "";
+            if (btn) btn.disabled = true;
 
             chatMessages.push({ role: "user", content: text });
             appendChatMessage("user", text);
@@ -1741,6 +1806,8 @@
                 chatMessages.push({ role: "assistant", content: fullText });
             } catch (e) {
                 assistantMsgEl.innerText = "Error: " + e.message;
+            } finally {
+                if (btn) btn.disabled = false;
             }
         }
 

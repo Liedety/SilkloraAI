@@ -435,6 +435,8 @@ def get_local_ip_addresses() -> List[Dict[str, Any]]:
         return -score
 
     results.sort(key=_score)
+    for idx, item in enumerate(results):
+        item["is_primary"] = (idx == 0)
     if not results:
         results.append({
             "ip": "127.0.0.1",
