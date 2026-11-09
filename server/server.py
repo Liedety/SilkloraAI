@@ -12,6 +12,18 @@ from datetime import datetime
 from collections import deque
 from pathlib import Path
 
+# Disable Windows Console QuickEdit mode to prevent accidental mouse clicks from suspending the server
+if sys.platform == "win32":
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        hStdin = kernel32.GetStdHandle(-10) # STD_INPUT_HANDLE
+        mode = ctypes.c_ulong()
+        if kernel32.GetConsoleMode(hStdin, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(hStdin, (mode.value & ~0x0040) | 0x0080)
+    except Exception:
+        pass
+
 REQUIRED_DEPS = [
     ("fastapi", "fastapi>=0.100.0"),
     ("uvicorn", "uvicorn[standard]>=0.23.0"),
@@ -108,6 +120,7 @@ LLAMA_AVAILABLE = False
 LLAMA_BACKEND = "none"
 
 if os.name == "nt":
+    hub_logger.log("INFO", "Configuring Windows CUDA 12 and DLL search paths...")
     py_dir = os.path.dirname(sys.executable)
     if os.path.isdir(py_dir):
         try:
@@ -154,9 +167,12 @@ if os.name == "nt":
 
     try:
         from link_cuda import ensure_cuda_dlls
-        ensure_cuda_dlls()
-    except Exception:
-        pass
+        ok, msg = ensure_cuda_dlls()
+        hub_logger.log("INFO", f"CUDA Linker: {msg}")
+    except Exception as e:
+        hub_logger.log("INFO", f"CUDA Linker notice: {e}")
+
+hub_logger.log("INFO", "Initializing llama_cpp engine with CUDA...")
 
 def _safe_import_handler(name: str):
     """Safely import a vision chat handler class by name. Returns None if unavailable."""

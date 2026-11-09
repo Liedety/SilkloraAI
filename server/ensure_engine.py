@@ -10,6 +10,18 @@ import shutil
 import subprocess
 from pathlib import Path
 
+# Disable Windows Console QuickEdit mode to prevent accidental mouse clicks from suspending the server
+if sys.platform == "win32":
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        hStdin = kernel32.GetStdHandle(-10) # STD_INPUT_HANDLE
+        mode = ctypes.c_ulong()
+        if kernel32.GetConsoleMode(hStdin, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(hStdin, (mode.value & ~0x0040) | 0x0080)
+    except Exception:
+        pass
+
 def get_installed_llama_version():
     try:
         import llama_cpp
@@ -22,6 +34,21 @@ def get_installed_llama_version():
         return ver_str, has_gpu
     except Exception:
         return None, False
+
+def verify_in_fresh_process():
+    """Runs a fresh Python process to inspect the newly installed package without module cache bias."""
+    try:
+        cmd = [
+            sys.executable, "-c",
+            "import llama_cpp; v=getattr(llama_cpp, '__version__', 'unknown'); g=bool(llama_cpp.llama_supports_gpu_offload()); print(f'{v}|{g}'); sys.exit(0 if g else 1)"
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if proc.returncode == 0 and "|" in proc.stdout:
+            v_str, g_str = proc.stdout.strip().split("|", 1)
+            return v_str.strip(), g_str.strip() == "True"
+    except Exception:
+        pass
+    return None, False
 
 def is_engine_satisfactory(ver_str, has_gpu):
     if not ver_str or not has_gpu:
@@ -86,13 +113,19 @@ def link_cuda_dlls():
         td.mkdir(parents=True, exist_ok=True)
         for name, src_dll in nvidia_dlls.items():
             dst = td / name
+            if dst.exists():
+                try:
+                    if dst.stat().st_size == src_dll.stat().st_size:
+                        continue
+                except Exception:
+                    pass
             try:
                 shutil.copy2(src_dll, dst)
                 copied += 1
             except Exception:
                 pass
 
-    return True, f"Linked {len(nvidia_dlls)} CUDA DLLs into {len(target_dirs)} directories."
+    return True, f"Linked {len(nvidia_dlls)} CUDA DLLs ({copied} copied) into {len(target_dirs)} directories."
 
 def run_pip(args):
     cmd = [sys.executable, "-m", "pip"] + args
@@ -134,8 +167,11 @@ def main():
     ok, msg = link_cuda_dlls()
     print(f"DLL Link status: {msg}")
 
-    # 4. Verify
-    new_ver, new_has_gpu = get_installed_llama_version()
+    # 4. Verify in a clean subprocess
+    new_ver, new_has_gpu = verify_in_fresh_process()
+    if not new_ver:
+        new_ver, new_has_gpu = get_installed_llama_version()
+
     print("\n----------------------------------------------------------")
     print(f"Verification: llama-cpp-python {new_ver} (GPU: {new_has_gpu})")
     if is_engine_satisfactory(new_ver, new_has_gpu):

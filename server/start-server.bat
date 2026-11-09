@@ -3,6 +3,8 @@ setlocal EnableDelayedExpansion
 chcp 65001 >nul 2>&1
 cd /d "%~dp0"
 title SilkloraAI Local AI Hub Server
+:: Disable Windows Console QuickEdit mode to prevent accidental mouse clicks from suspending the server
+reg add HKCU\Console /v QuickEdit /t REG_DWORD /d 0 /f >nul 2>&1
 
 echo ==========================================================
 echo          SilkloraAI Local AI Hub - Windows Launcher

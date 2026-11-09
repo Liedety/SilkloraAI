@@ -10,6 +10,18 @@ import sys
 import shutil
 from pathlib import Path
 
+# Disable Windows Console QuickEdit mode to prevent accidental mouse clicks from suspending the server
+if sys.platform == "win32":
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        hStdin = kernel32.GetStdHandle(-10) # STD_INPUT_HANDLE
+        mode = ctypes.c_ulong()
+        if kernel32.GetConsoleMode(hStdin, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(hStdin, (mode.value & ~0x0040) | 0x0080)
+    except Exception:
+        pass
+
 def ensure_cuda_dlls():
     py_dir = Path(sys.executable).parent
     site_dirs = []
@@ -49,13 +61,19 @@ def ensure_cuda_dlls():
         td.mkdir(parents=True, exist_ok=True)
         for name, src_dll in nvidia_dlls.items():
             dst = td / name
+            if dst.exists():
+                try:
+                    if dst.stat().st_size == src_dll.stat().st_size:
+                        continue
+                except Exception:
+                    pass
             try:
                 shutil.copy2(src_dll, dst)
                 copied += 1
             except Exception as e:
                 pass
 
-    return True, f"Successfully linked {len(nvidia_dlls)} CUDA DLLs into {len(target_dirs)} directories."
+    return True, f"Successfully linked {len(nvidia_dlls)} CUDA DLLs ({copied} copied) into {len(target_dirs)} directories."
 
 def main():
     print("==========================================================")
