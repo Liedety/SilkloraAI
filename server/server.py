@@ -51,6 +51,7 @@ import traceback
 import urllib.parse
 import platform
 import shutil
+import asyncio
 from typing import List, Dict, Any, Optional
 
 import requests
@@ -157,14 +158,18 @@ if os.name == "nt":
     except Exception:
         pass
 
-try:
+def _safe_import_handler(name: str):
+    """Safely import a vision chat handler class by name. Returns None if unavailable."""
+    try:
+        import importlib
+        mod = importlib.import_module("llama_cpp.llama_chat_format")
+        return getattr(mod, name, None)
+    except Exception:
+        return None
 
+try:
     import llama_cpp
     from llama_cpp import Llama
-    try:
-        from llama_cpp.llama_chat_format import Llava15ChatHandler, MoondreamChatHandler
-    except ImportError:
-        pass
     LLAMA_AVAILABLE = True
     has_gpu = False
     try:
@@ -186,10 +191,6 @@ except (ImportError, OSError, Exception) as e:
         import llama_cpp
         importlib.reload(llama_cpp)
         from llama_cpp import Llama
-        try:
-            from llama_cpp.llama_chat_format import Llava15ChatHandler, MoondreamChatHandler
-        except ImportError:
-            pass
         LLAMA_AVAILABLE = True
         LLAMA_BACKEND = "CPU only (Fallback)"
         hub_logger.log("INFO", "Clean CPU-optimized llama-cpp-python successfully initialized.")
@@ -197,6 +198,46 @@ except (ImportError, OSError, Exception) as e:
         LLAMA_AVAILABLE = False
         LLAMA_BACKEND = "none"
         hub_logger.log("WARNING", f"Could not initialize llama-cpp-python: {e2}")
+
+# ---------------------------------------------------------------------------
+# Universal Vision Handler Registry
+# Maps (keyword_in_model_name) -> (HandlerClassName, min_ctx_for_vision)
+# Checked in order — first match wins. Add new architectures here as needed.
+# ---------------------------------------------------------------------------
+VISION_HANDLER_MAP: list[tuple[list[str], str, int]] = [
+    # keywords                               handler class name           min_ctx
+    (["qwen2.5", "qwen25"],                  "Qwen25VLChatHandler",       8192),
+    (["qwen2-vl", "qwen2vl"],                "Qwen2VLChatHandler",        8192),
+    (["minicpm-v-2.6", "minicpm_v_2_6",
+      "minicpmv26", "minicpm-o"],            "MiniCPMv26ChatHandler",     4096),
+    (["llava-1-6", "llava1.6",
+      "llava-1.6", "llavar2"],               "Llava16ChatHandler",        4096),
+    (["moondream"],                          "MoondreamChatHandler",      2048),
+    (["nanollava", "nano-llava"],            "NanoLlavaChatHandler",      4096),
+    (["llama-3-vision", "llama3-vision",
+      "llama_3_vision"],                     "Llama3VisionAlphaChatHandler", 4096),
+    # Generic LLaVA 1.5 fallback — must stay LAST
+    (["llava"],                              "Llava15ChatHandler",        4096),
+]
+
+def resolve_vision_handler(model_name: str) -> tuple[Optional[Any], int]:
+    """
+    Auto-detect the correct chat handler class and minimum context window
+    for a given model filename. Returns (handler_instance_or_None, ctx_minimum).
+    Falls back to Llava15ChatHandler for any mmproj model not matching known patterns.
+    """
+    name_lower = model_name.lower()
+    for keywords, handler_cls_name, min_ctx in VISION_HANDLER_MAP:
+        if any(kw in name_lower for kw in keywords):
+            handler_cls = _safe_import_handler(handler_cls_name)
+            if handler_cls is not None:
+                return handler_cls, min_ctx, handler_cls_name
+            # Handler class not available in this version — log and try next
+            hub_logger.log("WARNING", f"Handler {handler_cls_name} not found in installed llama-cpp-python, trying next candidate...")
+
+    # Absolute fallback
+    fallback = _safe_import_handler("Llava15ChatHandler")
+    return fallback, 4096, "Llava15ChatHandler"
 
 app = FastAPI(title="SilkloraAI Local AI Hub", version="1.2.0")
 
@@ -516,20 +557,32 @@ def async_load_worker(model_name: str, mmproj_name: Optional[str], n_ctx: int, n
 
         if LLAMA_AVAILABLE:
             chat_handler = None
-            if mmproj_path and mmproj_path.exists():
-                try:
-                    hub_logger.log("INFO", f"Initializing Vision projector handler from {mmproj_path.name}...")
-                    chat_handler = Llava15ChatHandler(clip_model_path=str(mmproj_path))
-                except Exception as e:
-                    hub_logger.log("WARNING", f"Failed to initialize Llava15ChatHandler ({e}), proceeding with text only.")
+            effective_ctx = n_ctx
 
-            # Attempt model instantiation with fallback on CUDA OOM
+            # --- Universal Vision Handler Resolution ---
+            if mmproj_path and mmproj_path.exists():
+                hub_logger.log("INFO", f"Detecting vision architecture for {model_name}...")
+                handler_cls, min_ctx, handler_name = resolve_vision_handler(model_name)
+                if handler_cls is not None:
+                    try:
+                        chat_handler = handler_cls(clip_model_path=str(mmproj_path))
+                        effective_ctx = max(n_ctx, min_ctx)
+                        hub_logger.log("INFO", f"Vision handler: {handler_name} | Context: {effective_ctx} tokens")
+                        if effective_ctx != n_ctx:
+                            hub_logger.log("INFO", f"Context expanded from {n_ctx} to {effective_ctx} to accommodate image tokens.")
+                    except Exception as e:
+                        hub_logger.log("WARNING", f"Failed to initialize {handler_name} ({e}). Attempting without Vision handler (text only).")
+                        chat_handler = None
+                else:
+                    hub_logger.log("WARNING", "No compatible Vision handler found in installed llama-cpp-python. Loading in text-only mode.")
+
+            # --- Model instantiation with progressive VRAM fallback ---
             llama_inst = None
             try:
-                hub_logger.log("INFO", f"Calling Llama(model_path={model_name}, n_ctx={n_ctx}, n_gpu_layers={n_gpu_layers})...")
+                hub_logger.log("INFO", f"Calling Llama(model_path={model_name}, n_ctx={effective_ctx}, n_gpu_layers={n_gpu_layers})...")
                 llama_inst = Llama(
                     model_path=str(model_path),
-                    n_ctx=n_ctx,
+                    n_ctx=effective_ctx,
                     n_gpu_layers=n_gpu_layers,
                     chat_handler=chat_handler,
                     verbose=True,
@@ -537,7 +590,7 @@ def async_load_worker(model_name: str, mmproj_name: Optional[str], n_ctx: int, n
             except Exception as e:
                 err_msg = str(e)
                 hub_logger.log("WARNING", f"Initial load failed: {err_msg}")
-                # If full offload failed (e.g. CUDA OOM for large 12B model on 8GB VRAM), try partial offload
+                # Fallback 1: partial GPU offload (20 layers)
                 if n_gpu_layers == -1 or n_gpu_layers > 15:
                     hub_logger.log("INFO", "Attempting automatic recovery: reloading with partial GPU offload (20 layers)...")
                     with state.lock:
@@ -545,7 +598,7 @@ def async_load_worker(model_name: str, mmproj_name: Optional[str], n_ctx: int, n
                     try:
                         llama_inst = Llama(
                             model_path=str(model_path),
-                            n_ctx=min(n_ctx, 4096),
+                            n_ctx=min(effective_ctx, 4096),
                             n_gpu_layers=20,
                             chat_handler=chat_handler,
                             verbose=True,
@@ -553,12 +606,13 @@ def async_load_worker(model_name: str, mmproj_name: Optional[str], n_ctx: int, n
                         n_gpu_layers = 20
                         hub_logger.log("INFO", "Partial GPU offload (20 layers) successfully loaded.")
                     except Exception as e2:
+                        # Fallback 2: CPU only
                         hub_logger.log("WARNING", f"Partial GPU load failed ({e2}), falling back to CPU mode (n_gpu_layers=0)...")
                         with state.lock:
                             state.loading_step = "GPU memory full, falling back to CPU mode..."
                         llama_inst = Llama(
                             model_path=str(model_path),
-                            n_ctx=min(n_ctx, 2048),
+                            n_ctx=min(effective_ctx, 2048),
                             n_gpu_layers=0,
                             chat_handler=chat_handler,
                             verbose=False,
@@ -570,7 +624,7 @@ def async_load_worker(model_name: str, mmproj_name: Optional[str], n_ctx: int, n
                         state.loading_step = "Falling back to CPU mode..."
                     llama_inst = Llama(
                         model_path=str(model_path),
-                        n_ctx=min(n_ctx, 2048),
+                        n_ctx=min(effective_ctx, 2048),
                         n_gpu_layers=0,
                         chat_handler=chat_handler,
                         verbose=False,
@@ -604,7 +658,16 @@ def async_load_worker(model_name: str, mmproj_name: Optional[str], n_ctx: int, n
             hub_logger.log("INFO", f"Selected {model_name} (Simulation mode: llama-cpp-python not available)")
 
     except Exception as e:
-        err_detail = f"{type(e).__name__}: {str(e)}"
+        err_msg = str(e)
+        installed_ver = getattr(llama_cpp, "__version__", "unknown") if LLAMA_AVAILABLE else "none"
+        if "Failed to load model from file" in err_msg:
+            name_low = model_name.lower()
+            if "qwen2" in name_low or "qwen2.5" in name_low:
+                err_detail = f"Архитектура модели Qwen2.5-VL не поддерживается установленной версией llama-cpp-python ({installed_ver}). Требуется v0.3.10+. Запустите start-server.bat для автоматического обновления движка."
+            else:
+                err_detail = f"Ошибка загрузки модели: файл поврежден или архитектура не поддерживается движком (llama-cpp-python {installed_ver}). Запустите start-server.bat для проверки и обновления."
+        else:
+            err_detail = f"{type(e).__name__}: {str(e)}"
         trace_str = traceback.format_exc()
         hub_logger.log("ERROR", f"Failed to load model {model_name}: {err_detail}\n{trace_str}")
         with state.lock:
@@ -755,12 +818,15 @@ async def chat_completions(req: Request):
     max_tokens = int(body.get("max_tokens", 2048))
     stop = body.get("stop", None)
 
-    # Standard stop tokens to prevent runaway generation across all architectures
+    # Standard stop tokens to prevent runaway generation across all architectures.
+    # NOTE: Do NOT include </s> or <|im_end|> here — these are native EOS/EOT tokens
+    # that llama.cpp handles internally. Putting them in the stop list causes the model
+    # to terminate on the very first token for models that use them in their chat template
+    # (e.g. MN-12B-Faun, Mistral-family with tekken tokenizer).
     DEFAULT_STOP_TOKENS = [
-        "USER:", "User:", "ASSISTANT:", "Assistant:", 
+        "USER:", "User:", "ASSISTANT:", "Assistant:",
         "\nUSER:", "\nUser:", "\n\nUSER:", "\n\nUser:",
         "\nASSISTANT:", "\nAssistant:",
-        "<|im_end|>", "<|endoftext|>", "</s>", 
         "<用户>", "<AI>", "<end_of_turn>", "<|eot_id|>"
     ]
     if isinstance(stop, list):
@@ -797,13 +863,22 @@ async def chat_completions(req: Request):
                             hub_logger.log("INFO", "Client disconnected from SSE stream.")
                             if generator is not None:
                                 try:
+                                    # Drain remaining tokens to prevent CUDA stream capture error
                                     for _ in generator:
                                         pass
+                                except GeneratorExit:
+                                    pass
                                 except Exception:
                                     pass
                             return
                         except Exception as e:
                             hub_logger.log("ERROR", f"Streaming error: {e}")
+                            if generator is not None:
+                                try:
+                                    for _ in generator:
+                                        pass
+                                except Exception:
+                                    pass
                             yield f"data: {{\"error\": {json.dumps(str(e))}}}\n\n"
                             yield "data: [DONE]\n\n"
 

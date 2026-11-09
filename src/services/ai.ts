@@ -196,9 +196,6 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
         max_tokens: maxTokens,
         stream: true,
         stop: [
-          '<|end_of_sentence|>',
-          '<|im_end|>',
-          '<|endoftext|>',
           'USER:',
           'User:',
           '\nUSER:',
