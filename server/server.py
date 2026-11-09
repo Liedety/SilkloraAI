@@ -844,6 +844,41 @@ async def chat_completions(req: Request):
     client_host = req.client.host if req.client else "unknown"
     hub_logger.log("INFO", f"Inference request from {client_host} (messages: {len(messages)}, stream: {stream})")
 
+    # --- Automated Context Protection & Dynamic Pruning ---
+    # Prevents context exhaustion where prompt fills the entire n_ctx, which causes
+    # the model to cut off mid-sentence or return an empty response.
+    loaded_ctx = state.n_ctx if (state.n_ctx and state.n_ctx > 0) else 4096
+    effective_messages = list(messages)
+
+    def _estimate_tokens(msgs):
+        total_chars = 0
+        for m in msgs:
+            c = m.get("content", "")
+            if isinstance(c, str):
+                total_chars += len(c)
+            elif isinstance(c, list):
+                for part in c:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        total_chars += len(part.get("text", ""))
+        return int(total_chars / 2.6)
+
+    est_tokens = _estimate_tokens(effective_messages)
+    # Reserve at least 512 tokens for model generation budget
+    min_generation_budget = 512
+    max_prompt_budget = max(512, loaded_ctx - min_generation_budget)
+
+    if est_tokens > max_prompt_budget and len(effective_messages) > 3:
+        hub_logger.log("WARNING", f"Prompt length (~{est_tokens} tokens) exceeds budget ({max_prompt_budget}) for loaded context {loaded_ctx}. Auto-pruning older turns to guarantee room for reply.")
+        while len(effective_messages) > 3 and _estimate_tokens(effective_messages) > max_prompt_budget:
+            # Drop the oldest dialogue turn (index 1, preserving system prompt at index 0)
+            effective_messages.pop(1)
+        est_tokens = _estimate_tokens(effective_messages)
+        hub_logger.log("INFO", f"Auto-pruned conversation to {len(effective_messages)} messages (~{est_tokens} tokens).")
+
+    # Ensure max_tokens does not exceed the remaining headroom in n_ctx
+    headroom = max(128, loaded_ctx - est_tokens - 16)
+    safe_max_tokens = min(max_tokens, headroom)
+
     if LLAMA_AVAILABLE and state.llama_instance is not None:
         try:
             if stream:
@@ -852,9 +887,9 @@ async def chat_completions(req: Request):
                         generator = None
                         try:
                             generator = state.llama_instance.create_chat_completion(
-                                messages=messages,
+                                messages=effective_messages,
                                 temperature=temperature,
-                                max_tokens=max_tokens,
+                                max_tokens=safe_max_tokens,
                                 stream=True,
                                 stop=effective_stops,
                             )
@@ -888,9 +923,9 @@ async def chat_completions(req: Request):
             else:
                 with state.inference_lock:
                     resp = state.llama_instance.create_chat_completion(
-                        messages=messages,
+                        messages=effective_messages,
                         temperature=temperature,
-                        max_tokens=max_tokens,
+                        max_tokens=safe_max_tokens,
                         stream=False,
                         stop=effective_stops,
                     )

@@ -159,25 +159,24 @@ if !ERRORLEVEL! neq 0 (
 echo Checking dependencies...
 "%RUN_EXE%" %RUN_ARGS% -m pip install -r requirements.txt --prefer-binary >nul 2>&1
 
-:: Check and setup NVIDIA GPU CUDA 12 acceleration [llama-cpp-python >= 0.3.10 for modern Vision models like Qwen2.5-VL]
+:: Check and setup NVIDIA GPU CUDA 12 acceleration
 where nvidia-smi >nul 2>nul
 if !ERRORLEVEL! equ 0 (
-    echo NVIDIA GPU detected. Verifying GPU acceleration engine and vision support...
-    "%RUN_EXE%" %RUN_ARGS% -c "import sys, llama_cpp; from llama_cpp.llama_chat_format import Qwen25VLChatHandler; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 1)" >nul 2>&1
+    echo NVIDIA GPU detected. Verifying GPU acceleration engine...
+    "%RUN_EXE%" %RUN_ARGS% -c "import sys, llama_cpp; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 1)" >nul 2>&1
     if !ERRORLEVEL! neq 0 (
-        echo Configuring NVIDIA CUDA 12 runtime and modern inference engine - Qwen2.5-VL and Vision support...
+        echo Configuring NVIDIA CUDA 12 runtime and GPU inference engine...
         "%RUN_EXE%" %RUN_ARGS% -m pip install nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 --prefer-binary >nul 2>&1
-        echo Downloading pre-built CUDA 12.1 wheel for llama-cpp-python 0.3.10+...
-        "%RUN_EXE%" %RUN_ARGS% -m pip install --upgrade --force-reinstall "llama-cpp-python>=0.3.10" --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+        "%RUN_EXE%" %RUN_ARGS% -m pip install --upgrade llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121 >nul 2>&1
         "%RUN_EXE%" %RUN_ARGS% link_cuda.py
     ) else (
-        echo NVIDIA CUDA GPU engine is active and ready - modern Vision and Qwen2.5-VL supported.
+        echo NVIDIA CUDA GPU engine is active and ready.
     )
 ) else (
-    "%RUN_EXE%" %RUN_ARGS% -c "import sys, llama_cpp; from llama_cpp.llama_chat_format import Qwen25VLChatHandler" >nul 2>&1
+    "%RUN_EXE%" %RUN_ARGS% -c "from llama_cpp import Llama" >nul 2>&1
     if !ERRORLEVEL! neq 0 (
-        echo Installing CPU-optimized inference engine with modern Vision support...
-        "%RUN_EXE%" %RUN_ARGS% -m pip install --upgrade --force-reinstall "llama-cpp-python>=0.3.10" --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+        echo Installing CPU-optimized inference engine...
+        "%RUN_EXE%" %RUN_ARGS% -m pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
     )
 )
 
