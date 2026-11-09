@@ -233,6 +233,7 @@ class ServerState:
         self.download_lock = threading.Lock()
         self.download_task: Optional[Dict[str, Any]] = None
         self.cancel_download_flag: bool = False
+        self.inference_lock = threading.Lock()
 
 state = ServerState()
 
@@ -745,6 +746,7 @@ def list_openai_models():
 async def chat_completions(req: Request):
     """
     OpenAI-compatible chat completion endpoint supporting SSE streaming & Vision image_url.
+    Thread-safe with inference_lock and safe stream cancellation to protect CUDA execution.
     """
     body = await req.json()
     messages = body.get("messages", [])
@@ -753,6 +755,24 @@ async def chat_completions(req: Request):
     max_tokens = int(body.get("max_tokens", 2048))
     stop = body.get("stop", None)
 
+    # Standard stop tokens to prevent runaway generation across all architectures
+    DEFAULT_STOP_TOKENS = [
+        "USER:", "User:", "ASSISTANT:", "Assistant:", 
+        "\nUSER:", "\nUser:", "\n\nUSER:", "\n\nUser:",
+        "\nASSISTANT:", "\nAssistant:",
+        "<|im_end|>", "<|endoftext|>", "</s>", 
+        "<用户>", "<AI>", "<end_of_turn>", "<|eot_id|>"
+    ]
+    if isinstance(stop, list):
+        effective_stops = list(stop)
+        for s in DEFAULT_STOP_TOKENS:
+            if s not in effective_stops:
+                effective_stops.append(s)
+    elif isinstance(stop, str):
+        effective_stops = [stop] + [s for s in DEFAULT_STOP_TOKENS if s != stop]
+    else:
+        effective_stops = DEFAULT_STOP_TOKENS
+
     client_host = req.client.host if req.client else "unknown"
     hub_logger.log("INFO", f"Inference request from {client_host} (messages: {len(messages)}, stream: {stream})")
 
@@ -760,27 +780,44 @@ async def chat_completions(req: Request):
         try:
             if stream:
                 def sse_generator():
-                    generator = state.llama_instance.create_chat_completion(
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        stream=True,
-                        stop=stop,
-                    )
-                    for chunk in generator:
-                        yield f"data: {json.dumps(chunk)}\n\n"
-                    yield "data: [DONE]\n\n"
+                    with state.inference_lock:
+                        generator = None
+                        try:
+                            generator = state.llama_instance.create_chat_completion(
+                                messages=messages,
+                                temperature=temperature,
+                                max_tokens=max_tokens,
+                                stream=True,
+                                stop=effective_stops,
+                            )
+                            for chunk in generator:
+                                yield f"data: {json.dumps(chunk)}\n\n"
+                            yield "data: [DONE]\n\n"
+                        except (GeneratorExit, asyncio.CancelledError):
+                            hub_logger.log("INFO", "Client disconnected from SSE stream.")
+                            if generator is not None:
+                                try:
+                                    for _ in generator:
+                                        pass
+                                except Exception:
+                                    pass
+                            return
+                        except Exception as e:
+                            hub_logger.log("ERROR", f"Streaming error: {e}")
+                            yield f"data: {{\"error\": {json.dumps(str(e))}}}\n\n"
+                            yield "data: [DONE]\n\n"
 
                 return StreamingResponse(sse_generator(), media_type="text/event-stream")
             else:
-                resp = state.llama_instance.create_chat_completion(
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    stream=False,
-                    stop=stop,
-                )
-                return JSONResponse(resp)
+                with state.inference_lock:
+                    resp = state.llama_instance.create_chat_completion(
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stream=False,
+                        stop=effective_stops,
+                    )
+                    return JSONResponse(resp)
         except Exception as e:
             trace_str = traceback.format_exc()
             hub_logger.log("ERROR", f"Inference error: {e}\n{trace_str}")
@@ -1184,6 +1221,32 @@ def get_curated_vision_models():
     return {
         "catalog": [
             {
+                "id": "qwen2.5-vl-7b-abliterated",
+                "name": "Qwen 2.5 VL 7B Abliterated (Uncensored)",
+                "author": "mradermacher",
+                "description_en": "Fully uncensored multimodal model with refusal vector abliterated. Unrestricted visual analysis, OCR, and reasoning.",
+                "description_ru": "Полностью без цензуры (Abliterated). Вектор отказа вырезан из весов, свободный анализ любых изображений, документов и диалог.",
+                "vram_rec": "8 GB VRAM (RTX 4060 Ti)",
+                "repo_id": "mradermacher/Qwen2.5-VL-7B-Instruct-abliterated-GGUF",
+                "base_file": "Qwen2.5-VL-7B-Instruct-abliterated.Q4_K_M.gguf",
+                "base_size_gb": 4.8,
+                "mmproj_file": "Qwen2.5-VL-7B-Instruct-abliterated.mmproj-f16.gguf",
+                "mmproj_size_gb": 0.8,
+            },
+            {
+                "id": "llava-1.5-7b",
+                "name": "LLaVA 1.5 7B (Uncensored / Light)",
+                "author": "mys",
+                "description_en": "Classic LLaVA model on Vicuna base. Minimal censorship, natural roleplay, native llama.cpp support.",
+                "description_ru": "Классическая модель LLaVA 1.5 на базе Vicuna. Минимальная цензура, отлично слушается системных промптов, родная поддержка llama.cpp.",
+                "vram_rec": "6-8 GB VRAM",
+                "repo_id": "mys/ggml_llava-v1.5-7b",
+                "base_file": "ggml-model-q4_k.gguf",
+                "base_size_gb": 4.1,
+                "mmproj_file": "mmproj-model-f16.gguf",
+                "mmproj_size_gb": 0.6,
+            },
+            {
                 "id": "minicpm-v-2.6",
                 "name": "MiniCPM-V 2.6 (8B)",
                 "author": "openbmb",
@@ -1192,22 +1255,9 @@ def get_curated_vision_models():
                 "vram_rec": "8+ GB VRAM",
                 "repo_id": "openbmb/MiniCPM-V-2_6-gguf",
                 "base_file": "ggml-model-Q4_K_M.gguf",
-                "base_size_gb": 5.5,
+                "base_size_gb": 4.4,
                 "mmproj_file": "mmproj-model-f16.gguf",
-                "mmproj_size_gb": 0.6,
-            },
-            {
-                "id": "llava-1.5-7b",
-                "name": "LLaVA 1.5 (7B)",
-                "author": "mys",
-                "description_en": "Popular versatile vision model for general photo description and visual Q&A.",
-                "description_ru": "Популярная универсальная модель для описания фотографий и ответов на вопросы по изображениям.",
-                "vram_rec": "6-8 GB VRAM",
-                "repo_id": "mys/ggml_llava-v1.5-7b",
-                "base_file": "ggml-model-q4_k.gguf",
-                "base_size_gb": 4.1,
-                "mmproj_file": "mmproj-model-f16.gguf",
-                "mmproj_size_gb": 0.6,
+                "mmproj_size_gb": 0.97,
             },
             {
                 "id": "moondream2-1.8b",
@@ -1221,19 +1271,6 @@ def get_curated_vision_models():
                 "base_size_gb": 1.4,
                 "mmproj_file": "moondream2-mmproj-f16.gguf",
                 "mmproj_size_gb": 0.5,
-            },
-            {
-                "id": "qwen2-vl-7b",
-                "name": "Qwen2-VL (7B)",
-                "author": "Qwen",
-                "description_en": "Advanced visual reasoning model capable of analyzing high-resolution images and complex diagrams.",
-                "description_ru": "Продвинутая модель визуального рассуждения с поддержкой высокого разрешения и схем.",
-                "vram_rec": "8-12 GB VRAM",
-                "repo_id": "Qwen/Qwen2-VL-7B-Instruct-GGUF",
-                "base_file": "qwen2-vl-7b-instruct-q4_k_m.gguf",
-                "base_size_gb": 4.8,
-                "mmproj_file": "mmproj-Qwen2-VL-7B-Instruct-f16.gguf",
-                "mmproj_size_gb": 0.8,
             }
         ]
     }

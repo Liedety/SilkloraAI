@@ -1753,6 +1753,7 @@
 
         // Test Chat Functionality
         let chatMessages = [];
+        let activeChatAbortController = null;
         async function sendChatMessage() {
             const inp = document.getElementById("inpChatMsg");
             const btn = document.getElementById("btnChatSend");
@@ -1760,6 +1761,11 @@
             if (!text) return;
             inp.value = "";
             if (btn) btn.disabled = true;
+
+            if (activeChatAbortController) {
+                try { activeChatAbortController.abort(); } catch (e) {}
+            }
+            activeChatAbortController = new AbortController();
 
             chatMessages.push({ role: "user", content: text });
             appendChatMessage("user", text);
@@ -1770,10 +1776,12 @@
                 const res = await fetch("/v1/chat/completions", {
                     method: "POST",
                     headers: {"Content-Type": "application/json"},
+                    signal: activeChatAbortController.signal,
                     body: JSON.stringify({
                         messages: chatMessages,
                         stream: true,
                         max_tokens: 1024,
+                        stop: ["USER:", "User:", "\nUSER:", "\nUser:", "\n\nUSER:", "\n\nUser:", "ASSISTANT:", "Assistant:", "<|im_end|>", "<|endoftext|>", "</s>", "<用户>", "<AI>"]
                     })
                 });
 
@@ -1805,9 +1813,12 @@
                 }
                 chatMessages.push({ role: "assistant", content: fullText });
             } catch (e) {
-                assistantMsgEl.innerText = "Error: " + e.message;
+                if (e.name !== 'AbortError') {
+                    assistantMsgEl.innerText = "Error: " + e.message;
+                }
             } finally {
                 if (btn) btn.disabled = false;
+                activeChatAbortController = null;
             }
         }
 
@@ -1822,12 +1833,18 @@
         }
 
         function clearChat() {
+            if (activeChatAbortController) {
+                try { activeChatAbortController.abort(); } catch (e) {}
+                activeChatAbortController = null;
+            }
             chatMessages = [];
             document.getElementById("chatBox").innerHTML = `
                 <div class="chat-msg assistant">
                     ${i18n[currentLang].chatWelcomeMsg}
                 </div>
             `;
+            const btn = document.getElementById("btnChatSend");
+            if (btn) btn.disabled = false;
         }
 
         // Initialize on load
