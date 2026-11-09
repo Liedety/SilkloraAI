@@ -985,5 +985,25 @@ test('Multimodal Vision format: creates valid image_url payload structure', () =
   assert.strictEqual(userTurn.content[1].image_url?.url, photoBase64);
 });
 
+test('buildSystemPrompt: Russian language mode injects native prompt with character sovereignty', () => {
+  const speaker: Character = {
+    id: 'char-ru',
+    name: 'Алиса',
+    description: 'Боевая волшебница.',
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  const ruPrompt = buildSystemPrompt({
+    character: speaker,
+    language: 'ru',
+  });
+
+  assert.match(ruPrompt, /СТРОГИЙ СУВЕРЕНИТЕТ ПЕРСОНАЖА/, 'Must include strict Russian sovereignty directive');
+  assert.match(ruPrompt, /КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО говорить, действовать, мыслить или принимать решения за пользователя/, 'Must ban acting as user');
+  assert.match(ruPrompt, /Завершенность предложений и объем/, 'Must mandate complete sentences');
+});
+
+
 
 

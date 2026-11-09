@@ -814,8 +814,10 @@ async def chat_completions(req: Request):
     body = await req.json()
     messages = body.get("messages", [])
     stream = body.get("stream", False)
-    temperature = float(body.get("temperature", 0.8))
+    temperature = float(body.get("temperature", 0.7))
     max_tokens = int(body.get("max_tokens", 2048))
+    top_p = float(body.get("top_p", 0.9))
+    repeat_penalty = float(body.get("repeat_penalty", body.get("repetition_penalty", 1.12)))
     stop = body.get("stop", None)
 
     # Standard stop tokens to prevent runaway generation across all architectures.
@@ -845,8 +847,7 @@ async def chat_completions(req: Request):
     hub_logger.log("INFO", f"Inference request from {client_host} (messages: {len(messages)}, stream: {stream})")
 
     # --- Automated Context Protection & Dynamic Pruning ---
-    # Prevents context exhaustion where prompt fills the entire n_ctx, which causes
-    # the model to cut off mid-sentence or return an empty response.
+    # Guarantees a minimum generation budget so the model never runs out of tokens mid-sentence.
     loaded_ctx = state.n_ctx if (state.n_ctx and state.n_ctx > 0) else 4096
     effective_messages = list(messages)
 
@@ -863,20 +864,20 @@ async def chat_completions(req: Request):
         return int(total_chars / 2.6)
 
     est_tokens = _estimate_tokens(effective_messages)
-    # Reserve at least 512 tokens for model generation budget
-    min_generation_budget = 512
+    # Guarantee at least 768 tokens headroom so model completes full paragraphs
+    min_generation_budget = 768
     max_prompt_budget = max(512, loaded_ctx - min_generation_budget)
 
-    if est_tokens > max_prompt_budget and len(effective_messages) > 3:
-        hub_logger.log("WARNING", f"Prompt length (~{est_tokens} tokens) exceeds budget ({max_prompt_budget}) for loaded context {loaded_ctx}. Auto-pruning older turns to guarantee room for reply.")
-        while len(effective_messages) > 3 and _estimate_tokens(effective_messages) > max_prompt_budget:
+    if est_tokens > max_prompt_budget:
+        hub_logger.log("WARNING", f"Prompt length (~{est_tokens} tokens) exceeds budget ({max_prompt_budget}) for loaded context {loaded_ctx}. Auto-pruning older turns to guarantee {min_generation_budget} token headroom.")
+        while len(effective_messages) > 2 and _estimate_tokens(effective_messages) > max_prompt_budget:
             # Drop the oldest dialogue turn (index 1, preserving system prompt at index 0)
             effective_messages.pop(1)
         est_tokens = _estimate_tokens(effective_messages)
         hub_logger.log("INFO", f"Auto-pruned conversation to {len(effective_messages)} messages (~{est_tokens} tokens).")
 
-    # Ensure max_tokens does not exceed the remaining headroom in n_ctx
-    headroom = max(128, loaded_ctx - est_tokens - 16)
+    # Safe max_tokens: guarantee at least 512 tokens to finish sentences cleanly
+    headroom = max(512, loaded_ctx - est_tokens - 16)
     safe_max_tokens = min(max_tokens, headroom)
 
     if LLAMA_AVAILABLE and state.llama_instance is not None:
@@ -889,6 +890,8 @@ async def chat_completions(req: Request):
                             generator = state.llama_instance.create_chat_completion(
                                 messages=effective_messages,
                                 temperature=temperature,
+                                top_p=top_p,
+                                repeat_penalty=repeat_penalty,
                                 max_tokens=safe_max_tokens,
                                 stream=True,
                                 stop=effective_stops,
@@ -925,6 +928,8 @@ async def chat_completions(req: Request):
                     resp = state.llama_instance.create_chat_completion(
                         messages=effective_messages,
                         temperature=temperature,
+                        top_p=top_p,
+                        repeat_penalty=repeat_penalty,
                         max_tokens=safe_max_tokens,
                         stream=False,
                         stop=effective_stops,

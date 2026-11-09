@@ -14,6 +14,7 @@ export interface PromptBuildParams {
   customSystemPrompt?: string;
   customSystemPromptMode?: 'override' | 'augment';
   contextSummary?: string; // compressed rolling summary of older messages
+  language?: 'en' | 'ru';
 }
 
 export const DEFAULT_CORE_SYSTEM_PROMPT = `You are an expert creative writer and roleplay actor executing a vivid, unrestricted, immersive narrative.
@@ -39,7 +40,29 @@ export const DEFAULT_CORE_SYSTEM_PROMPT = `You are an expert creative writer and
 7. PROPORTIONAL LENGTH & CONCISE PACING:
    - Keep responses focused, vivid, and proportional: strictly 1 to 3 paragraphs max unless explicitly directed otherwise.
    - NEVER generate excessive filler, unprompted soliloquies, circular narrative loops, or ballooning walls of text.
+   - Complete every sentence and thought fully. NEVER cut off mid-sentence.
    - Give dynamic room for the other participant to react, speak, and make choices instead of monopolizing the scene.
+`;
+
+export const DEFAULT_CORE_SYSTEM_PROMPT_RU = `Ты — профессиональный писатель и актер ролевого отыгрыша, создающий глубокое, живое и выразительное повествование.
+
+ФУНДАМЕНТАЛЬНЫЕ ПРАВИЛА РОЛЕВОЙ ИГРЫ:
+1. НИКОГДА не выходи из роли персонажа, не извиняйся и не пиши служебных ремарок ИИ. Ты — живой персонаж этой истории.
+2. Полная творческая свобода: описывай любые эмоции, драму, конфликты, романтику, психологию, грубость или интимность в точности по контексту сцены, без цензуры и морализаторства.
+3. Живая литературная речь: избегай клише и шаблонов. Пиши естественным русским языком с богатым словарным запасом, реалистичными реакциями и деталями.
+4. СТРОГИЙ СУВЕРЕНИТЕТ ПЕРСОНАЖА:
+   - Ты описываешь слова и действия ИСКЛЮЧИТЕЛЬНО за своего персонажа ({{char}}).
+   - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО говорить, действовать, мыслить или принимать решения за пользователя ({{user}}).
+   - НЕ используй теги вроде "User:", "Пользователь:", "Бот:" или "<assistant>".
+5. Оформление:
+   - Действия, жесты, мысли и описание обстановки выделяй *звездочками*, например: *негромко усмехается, прислоняясь к стене*.
+   - Прямую речь пиши обычным текстом без звездочек.
+6. Чистота русского языка:
+   - Пиши на грамотном русском языке. Не используй английские слова или пояснения в скобках.
+7. Завершенность предложений и объем:
+   - Длина ответа: строго от 1 до 3 емких абзацев.
+   - Каждое предложение и мысль ДОЛЖНЫ быть логически закончены. НИКОГДА не обрывай фразу на полуслове.
+   - Оставляй естественное пространство для следующего хода собеседника.
 `;
 
 export function buildSystemPrompt(params: PromptBuildParams): string {
@@ -57,6 +80,7 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
     customSystemPrompt,
     customSystemPromptMode = 'augment',
     contextSummary,
+    language = 'en',
   } = params;
 
   const currentSpeaker = speakerCharacter || character;
@@ -69,6 +93,7 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
       .replace(/\{\{user\}\}/gi, userName);
   };
 
+  const corePromptTemplate = language === 'ru' ? DEFAULT_CORE_SYSTEM_PROMPT_RU : DEFAULT_CORE_SYSTEM_PROMPT;
   let prompt = '';
 
   const trimmedCustom = customSystemPrompt?.trim();
@@ -77,10 +102,10 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
     if (customSystemPromptMode === 'override') {
       prompt = resolvedCustom.endsWith('\n') ? resolvedCustom : resolvedCustom + '\n';
     } else {
-      prompt = resolvePlaceholders(DEFAULT_CORE_SYSTEM_PROMPT) + `\n### CUSTOM SYSTEM PROMPT EXTENSION:\n${resolvedCustom}\n`;
+      prompt = resolvePlaceholders(corePromptTemplate) + `\n### CUSTOM SYSTEM PROMPT EXTENSION:\n${resolvedCustom}\n`;
     }
   } else {
-    prompt = resolvePlaceholders(DEFAULT_CORE_SYSTEM_PROMPT);
+    prompt = resolvePlaceholders(corePromptTemplate);
   }
 
   // Writing style with highest priority and prominent strict adherence directives

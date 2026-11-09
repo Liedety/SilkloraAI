@@ -159,19 +159,11 @@ if !ERRORLEVEL! neq 0 (
 echo Checking dependencies...
 "%RUN_EXE%" %RUN_ARGS% -m pip install -r requirements.txt --prefer-binary >nul 2>&1
 
-:: Check and setup NVIDIA GPU CUDA 12 acceleration
+:: Check and setup NVIDIA GPU CUDA 12 acceleration and modern engine
 where nvidia-smi >nul 2>nul
 if !ERRORLEVEL! equ 0 (
-    echo NVIDIA GPU detected. Verifying GPU acceleration engine...
-    "%RUN_EXE%" %RUN_ARGS% -c "import sys, llama_cpp; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 1)" >nul 2>&1
-    if !ERRORLEVEL! neq 0 (
-        echo Configuring NVIDIA CUDA 12 runtime and GPU inference engine...
-        "%RUN_EXE%" %RUN_ARGS% -m pip install nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 --prefer-binary >nul 2>&1
-        "%RUN_EXE%" %RUN_ARGS% -m pip install --upgrade llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121 >nul 2>&1
-        "%RUN_EXE%" %RUN_ARGS% link_cuda.py
-    ) else (
-        echo NVIDIA CUDA GPU engine is active and ready.
-    )
+    echo NVIDIA GPU detected. Verifying inference engine and CUDA 12 acceleration...
+    "%RUN_EXE%" %RUN_ARGS% ensure_engine.py
 ) else (
     "%RUN_EXE%" %RUN_ARGS% -c "from llama_cpp import Llama" >nul 2>&1
     if !ERRORLEVEL! neq 0 (

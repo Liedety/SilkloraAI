@@ -988,17 +988,31 @@ Eliminate trivial chatter and keep it strictly bounded. Output ONLY the concise 
         : `Dialogue to summarize into concise context recap:\n${turns}`);
 
   let out = '';
-  await streamChatCompletion({
-    apiKeyConfig,
-    model: model || 'deepseek/deepseek-chat',
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: userContent },
-    ],
-    temperature: 0.35,
-    onToken: (t) => { out += t; },
-    onError: (e) => { throw e; },
-  });
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => timeoutController.abort(), 20000);
+  try {
+    await streamChatCompletion({
+      apiKeyConfig,
+      model: model || 'deepseek/deepseek-chat',
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: userContent },
+      ],
+      temperature: 0.35,
+      maxTokens: 384,
+      signal: timeoutController.signal,
+      onToken: (t) => { out += t; },
+      onError: (e) => { throw e; },
+    });
+  } catch (err) {
+    if (timeoutController.signal.aborted) {
+      console.warn('Chat history compression timed out after 20s');
+    } else {
+      throw err;
+    }
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   let summary = out.trim();
   if (summary.length > 1200) {

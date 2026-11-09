@@ -561,6 +561,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         customSystemPrompt: freshSettings?.customSystemPrompt,
         customSystemPromptMode: freshSettings?.customSystemPromptMode,
         contextSummary: contextSummary || undefined,
+        language: dialogueLang,
       });
 
       if (guidancePrompt && guidancePrompt.trim()) {
@@ -661,6 +662,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
         apiKeyConfig: effectiveApiKey,
         model: effectiveModel,
         messages: apiMessages,
+        temperature: isLocal ? 0.7 : 0.85,
+        maxTokens: 1024,
         signal: abortController.signal,
         onToken: (tok) => {
           fullGenerated += tok;
