@@ -827,6 +827,8 @@ async def chat_completions(req: Request):
         "USER:", "User:", "ASSISTANT:", "Assistant:",
         "\nUSER:", "\nUser:", "\n\nUSER:", "\n\nUser:",
         "\nASSISTANT:", "\nAssistant:",
+        "\nПользователь:", "\nпользователь:", "\n\nПользователь:",
+        "\nИгрок:", "\nигрок:", "\nВы:",
         "<用户>", "<AI>", "<end_of_turn>", "<|eot_id|>"
     ]
     if isinstance(stop, list):

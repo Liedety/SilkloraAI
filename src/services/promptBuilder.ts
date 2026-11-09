@@ -242,7 +242,8 @@ FINAL STYLE CHECK: Ensure every sentence and paragraph strictly complies with "$
   prompt += `\n### ABSOLUTE RESPONSE LENGTH & PACING DIRECTIVE:
 - Keep your response focused, vivid, and proportional: strictly 1 to 3 paragraphs max unless explicitly directed otherwise.
 - Under NO circumstances should you generate excessive filler, unprompted soliloquies, or ballooning walls of text.
-- Advance the scene with punchy, evocative actions and dialogue, leaving natural openings for the user to respond.\n`;
+- Advance the scene with punchy, evocative actions and dialogue, leaving natural openings for the user to respond.
+- STRICT ROLEPLAY ANCHOR: You are roleplaying SOLELY as ${speakerName}. NEVER write actions, dialogue, thoughts, or reactions for ${userName} or any other character. Only depict ${speakerName}'s direct actions, words, and demeanor.\n`;
 
   // Emotion sprite reminder at the very end of the prompt for maximum recency compliance
   if (currentSpeaker?.emotions && currentSpeaker.emotions.length > 0) {
