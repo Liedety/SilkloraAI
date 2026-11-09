@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 SilkloraAI - Automated Inference Engine & CUDA 12 Installer
-Ensures llama-cpp-python v0.3.16+ with CUDA 12 acceleration and Qwen2.5-VL architecture support.
+Ensures llama-cpp-python v0.3.16+ with CUDA 12 acceleration and native Ada Lovelace (RTX 4060 Ti) support,
+compiled with MSVC to prevent Windows Error 0xc000001d (STATUS_ILLEGAL_INSTRUCTION).
 """
 
 import os
@@ -42,7 +43,7 @@ def verify_in_fresh_process():
             sys.executable, "-c",
             "import llama_cpp; v=getattr(llama_cpp, '__version__', 'unknown'); g=bool(llama_cpp.llama_supports_gpu_offload()); print(f'{v}|{g}'); sys.exit(0 if g else 1)"
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=12)
         if proc.returncode == 0 and "|" in proc.stdout:
             v_str, g_str = proc.stdout.strip().split("|", 1)
             return v_str.strip(), g_str.strip() == "True"
@@ -53,9 +54,16 @@ def verify_in_fresh_process():
 def is_engine_satisfactory(ver_str, has_gpu):
     if not ver_str or not has_gpu:
         return False
+
+    # Detect the incompatible GCC/AVX-512 wheel from AIencoder that throws 0xc000001d
+    if "+cu124" in ver_str:
+        print("[Notice] Incompatible +cu124 wheel detected (causes 0xc000001d illegal instruction). Replacing with native MSVC wheel...")
+        return False
+
     # Need at least 0.3.16 for Qwen2.5-VL and modern vision architecture
     parts = []
-    for x in ver_str.split(".")[:3]:
+    clean_ver = ver_str.split("+")[0]
+    for x in clean_ver.split(".")[:3]:
         num = "".join(ch for ch in x if ch.isdigit())
         if num:
             parts.append(int(num))
@@ -73,6 +81,27 @@ def is_engine_satisfactory(ver_str, has_gpu):
         if parts[1] == 3 and parts[2] >= 16:
             return True
     return False
+
+def get_target_wheel_url():
+    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    arch = "sm89.ada"
+    tag_arch = "sm89"
+
+    try:
+        smi = subprocess.run(["nvidia-smi", "--query-gpu=gpu_name", "--format=csv,noheader"], capture_output=True, text=True)
+        name = smi.stdout.lower()
+        if "30" in name or "a2000" in name or "a4000" in name or "a5000" in name or "a6000" in name:
+            arch = "sm86.ampere"
+            tag_arch = "sm86"
+        elif "20" in name or "1660" in name or "1650" in name or "t4" in name:
+            arch = "sm75.turing"
+            tag_arch = "sm75"
+    except Exception:
+        pass
+
+    # dougeeai release url: MSVC compiled for Windows (AVX2, zero 0xc000001d crashes)
+    url = f"https://github.com/dougeeai/llama-cpp-python-wheels/releases/download/v0.3.16-cuda12.1-{tag_arch}-{py_tag}/llama_cpp_python-0.3.16%2Bcuda12.1.{arch}-{py_tag}-{py_tag}-win_amd64.whl"
+    return url
 
 def link_cuda_dlls():
     py_dir = Path(sys.executable).parent
@@ -150,16 +179,19 @@ def main():
     print("Step 1/3: Ensuring NVIDIA CUDA 12 runtime packages...")
     run_pip(["install", "nvidia-cuda-runtime-cu12", "nvidia-cublas-cu12", "--prefer-binary"])
 
-    # 2. Select appropriate pre-compiled CUDA 12.4 wheel
+    # 2. Select native Ada Lovelace (RTX 4060 Ti) MSVC wheel
+    wheel_url = get_target_wheel_url()
     py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
-    wheel_url = f"https://huggingface.co/datasets/AIencoder/llama-cpp-wheels/resolve/main/windows/x86_64/cuda12.4/0.3.16/llama_cpp_python-0.3.16%2Bcu124-{py_tag}-{py_tag}-win_amd64.whl"
 
-    print(f"Step 2/3: Installing pre-compiled CUDA wheel for {py_tag}...")
-    print(f"Source: Hugging Face AIencoder/llama-cpp-wheels (v0.3.16)")
+    print(f"Step 2/3: Installing pre-compiled MSVC CUDA wheel for {py_tag}...")
+    print(f"Target URL: {wheel_url}")
+
+    # Uninstall existing incompatible build first to prevent file conflicts
+    run_pip(["uninstall", "-y", "llama-cpp-python"])
     res = run_pip(["install", "--upgrade", "--no-cache-dir", wheel_url])
 
     if res.returncode != 0:
-        print("[Notice] Direct wheel install returned non-zero code. Trying pip index fallback...")
+        print("[Notice] Primary wheel install returned non-zero code. Trying fallback...")
         run_pip(["install", "--upgrade", "llama-cpp-python", "--prefer-binary", "--extra-index-url", "https://abetlen.github.io/llama-cpp-python/whl/cu121"])
 
     # 3. Link CUDA runtime DLLs
