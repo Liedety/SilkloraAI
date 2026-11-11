@@ -94,6 +94,47 @@ export async function pingLocalServer(rawUrl: string): Promise<{
   }
 }
 
+export interface LocalContextInfo {
+  nCtx: number;
+  recommendedPromptTokens: number;
+  modelLoaded: boolean;
+}
+
+const localContextCache: { url: string; at: number; info: LocalContextInfo | null } = { url: '', at: 0, info: null };
+
+/** Reads the loaded context size from the local hub so the chat can budget its prompt. */
+export async function fetchLocalContextInfo(baseUrl: string, maxAgeMs = 15000): Promise<LocalContextInfo | null> {
+  const url = normalizeLocalServerUrl(baseUrl);
+  if (localContextCache.url === url && Date.now() - localContextCache.at < maxAgeMs) {
+    return localContextCache.info;
+  }
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 3000);
+  let info: LocalContextInfo | null = null;
+  try {
+    const res = await fetch(`${url}/models`, { headers: { Accept: 'application/json' }, signal: controller.signal });
+    if (res.ok) {
+      const data = await res.json();
+      const entry = Array.isArray(data?.data) ? data.data[0] : null;
+      if (entry && Number(entry.context_length) > 0) {
+        info = {
+          nCtx: Number(entry.context_length),
+          recommendedPromptTokens: Number(entry.recommended_prompt_tokens) || 0,
+          modelLoaded: entry.loaded !== false,
+        };
+      }
+    }
+  } catch {
+    info = null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+  localContextCache.url = url;
+  localContextCache.at = Date.now();
+  localContextCache.info = info;
+  return info;
+}
+
 export function getEffectiveAiConfig(
   settings?: AppSettings,
   activeApiKey?: ApiKeyConfig
@@ -954,12 +995,23 @@ Keep it natural, evocative, and strictly in character. Output ONLY the resulting
   return out.trim();
 }
 
+export interface CompressOptions {
+  maxChars?: number;
+  maxTokens?: number;
+  timeoutMs?: number;
+}
+
 export async function compressChatHistory(
   apiKeyConfig: ApiKeyConfig,
   model: string,
   messagesToCompress: Array<{ senderName: string; text: string }>,
-  previousSummary?: string
+  previousSummary?: string,
+  options: CompressOptions = {}
 ): Promise<string> {
+  const maxChars = options.maxChars ?? 1200;
+  const maxTokens = options.maxTokens ?? 384;
+  const timeoutMs = options.timeoutMs ?? 20000;
+  const wordLimit = Math.round(maxChars / 7.5);
   const turns = messagesToCompress
     .filter((m) => m.text && m.text.trim().length > 0)
     .map((m) => `${m.senderName}: ${m.text.trim()}`)
@@ -971,11 +1023,11 @@ export async function compressChatHistory(
 
   const system = isRu
     ? `Ты — литературный архивариус и летописец ролевой истории.
-Твоя задача: составить предельно краткий, емкий и компактный пересказ (строго 1-2 коротких абзаца, не более 150-200 слов) предшествующих событий сюжета.
+Твоя задача: составить предельно краткий, емкий и компактный пересказ (строго 1-3 коротких абзаца, не более ${wordLimit} слов) предшествующих событий сюжета.
 Отрази ключевые решения, действия, смену отношений, тайны и факты, необходимые для сохранения контекста в долгих диалогах.
 НЕ растягивай текст и не включай мелкую болтовню. Пиши на чистом русском языке без мета-вступлений. Выводи ТОЛЬКО сжатый пересказ.`
     : `You are an expert narrative chronicler for a roleplay story.
-Your task: produce a strictly concise, compact summary (strictly 1-2 short paragraphs, max 150-200 words) of earlier dialogue turns and story developments.
+Your task: produce a strictly concise, compact summary (strictly 1-3 short paragraphs, max ${wordLimit} words) of earlier dialogue turns and story developments.
 Highlight pivotal plot events, character decisions, secrets revealed, and relationship shifts needed to preserve long-term context.
 Eliminate trivial chatter and keep it strictly bounded. Output ONLY the concise narrative recap with no meta introductions.`;
 
@@ -989,7 +1041,7 @@ Eliminate trivial chatter and keep it strictly bounded. Output ONLY the concise 
 
   let out = '';
   const timeoutController = new AbortController();
-  const timeoutId = setTimeout(() => timeoutController.abort(), 20000);
+  const timeoutId = setTimeout(() => timeoutController.abort(), timeoutMs);
   try {
     await streamChatCompletion({
       apiKeyConfig,
@@ -999,14 +1051,14 @@ Eliminate trivial chatter and keep it strictly bounded. Output ONLY the concise 
         { role: 'user', content: userContent },
       ],
       temperature: 0.35,
-      maxTokens: 384,
+      maxTokens,
       signal: timeoutController.signal,
       onToken: (t) => { out += t; },
       onError: (e) => { throw e; },
     });
   } catch (err) {
     if (timeoutController.signal.aborted) {
-      console.warn('Chat history compression timed out after 20s');
+      console.warn(`Chat history compression timed out after ${Math.round(timeoutMs / 1000)}s`);
     } else {
       throw err;
     }
@@ -1015,8 +1067,8 @@ Eliminate trivial chatter and keep it strictly bounded. Output ONLY the concise 
   }
 
   let summary = out.trim();
-  if (summary.length > 1200) {
-    summary = summary.slice(0, 1200).trim() + '...';
+  if (summary.length > maxChars) {
+    summary = summary.slice(0, maxChars).trim() + '...';
   }
   return summary;
 }

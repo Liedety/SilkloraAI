@@ -8,6 +8,7 @@ import {
 } from '../src/services/ai.ts';
 import { buildSystemPrompt, DEFAULT_CORE_SYSTEM_PROMPT } from '../src/services/promptBuilder.ts';
 import { translations } from '../src/i18n/index.ts';
+import { estimateTokens, planDialogueWindow, planCompression, summaryLimits } from '../src/services/contextBudget.ts';
 import { normalizeLabel, calculateNodeScore, findDuplicateNodes, selectNodesToPrune, isSignificantTurn } from '../src/services/memoryGraph.ts';
 import { getLocalizedTextStyle, DEFAULT_STYLES, DEFAULT_THEME, APP_THEMES } from '../src/db/index.ts';
 import type { Character, Group, MemoryNode, MemoryEdge, TextStylePreset, AppSettings, ApiKeyConfig } from '../src/types/index.ts';
@@ -1007,3 +1008,65 @@ test('buildSystemPrompt: Russian language mode injects native prompt with charac
 
 
 
+
+test('contextBudget: estimateTokens weighs Cyrillic heavier than Latin', () => {
+  assert.ok(estimateTokens('привет мир привет мир') > estimateTokens('hello world hello world'));
+  assert.strictEqual(estimateTokens(''), 0);
+});
+
+test('contextBudget: window keeps newest turns within the token budget', () => {
+  const tokens = new Array(30).fill(100);
+  const plan = planDialogueWindow(tokens, 0, 1000, 40);
+  assert.strictEqual(plan.verbatimFrom, 20);
+  assert.strictEqual(plan.gapFrom, 0);
+});
+
+test('contextBudget: window honors the verbatim message cap', () => {
+  const plan = planDialogueWindow(new Array(30).fill(10), 0, 100000, 8);
+  assert.strictEqual(plan.verbatimFrom, 22);
+});
+
+test('contextBudget: always keeps the latest message even when it exceeds the budget', () => {
+  const plan = planDialogueWindow([50, 50, 5000], 0, 300, 40);
+  assert.strictEqual(plan.verbatimFrom, 2);
+});
+
+test('contextBudget: verbatim zone never overlaps the summarized zone', () => {
+  const tokens = new Array(20).fill(10);
+  const plan = planDialogueWindow(tokens, 15, 100000, 40);
+  assert.strictEqual(plan.verbatimFrom, 15);
+  assert.strictEqual(plan.gapFrom, 15);
+});
+
+test('contextBudget: messages between summary and window are reported as a gap', () => {
+  const tokens = new Array(20).fill(100);
+  const plan = planDialogueWindow(tokens, 4, 500, 40);
+  assert.strictEqual(plan.verbatimFrom, 15);
+  assert.strictEqual(plan.gapFrom, 4);
+});
+
+test('contextBudget: unknown summary coverage produces no gap', () => {
+  const plan = planDialogueWindow(new Array(20).fill(100), -1, 500, 40);
+  assert.strictEqual(plan.gapFrom, plan.verbatimFrom);
+});
+
+test('contextBudget: compression waits until the window is nearly full', () => {
+  assert.strictEqual(planCompression(new Array(10).fill(100), 0, 4000, 40), null);
+});
+
+test('contextBudget: compression batches older turns and leaves about half the budget verbatim', () => {
+  const tokens = new Array(30).fill(100);
+  const end = planCompression(tokens, 0, 2000, 40);
+  assert.ok(end !== null);
+  assert.strictEqual(end, 20);
+});
+
+test('contextBudget: compression triggers on message count for small caps', () => {
+  const end = planCompression(new Array(12).fill(10), 0, 100000, 8);
+  assert.ok(end !== null && end > 0 && end < 12);
+});
+
+test('contextBudget: summary limits scale with the prompt budget', () => {
+  assert.ok(summaryLimits(8000).maxChars > summaryLimits(1500).maxChars);
+  assert.ok(summaryLimits(100000).maxChars <= 3200);
+});

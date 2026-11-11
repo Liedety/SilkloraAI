@@ -37,11 +37,19 @@ import {
   suggestUserReply,
   summarizeScene,
   compressChatHistory,
+  fetchLocalContextInfo,
   cleanArtifacts,
   extractEmotionAndCleanResponse,
   getEffectiveAiConfig,
 } from '../services/ai';
 import { buildSystemPrompt } from '../services/promptBuilder';
+import {
+  estimateTokens,
+  PER_MESSAGE_TOKENS,
+  planDialogueWindow,
+  planCompression,
+  summaryLimits,
+} from '../services/contextBudget';
 import { extractMemoryAndAffinity } from '../services/memoryGraph';
 import { ChatSettingsModal } from './ChatSettingsModal';
 import { AvatarImage } from '../components/AvatarImage';
@@ -51,6 +59,24 @@ interface ChatViewProps {
   targetId: string;
   language: Language;
   onBack: () => void;
+}
+
+// Prompt budgets in tokens. Local models take their budget from the hub; cloud models use a fixed target.
+const CLOUD_PROMPT_TARGET = 6000;
+const CLOUD_MAX_VERBATIM = 8;
+const LOCAL_FALLBACK_PROMPT_TARGET = 3072;
+const LOCAL_MAX_VERBATIM = 40;
+const SYNOPSIS_ALLOWANCE = 200;
+
+// Strips hidden thoughts and emotion tags so past turns do not inflate the prompt or trigger ballooning replies
+function cleanHistoryText(text: string): string {
+  return (text || '')
+    .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+    .replace(/<thought>[\s\S]*$/gi, '')
+    .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
+    .replace(/<\s*emotion[:\s][^>]+>/gi, '')
+    .replace(/(?:\[|<|\()(?:эмоция|emotion):\s*[^\]>\)]+(?:\]|>|\))/gi, '')
+    .trim();
 }
 
 export const ChatView: React.FC<ChatViewProps> = ({
@@ -169,6 +195,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [streamingThought, setStreamingThought] = useState<string>('');
   const [streamingEmotion, setStreamingEmotion] = useState<string | null>(null);
   const [streamingSender, setStreamingSender] = useState<Character | null>(null);
+  const compressionRunningRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -519,35 +546,33 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const dialogueLang: 'en' | 'ru' = /[а-яА-ЯёЁ]/.test(lastUserText) ? 'ru' : (/[a-zA-Z]/.test(lastUserText) ? 'en' : language);
       const textStyleToUse = rawStyle ? getLocalizedTextStyle(rawStyle, dialogueLang) : undefined;
 
-      // Prepare context compression summary for older messages (read fresh from DB)
+      // Token-budgeted context: rolling summary + gap synopsis + newest turns word for word
       const freshChat = await db.chats.get(session.id);
-      let contextSummary = freshChat?.rollingSummary?.trim() || session.rollingSummary?.trim() || '';
+      const storedSummary = freshChat?.rollingSummary?.trim() || session.rollingSummary?.trim() || '';
+      const lastSummarizedId = freshChat?.lastSummarizedMsgId || session.lastSummarizedMsgId;
 
-      // Keep recent dialogue turns verbatim (6 turns when rolling summary is present, 8 when not) to prevent context ballooning and slow generations
-      const RECENT_DIALOGUE_TURNS = contextSummary ? 6 : 8;
-      let olderMsgs: ChatMessage[] = [];
-      let contextMsgs = msgsForContext;
-
-      if (msgsForContext.length > RECENT_DIALOGUE_TURNS) {
-        olderMsgs = msgsForContext.slice(0, -RECENT_DIALOGUE_TURNS);
-        contextMsgs = msgsForContext.slice(-RECENT_DIALOGUE_TURNS);
+      let promptTarget = CLOUD_PROMPT_TARGET;
+      let maxVerbatim = CLOUD_MAX_VERBATIM;
+      if (isLocal && effectiveApiKey?.baseUrl) {
+        const localInfo = await fetchLocalContextInfo(effectiveApiKey.baseUrl);
+        promptTarget = localInfo
+          ? localInfo.recommendedPromptTokens || Math.max(1024, localInfo.nCtx - 1280)
+          : LOCAL_FALLBACK_PROMPT_TARGET;
+        maxVerbatim = LOCAL_MAX_VERBATIM;
       }
 
-      if (!contextSummary && olderMsgs.length > 0) {
-        const synopsis = olderMsgs
-          .slice(-6)
-          .map((m) => {
-            const v = m.variants[m.activeVariantIndex]?.text?.trim() || '';
-            const cleaned = v.replace(/<thought>[\s\S]*?<\/thought>/gi, '').trim();
-            return `${m.senderName}: ${cleaned.length > 80 ? cleaned.slice(0, 80) + '...' : cleaned}`;
-          })
-          .join('\n');
-        contextSummary = (dialogueLang === 'ru' ? 'Предыдущие события диалога:\n' : 'Earlier dialogue events:\n') + synopsis;
+      const historyTokens = msgsForContext.map((m) => {
+        const text = cleanHistoryText(m.variants[m.activeVariantIndex]?.text || '');
+        return text ? estimateTokens(text) + PER_MESSAGE_TOKENS : 0;
+      });
+      let summarizedCount = 0;
+      if (lastSummarizedId) {
+        const idx = msgsForContext.findIndex((m) => m.id === lastSummarizedId);
+        summarizedCount = idx !== -1 ? idx + 1 : (storedSummary ? -1 : 0);
       }
 
-      // Build system prompt
       const groupMembers = type === 'group' ? allCharacters.filter((c) => group?.characterIds.includes(c.id)) : [];
-      let systemPrompt = buildSystemPrompt({
+      const makeSystemPrompt = (summaryText: string) => buildSystemPrompt({
         character: speaker,
         group: group || undefined,
         groupCharacters: groupMembers,
@@ -560,9 +585,30 @@ export const ChatView: React.FC<ChatViewProps> = ({
         speakerCharacter: speaker,
         customSystemPrompt: freshSettings?.customSystemPrompt,
         customSystemPromptMode: freshSettings?.customSystemPromptMode,
-        contextSummary: contextSummary || undefined,
+        contextSummary: summaryText || undefined,
         language: dialogueLang,
       });
+
+      let systemPrompt = makeSystemPrompt(storedSummary);
+      const dialogueBudget = Math.max(600, promptTarget - estimateTokens(systemPrompt) - SYNOPSIS_ALLOWANCE);
+      const windowPlan = planDialogueWindow(historyTokens, summarizedCount, dialogueBudget, maxVerbatim);
+      const contextMsgs = msgsForContext.slice(windowPlan.verbatimFrom);
+
+      // Messages that are neither summarized nor verbatim get a short synopsis until the next compression
+      const gapMsgs = msgsForContext.slice(windowPlan.gapFrom, windowPlan.verbatimFrom).filter((m) => m.variants[m.activeVariantIndex]?.text?.trim());
+      let contextSummary = storedSummary;
+      if (gapMsgs.length > 0) {
+        const synopsis = gapMsgs
+          .slice(-8)
+          .map((m) => {
+            const cleaned = cleanHistoryText(m.variants[m.activeVariantIndex]?.text || '');
+            return `${m.senderName}: ${cleaned.length > 80 ? cleaned.slice(0, 80) + '...' : cleaned}`;
+          })
+          .join('\n');
+        const header = dialogueLang === 'ru' ? 'Недавние события диалога:\n' : 'Recent dialogue events:\n';
+        contextSummary = (storedSummary ? storedSummary + '\n\n' : '') + header + synopsis;
+        systemPrompt = makeSystemPrompt(contextSummary);
+      }
 
       if (guidancePrompt && guidancePrompt.trim()) {
         systemPrompt += `\n### USER GUIDED GENERATION INSTRUCTION FOR THIS TURN:\n${guidancePrompt.trim()}\n`;
@@ -581,13 +627,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         const role: 'user' | 'assistant' = isMe ? 'assistant' : 'user';
 
         // Strip any hidden <thought> tags and leaked emotion tags from history so past turns do not inflate prompt tokens or trigger ballooning responses
-        let textContent = activeVariant.text
-          .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
-          .replace(/<thought>[\s\S]*$/gi, '')
-          .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
-          .replace(/<\s*emotion[:\s][^>]+>/gi, '')
-          .replace(/(?:\[|<|\()(?:эмоция|emotion):\s*[^\]>\)]+(?:\]|>|\))/gi, '')
-          .trim();
+        let textContent = cleanHistoryText(activeVariant.text);
         if (type === 'group' && !isMe) {
           textContent = `[${msg.senderName}]: ${textContent}`;
         }
@@ -770,48 +810,60 @@ export const ChatView: React.FC<ChatViewProps> = ({
               console.warn('Background memory extraction error:', err);
             });
 
-            // Run automated context compression in background if conversation exceeds recent window
-            const COMPRESSION_THRESHOLD = 8;
-            if (freshHistory.length > COMPRESSION_THRESHOLD && (effectiveApiKey?.key || isLocal)) {
-              const older = freshHistory.slice(0, -COMPRESSION_THRESHOLD);
-              const lastOlder = older[older.length - 1];
+            // Fold older turns into the rolling summary in batches so that no turn is left uncovered
+            if ((effectiveApiKey?.key || isLocal) && !compressionRunningRef.current) {
               const latestChat = await db.chats.get(session.id);
-              if (lastOlder && latestChat?.lastSummarizedMsgId !== lastOlder.id) {
-                let newTurnsToSummarize = older;
-                let prevSummaryToPass = latestChat?.rollingSummary;
-                if (latestChat?.lastSummarizedMsgId) {
-                  const lastIdx = older.findIndex((m) => m.id === latestChat.lastSummarizedMsgId);
-                  if (lastIdx !== -1) {
-                    newTurnsToSummarize = older.slice(lastIdx + 1);
-                  } else {
-                    prevSummaryToPass = undefined;
-                  }
+              const histTokens = freshHistory.map((m) => {
+                const text = cleanHistoryText(m.variants[m.activeVariantIndex]?.text || '');
+                return text ? estimateTokens(text) + PER_MESSAGE_TOKENS : 0;
+              });
+              let covered = 0;
+              let prevSummary = latestChat?.rollingSummary;
+              if (latestChat?.lastSummarizedMsgId) {
+                const idx = freshHistory.findIndex((m) => m.id === latestChat.lastSummarizedMsgId);
+                if (idx !== -1) {
+                  covered = idx + 1;
+                } else {
+                  prevSummary = undefined;
                 }
+              }
 
-                if (newTurnsToSummarize.length > 0) {
-                  const toSummarize = newTurnsToSummarize.map((m) => {
-                    const t = m.variants[m.activeVariantIndex]?.text || '';
-                    return {
-                      senderName: m.senderName,
-                      text: t.replace(/<thought>[\s\S]*?<\/thought>/gi, '').trim(),
-                    };
-                  });
-                  compressChatHistory(
-                    effectiveApiKey,
-                    effectiveModel,
-                    toSummarize,
-                    prevSummaryToPass
-                  ).then(async (summary) => {
-                    if (summary && summary.trim()) {
-                      await db.chats.update(session.id, {
-                        rollingSummary: summary.trim(),
-                        lastSummarizedMsgId: lastOlder.id,
-                      });
-                    }
-                  }).catch((err) => {
-                    console.warn('Background compression error:', err);
-                  });
+              const end = planCompression(histTokens, covered, dialogueBudget, maxVerbatim);
+              if (end !== null) {
+                // Keep the summarization request itself inside the model context
+                const inputBudget = Math.round(promptTarget * 0.6);
+                let stop = covered;
+                let used = 0;
+                while (stop < end && (stop === covered || used + histTokens[stop] <= inputBudget)) {
+                  used += histTokens[stop];
+                  stop++;
                 }
+                const batch = freshHistory.slice(covered, stop);
+                const lastCovered = batch[batch.length - 1];
+                const toSummarize = batch.map((m) => ({
+                  senderName: m.senderName,
+                  text: cleanHistoryText(m.variants[m.activeVariantIndex]?.text || ''),
+                }));
+                const limits = summaryLimits(promptTarget);
+                compressionRunningRef.current = true;
+                compressChatHistory(
+                  effectiveApiKey,
+                  effectiveModel,
+                  toSummarize,
+                  prevSummary,
+                  isLocal ? { maxChars: limits.maxChars, maxTokens: limits.maxTokens, timeoutMs: 120000 } : undefined
+                ).then(async (summary) => {
+                  if (summary && summary.trim()) {
+                    await db.chats.update(session.id, {
+                      rollingSummary: summary.trim(),
+                      lastSummarizedMsgId: lastCovered.id,
+                    });
+                  }
+                }).catch((err) => {
+                  console.warn('Background compression error:', err);
+                }).finally(() => {
+                  compressionRunningRef.current = false;
+                });
               }
             }
           } catch (err: any) {
