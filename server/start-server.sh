@@ -1,33 +1,29 @@
 #!/usr/bin/env bash
+# Single entry point for Linux and macOS: prepares a virtual environment, then bootstrap.py does the rest.
+# Options are passed through: --repair, --no-browser
 set -e
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+PY=""
+for candidate in python3.12 python3.11 python3.13 python3.10 python3; do
+    if command -v "$candidate" >/dev/null 2>&1 && \
+       "$candidate" -c 'import sys; sys.exit(0 if (3,10) <= sys.version_info[:2] <= (3,13) else 1)' 2>/dev/null; then
+        PY="$candidate"
+        break
+    fi
+done
 
-echo "=========================================================="
-echo "         SilkloraAI Local AI Hub - Linux Launcher         "
-echo "=========================================================="
-
-if ! command -v python3 &> /dev/null; then
-    echo "ERROR: python3 was not found. Please install Python 3.10+."
+if [ -z "$PY" ]; then
+    echo "Python 3.10 - 3.13 was not found. Install it with your package manager and run this file again."
     exit 1
 fi
 
-VENV_DIR="$SCRIPT_DIR/venv"
-RUN_PY="python3"
-
-if [ -f "$VENV_DIR/bin/python" ]; then
-    RUN_PY="$VENV_DIR/bin/python"
-elif python3 -m venv "$VENV_DIR" 2>/dev/null && [ -f "$VENV_DIR/bin/python" ]; then
-    RUN_PY="$VENV_DIR/bin/python"
-else
-    echo "Notice: venv not available, using system python3."
-    RUN_PY="python3"
+if [ ! -x venv/bin/python ]; then
+    echo "Creating virtual environment..."
+    "$PY" -m venv venv || {
+        echo "Could not create a virtual environment. On Debian or Ubuntu run: sudo apt install python3-venv"
+        exit 1
+    }
 fi
 
-echo "Installing / verifying requirements..."
-"$RUN_PY" -m pip install -q -r "$SCRIPT_DIR/requirements.txt" --prefer-binary || "$RUN_PY" -m pip install -q --user -r "$SCRIPT_DIR/requirements.txt" --prefer-binary || true
-
-echo "Starting SilkloraAI Local AI Hub server on port 8080..."
-echo "Web panel: http://localhost:8080"
-exec "$RUN_PY" "$SCRIPT_DIR/server.py" "$@"
+exec venv/bin/python bootstrap.py "$@"

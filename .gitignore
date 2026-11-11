@@ -14,3 +14,8 @@ server/venv/
 server/models/*.gguf
 server/models/*.downloading
 
+server/python_runtime/
+server/venv/
+server/data/
+server/*.log
+server/python_setup.exe
