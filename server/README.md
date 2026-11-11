@@ -11,7 +11,7 @@ The launcher does the whole setup itself. You only need to run one file:
 
 On the first run it:
 
-1. Finds Python 3.10 to 3.13. If none is found, it downloads Python 3.11 into `python_runtime\` (about 25 MB).
+1. Finds Python 3.10 to 3.13. If none is found, it downloads Python 3.12 with the small `uv` tool into `python_runtime\` (about 30 MB, one time). Linux and macOS do the same without the `uv` tool being installed by hand.
 2. Creates a private environment in `venv\` and installs all packages into it.
 3. Installs the inference engine for your graphics card (CUDA on NVIDIA, CPU otherwise).
 4. Opens the network port (8080 and up) for the phone in the Windows firewall (one administrator prompt).
@@ -25,9 +25,7 @@ Options:
 - `start-server.bat --repair` reinstalls the inference engine and asks for the firewall rule again.
 - `--no-browser` does not open the dashboard automatically.
 
-### Offline installation
-
-If the computer has no internet access, download `python-3.11.9-amd64.exe` from python.org on another machine and place it next to `start-server.bat`. The launcher uses that file instead of downloading. The packages and the engine still need internet access once, during setup.
+The launcher needs internet access once for the setup (Python, packages, engine). Later starts work without it.
 
 ## Using the dashboard
 

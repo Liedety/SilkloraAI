@@ -19,3 +19,4 @@ server/venv/
 server/data/
 server/*.log
 server/python_setup.exe
+server/python_tools/
