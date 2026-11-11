@@ -6,6 +6,7 @@ standard library until the requirements are installed. Every step is skipped whe
 is already set up, so repeated starts are fast.
 
 Options:
+    install        only install everything (packages, engine, firewall rule) and exit
     --repair       reinstall the inference engine and ask for the firewall rule again
     --no-browser   do not open the dashboard automatically
 """
@@ -342,7 +343,8 @@ def main(argv) -> int:
 
     disable_quickedit()
     repair = "--repair" in argv
-    passthrough = [a for a in argv if a != "--repair"]
+    install_only = "--install" in argv or "install" in argv
+    passthrough = [a for a in argv if a not in ("--repair", "--install", "install")]
     state = load_state()
 
     say("=" * 60)
@@ -370,6 +372,14 @@ def main(argv) -> int:
     step(3, total, "Network access for the phone")
     ensure_firewall(state, repair)
     save_state(state)
+
+    if install_only:
+        say("")
+        if probe["ok"]:
+            say("Installation finished. Start the server with start-server.bat (or start-server.sh).")
+            return 0
+        say("Installation finished, but the inference engine did not start. See data\\server.log.")
+        return 1
 
     say("")
     import server

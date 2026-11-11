@@ -4,11 +4,30 @@ Local inference server for the SilkloraAI phone app. It runs language and vision
 
 ## Start
 
-1. Run `start-server.bat` (Windows) or `./start-server.sh` (Linux and macOS).
-2. The first start prepares everything on its own: Python (if missing), packages, the inference engine for your graphics card, and the network port for the phone. Later starts take a few seconds.
-3. The dashboard opens at `http://localhost:8080`.
+The launcher does the whole setup itself. You only need to run one file:
 
-That single launcher is all you need. Options: `--repair` reinstalls the engine and asks for the firewall rule again, `--no-browser` does not open the dashboard.
+- **Windows:** `start-server.bat`
+- **Linux and macOS:** `./start-server.sh`
+
+On the first run it:
+
+1. Finds Python 3.10 to 3.13. If none is found, it downloads Python 3.11 into `python_runtime\` (about 25 MB).
+2. Creates a private environment in `venv\` and installs all packages into it.
+3. Installs the inference engine for your graphics card (CUDA on NVIDIA, CPU otherwise).
+4. Opens the network port (8080 and up) for the phone in the Windows firewall (one administrator prompt).
+5. Starts the server and opens the dashboard at `http://localhost:8080`.
+
+Later runs skip what is already installed and start in a few seconds.
+
+Options:
+
+- `start-server.bat install` installs everything and exits without starting the server. Use it to prepare the computer in advance.
+- `start-server.bat --repair` reinstalls the inference engine and asks for the firewall rule again.
+- `--no-browser` does not open the dashboard automatically.
+
+### Offline installation
+
+If the computer has no internet access, download `python-3.11.9-amd64.exe` from python.org on another machine and place it next to `start-server.bat`. The launcher uses that file instead of downloading. The packages and the engine still need internet access once, during setup.
 
 ## Using the dashboard
 
