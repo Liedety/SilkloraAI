@@ -8,7 +8,7 @@ import {
 } from '../src/services/ai.ts';
 import { buildSystemPrompt, DEFAULT_CORE_SYSTEM_PROMPT } from '../src/services/promptBuilder.ts';
 import { translations } from '../src/i18n/index.ts';
-import { speakerStopStrings, stripLeadingSpeakerName } from '../src/services/ai.ts';
+import { speakerStopStrings, stripLeadingSpeakerName, resolveEmotion } from '../src/services/ai.ts';
 import { estimateTokens, planWindow, planSummaryBatch, summaryLimits, sceneNoteLines, SUMMARY_BATCH } from '../src/services/contextBudget.ts';
 import { normalizeLabel, calculateNodeScore, findDuplicateNodes, selectNodesToPrune, isSignificantTurn } from '../src/services/memoryGraph.ts';
 import { getLocalizedTextStyle, DEFAULT_STYLES, DEFAULT_THEME, APP_THEMES } from '../src/db/index.ts';
@@ -828,7 +828,7 @@ test('extractEmotionAndCleanResponse: extracts emotion tags from start, inside t
   // Case 4: Bracketed emotion syntax [эмоция: радость]
   const sample4 = '[эмоция: радость] *Тепло улыбнулся* Спасибо тебе большое!';
   const res4 = extractEmotionAndCleanResponse(sample4, emotions);
-  assert.strictEqual(res4.emotion, 'радость');
+  assert.strictEqual(res4.emotion, 'happy'); // normalized to the configured emotion name
   assert.strictEqual(res4.text, '*Тепло улыбнулся* Спасибо тебе большое!');
 });
 
@@ -1070,4 +1070,26 @@ test('contextBudget: summary limits scale with the prompt budget', () => {
 
 test('contextBudget: scene note skips empty lines', () => {
   assert.strictEqual(sceneNoteLines(['a', '', '  ', 'b']), 'a\nb');
+});
+
+test('resolveEmotion: accepts own tags only and normalizes to the configured name', () => {
+  const emotions = [
+    { id: '1', name: 'neutral', label: 'Нейтральный', avatar: 'a' },
+    { id: '2', name: 'happy', label: 'Радость', avatar: 'b' },
+  ];
+  assert.strictEqual(resolveEmotion('happy', emotions, 'Мира'), 'happy');
+  assert.strictEqual(resolveEmotion('Радость', emotions, 'Мира'), 'happy');
+  assert.strictEqual(resolveEmotion('Мира: happy', emotions, 'Мира'), 'happy');
+});
+
+test('resolveEmotion: ignores tags that belong to another character', () => {
+  const emotions = [{ id: '1', name: 'happy', label: 'Радость', avatar: 'b' }];
+  assert.strictEqual(resolveEmotion('Алекс: happy', emotions, 'Мира'), undefined);
+  assert.strictEqual(resolveEmotion('Алекс: смущение', emotions, 'Мира'), undefined);
+});
+
+test('resolveEmotion: unknown emotion is dropped when the character has a fixed list', () => {
+  const emotions = [{ id: '1', name: 'happy', label: 'Радость', avatar: 'b' }];
+  assert.strictEqual(resolveEmotion('экстаз', emotions, 'Мира'), undefined);
+  assert.strictEqual(resolveEmotion('', emotions, 'Мира'), undefined);
 });

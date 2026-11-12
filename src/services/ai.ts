@@ -644,9 +644,58 @@ export interface ParsedBotResponse {
  * from a raw LLM response. Prevents default-to-neutral traps by extracting tags from anywhere
  * (including inside thoughts) and heuristically analyzing emotional context when tags are absent.
  */
+const EMOTION_SYNONYMS: Record<string, string[]> = {
+  happy: ['happy', 'joy', 'smile', 'smiling', 'laugh', 'радость', 'улыбка', 'веселье', 'счастье', 'смех'],
+  sad: ['sad', 'sorrow', 'cry', 'crying', 'грусть', 'печаль', 'слезы', 'тоска'],
+  angry: ['angry', 'furious', 'rage', 'гнев', 'злость', 'ярость', 'раздражение'],
+  blushing: ['blushing', 'shy', 'embarrassed', 'смущение', 'стыд', 'румянец'],
+  smirk: ['smirk', 'tease', 'playful', 'усмешка', 'сарказм', 'ухмылка'],
+  surprised: ['surprised', 'shocked', 'удивление', 'шок', 'испуг'],
+  thoughtful: ['thoughtful', 'pensive', 'задумчивость', 'размышление'],
+  neutral: ['neutral', 'calm', 'нейтральный', 'спокойствие'],
+};
+
+/**
+ * Maps a raw tag value to one of the speaker's configured emotions.
+ * Returns undefined for unknown values and for tags that belong to another character
+ * (e.g. "Mira: happy" written inside a group reply by someone else).
+ */
+export function resolveEmotion(
+  raw: string,
+  emotions?: CharacterEmotion[],
+  speakerName?: string
+): string | undefined {
+  if (!raw) return undefined;
+  let value = raw.trim().toLowerCase().replace(/^[*"'\[]+|[*"'\]]+$/g, '').trim();
+  if (!value) return undefined;
+
+  const named = value.match(/^([^:\-–—]{2,40})\s*[:–—-]\s*(.+)$/);
+  if (named) {
+    const who = named[1].trim();
+    const speaker = (speakerName || '').trim().toLowerCase();
+    if (speaker && who !== speaker && !speaker.includes(who) && !who.includes(speaker)) {
+      return undefined; // tag belongs to another character
+    }
+    value = named[2].trim();
+  }
+
+  const list = emotions || [];
+  const exact = list.find((e) => e.name.toLowerCase() === value || e.label?.toLowerCase() === value);
+  if (exact) return exact.name.toLowerCase();
+
+  const word = Object.entries(EMOTION_SYNONYMS).find(([, words]) => words.some((w) => value === w || value.includes(w)));
+  if (word) {
+    const target = list.find((e) => e.name.toLowerCase() === word[0] || word[1].some((w) => (e.name + ' ' + (e.label || '')).toLowerCase().includes(w)));
+    if (target) return target.name.toLowerCase();
+  }
+  // No configured emotions at all: keep the raw value so nothing is lost
+  return list.length === 0 ? value : undefined;
+}
+
 export function extractEmotionAndCleanResponse(
   completed: string,
-  characterEmotions?: CharacterEmotion[]
+  characterEmotions?: CharacterEmotion[],
+  speakerName?: string
 ): ParsedBotResponse {
   if (!completed || !completed.trim()) {
     return { text: '' };
@@ -657,14 +706,14 @@ export function extractEmotionAndCleanResponse(
   // 1. Match <emotion>...</emotion> anywhere in full generated response
   const emTagMatch = completed.match(/<emotion>([\s\S]*?)<\/emotion>/i);
   if (emTagMatch) {
-    finalEmotion = emTagMatch[1].trim().toLowerCase();
+    finalEmotion = resolveEmotion(emTagMatch[1], characterEmotions, speakerName);
   }
 
   // 2. Match [emotion: ...] or <emotion: ...> or (emotion: ...)
   if (!finalEmotion) {
     const emBracketMatch = completed.match(/(?:\[|<|\()(?:эмоция|emotion):\s*([^\]>\)]+)(?:\]|>|\))/i);
     if (emBracketMatch) {
-      finalEmotion = emBracketMatch[1].trim().toLowerCase();
+      finalEmotion = resolveEmotion(emBracketMatch[1], characterEmotions, speakerName);
     }
   }
 
@@ -672,7 +721,7 @@ export function extractEmotionAndCleanResponse(
   if (!finalEmotion) {
     const emWordMatch = completed.match(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/i);
     if (emWordMatch) {
-      finalEmotion = emWordMatch[1].trim().toLowerCase();
+      finalEmotion = resolveEmotion(emWordMatch[1], characterEmotions, speakerName);
     }
   }
 
@@ -1166,7 +1215,7 @@ export function speakerStopStrings(names: string[]): string[] {
   const stops: string[] = [];
   for (const raw of names) {
     const name = (raw || '').trim();
-    if (name.length < 2) continue;
+    if (name.length < 3) continue;
     stops.push(`\n${name}:`, `\n${name} :`);
   }
   return Array.from(new Set(stops));

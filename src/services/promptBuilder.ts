@@ -5,6 +5,8 @@ export interface PromptBuildParams {
   group?: Group;
   groupCharacters?: Character[];
   userPersona?: Character | null;
+  /** Fallback name when the chat has no persona selected. */
+  userName?: string;
   textStyle?: TextStylePreset;
   chatDirectives?: string;
   thoughtsEnabled?: boolean;
@@ -73,6 +75,7 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
     group,
     groupCharacters = [],
     userPersona,
+    userName: userNameOverride,
     textStyle,
     chatDirectives,
     thoughtsEnabled = false,
@@ -88,7 +91,7 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
 
   const currentSpeaker = speakerCharacter || character;
   const speakerName = currentSpeaker ? currentSpeaker.name : 'Bot';
-  const userName = userPersona ? userPersona.name : 'User';
+  const userName = (userPersona && userPersona.name) || (userNameOverride && userNameOverride.trim()) || 'User';
 
   const resolvePlaceholders = (template: string) => {
     return template
@@ -186,7 +189,9 @@ ${emoTag}<thought>He is pushing too hard. If I give in now, he'll think I'm weak
     const nonNeutral =
       currentSpeaker.emotions.find((e) => e.name.toLowerCase() !== 'neutral')?.name ||
       currentSpeaker.emotions[0].name;
-    prompt += `\n### EMOTION TAGGING:\nThis character has dedicated emotion avatars (${emotionNames}). At the very beginning of your turn, wrap the character's prevailing emotional expression in tag: <emotion>emotion_name</emotion> choosing strictly from available list: [${emotionNames}] (e.g. <emotion>${nonNeutral}</emotion>).
+    prompt += `\n### EMOTION TAGGING:\nThis character has dedicated emotion avatars (${emotionNames}). At the very beginning of your turn, wrap the character's prevailing emotional expression in exactly one tag: <emotion>emotion_name</emotion> choosing strictly from available list: [${emotionNames}] (e.g. <emotion>${nonNeutral}</emotion>).
+- Use only these exact names, lowercase, with no character name inside the tag.
+- Emit the tag once at the start; never write emotion tags for ${userName} or other characters and never mention the tag in the text.
 
 CRITICAL EMOTION SELECTION INSTRUCTIONS:
 - You MUST actively express and match ${speakerName}'s true emotional state for this turn.
@@ -273,53 +278,65 @@ FINAL STYLE CHECK: Ensure every sentence and paragraph strictly complies with "$
 - Keep your response focused, vivid, and proportional: strictly 1 to 3 paragraphs max unless explicitly directed otherwise.
 - Under NO circumstances should you generate excessive filler, unprompted soliloquies, or ballooning walls of text.
 - Advance the scene with punchy, evocative actions and dialogue, leaving natural openings for the user to respond.
-- STRICT ROLEPLAY ANCHOR: You are roleplaying SOLELY as ${speakerName}. NEVER write actions, dialogue, thoughts, or reactions for ${userName} or any other character. Only depict ${speakerName}'s direct actions, words, and demeanor.\n`;
+- STRICT ROLEPLAY ANCHOR: You are roleplaying SOLELY as ${speakerName}. NEVER write actions, dialogue, thoughts, or reactions for ${userName} or any other character. Only depict ${speakerName}'s direct actions, words, and demeanor.
+- NAMES: the person you are talking to is ${userName}. Address them as ${userName} when you use their name. Never call them "the user", "user", "assistant", "player" or "character".
+- FORMAT: never start your reply with your own name (${speakerName}:) and never write lines like "${userName}:" or another character's name followed by a colon. Speak only in the first person as ${speakerName}.\n`;
 
   // Emotion sprite reminder at the very end of the prompt for maximum recency compliance
   if (currentSpeaker?.emotions && currentSpeaker.emotions.length > 0) {
     const emotionNames = currentSpeaker.emotions.map((e) => e.name).join(', ');
     prompt += `\n### MANDATORY EMOTION SPRITE REMINDER:
-Start your turn with <emotion>chosen_emotion</emotion> chosen from [${emotionNames}] that accurately embodies ${speakerName}'s feelings in this turn.\n`;
+Start your turn with one <emotion>chosen_emotion</emotion> tag, chosen from [${emotionNames}], that accurately embodies ${speakerName}'s feelings in this turn. Never name another character inside the tag.\n`;
   }
 
   return prompt;
 }
 
-function affinityLabel(score: number): string {
-  if (score <= -40) return 'Deep distrust, resentment, antagonism or open hostility.';
-  if (score < 10) return 'Cautious, distant, neutral or professional.';
-  if (score < 50) return 'Warm, friendly, cooperative, developing trust.';
-  return 'High intimacy, unconditional trust, deep passion or sworn loyalty.';
+function affinityLabel(score: number, language: 'en' | 'ru'): string {
+  const ru = language === 'ru';
+  if (score <= -40) return ru ? 'глубокая неприязнь или открытая вражда.' : 'Deep distrust, resentment, antagonism or open hostility.';
+  if (score < 10) return ru ? 'настороженно, отстраненно или ровно.' : 'Cautious, distant, neutral or professional.';
+  if (score < 50) return ru ? 'тепло, дружелюбно, доверие растет.' : 'Warm, friendly, cooperative, developing trust.';
+  return ru ? 'высокая близость, доверие, сильная привязанность.' : 'High intimacy, unconditional trust, deep passion or sworn loyalty.';
 }
 
 /**
  * Volatile scene information kept out of the stable system prompt, so that the model can reuse
  * its prompt cache for the whole conversation. Appended to the end of the last user message.
+ *
+ * It is written in the dialogue language and with real names: earlier it said "the user" in
+ * third person on every turn, which made models forget the persona's name and confuse roles.
  */
 export function buildSceneNote(params: {
   speakerName: string;
+  userName: string;
+  language?: 'en' | 'ru';
   relationshipScore?: number;
   memoryNodes?: MemoryNode[];
   guidance?: string;
 }): string {
-  const { speakerName, relationshipScore = 0, memoryNodes = [], guidance } = params;
+  const { speakerName, userName, language = 'en', relationshipScore = 0, memoryNodes = [], guidance } = params;
+  const ru = language === 'ru';
   const lines: string[] = [];
-  lines.push(`Affinity of ${speakerName} toward the user: ${relationshipScore} (-100 hostile .. +100 devoted). ${affinityLabel(relationshipScore)}`);
+  lines.push(
+    ru
+      ? `${speakerName} и ${userName}: отношения ${relationshipScore} из 100 (${affinityLabel(relationshipScore, language)})`
+      : `${speakerName} and ${userName}: affinity ${relationshipScore} of 100 (${affinityLabel(relationshipScore, language)})`
+  );
   if (memoryNodes.length > 0) {
     const sorted = [...memoryNodes].sort((a, b) => {
       if (a.isPinned && !b.isPinned) return -1;
       if (!a.isPinned && b.isPinned) return 1;
       return b.createdAt - a.createdAt;
     });
-    lines.push('Established facts (stay consistent with them):');
+    lines.push(ru ? 'Уже известно и должно оставаться верным:' : 'Already established and must stay consistent:');
     for (const node of sorted.slice(0, 6)) {
-      const pinTag = node.isPinned ? ' [CORE]' : '';
-      lines.push(`- [${node.type.toUpperCase()}${pinTag}] ${node.label}: ${node.detail}`);
+      const pinTag = node.isPinned ? (ru ? ' [ВАЖНО]' : ' [CORE]') : '';
+      lines.push(`- ${node.label}: ${node.detail}${pinTag}`);
     }
   }
   if (guidance && guidance.trim()) {
-    lines.push(`Direction for this turn: ${guidance.trim()}`);
+    lines.push(ru ? `${speakerName} в этом ходе: ${guidance.trim()}` : `${speakerName} this turn: ${guidance.trim()}`);
   }
   return lines.join('\n');
 }
-

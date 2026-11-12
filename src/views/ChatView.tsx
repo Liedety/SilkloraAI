@@ -44,6 +44,7 @@ import {
   getEffectiveAiConfig,
   getComponentAiConfig,
   speakerStopStrings,
+  resolveEmotion,
   stripLeadingSpeakerName,
 } from '../services/ai';
 import { buildSystemPrompt, buildSceneNote } from '../services/promptBuilder';
@@ -110,6 +111,44 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // Active Session state
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
 
+  // Sessions whose greeting was already being inserted, so a re-render cannot add it twice
+  const greetingSeedingRef = useRef<Set<string>>(new Set());
+
+  // Adds the character's opening line when the chat has no messages yet.
+  // Runs also for chats created before the character data finished loading, which used to leave them empty.
+  const seedGreetingIfEmpty = async (chatId: string) => {
+    if (type !== 'character' || !character || !character.greeting || !character.greetingEnabled) return;
+    if (greetingSeedingRef.current.has(chatId)) return;
+    greetingSeedingRef.current.add(chatId);
+    try {
+      const count = await db.messages.where('chatId').equals(chatId).count();
+      if (count > 0) return;
+      const parsedGreeting = extractEmotionAndCleanResponse(character.greeting, character.emotions, character.name);
+      const greetingMsg: ChatMessage = {
+        id: 'msg-' + Math.random().toString(36).substring(2, 10),
+        chatId,
+        senderId: character.id,
+        senderName: character.name,
+        senderAvatar: character.avatar,
+        emotion: parsedGreeting.emotion,
+        variants: [
+          {
+            text: parsedGreeting.text || character.greeting,
+            emotion: parsedGreeting.emotion,
+            thought: parsedGreeting.thought,
+            timestamp: Date.now(),
+          },
+        ],
+        activeVariantIndex: 0,
+        createdAt: Date.now(),
+      };
+      await db.messages.put(greetingMsg);
+      await db.chats.update(chatId, { updatedAt: Date.now() });
+    } finally {
+      greetingSeedingRef.current.delete(chatId);
+    }
+  };
+
   // Initialize or fetch active session
   useEffect(() => {
     async function initSession() {
@@ -121,6 +160,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       if (existing) {
         setCurrentSessionId(existing.id);
+        await seedGreetingIfEmpty(existing.id);
       } else {
         const title = type === 'character'
           ? (character?.name || (language === 'ru' ? 'Чат' : 'Chat'))
@@ -138,30 +178,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         };
         await db.chats.put(newSession);
         setCurrentSessionId(newSession.id);
-
-        // Seed initial greeting if character has greeting enabled
-        if (type === 'character' && character && character.greeting && character.greetingEnabled) {
-          const parsedGreeting = extractEmotionAndCleanResponse(character.greeting, character.emotions);
-          const greetingMsg: ChatMessage = {
-            id: 'msg-' + Math.random().toString(36).substring(2, 10),
-            chatId: newSession.id,
-            senderId: character.id,
-            senderName: character.name,
-            senderAvatar: character.avatar,
-            emotion: parsedGreeting.emotion,
-            variants: [
-              {
-                text: parsedGreeting.text || character.greeting,
-                emotion: parsedGreeting.emotion,
-                thought: parsedGreeting.thought,
-                timestamp: Date.now(),
-              },
-            ],
-            activeVariantIndex: 0,
-            createdAt: Date.now(),
-          };
-          await db.messages.put(greetingMsg);
-        }
+        await seedGreetingIfEmpty(newSession.id);
       }
     }
 
@@ -368,94 +385,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
     adjustTextareaHeight();
   };
 
-  const getSpeakerAvatar = (
-    senderId: string,
-    emotion?: string,
-    fallbackAvatar?: string
-  ): string => {
-    const char = allCharacters.find((c) => c.id === senderId) || (type === 'character' ? character : undefined);
-    if (!char) return fallbackAvatar || '';
-    if (emotion && char.emotions && char.emotions.length > 0) {
-      const emLower = emotion.trim().toLowerCase();
-      // 1. Direct match on name or label
-      const direct = char.emotions.find(
-        (e) => (e.name.toLowerCase() === emLower || e.label?.toLowerCase() === emLower) && e.avatar
-      );
-      if (direct?.avatar) return direct.avatar;
-
-      // 2. Fuzzy synonym match (Russian & English)
-      const synonymGroups: Record<string, string[]> = {
-        happy: ['happy', 'joy', 'smile', 'радость', 'улыбка', 'веселье', 'счастье', 'радостный', 'веселый'],
-        sad: ['sad', 'sorrow', 'crying', 'грусть', 'печаль', 'слезы', 'тоска', 'грустный', 'печальный'],
-        angry: ['angry', 'furious', 'rage', 'гнев', 'злость', 'ярость', 'раздражение', 'злой', 'сердитый'],
-        blushing: ['blushing', 'shy', 'embarrassed', 'смущение', 'стыд', 'румянец', 'смущенный'],
-        smirk: ['smirk', 'tease', 'playful', 'усмешка', 'сарказм', 'ухмылка', 'ухмыляющийся'],
-        surprised: ['surprised', 'shocked', 'удивление', 'шок', 'испуг', 'удивленный'],
-        thoughtful: ['thoughtful', 'pensive', 'задумчивость', 'размышление', 'задумчивый'],
-        neutral: ['neutral', 'calm', 'нейтральный', 'спокойствие', 'спокойный'],
-      };
-
-      for (const [, words] of Object.entries(synonymGroups)) {
-        if (words.some((w) => emLower.includes(w) || w.includes(emLower))) {
-          const match = char.emotions.find((e) => {
-            const eName = (e.name + ' ' + (e.label || '')).toLowerCase();
-            return e.avatar && words.some((w) => eName.includes(w) || w.includes(eName));
-          });
-          if (match?.avatar) return match.avatar;
-        }
-      }
-    }
-    return char.avatar || fallbackAvatar || '';
-  };
-
-  // Dedicated helper to retrieve emotion sprite illustrations
+  // Emotion sprite shown under the message text. The avatar itself never changes.
   const getEmotionSprite = (
     senderId: string,
     emotion?: string
   ): { avatar: string; name: string } | null => {
     const char = allCharacters.find((c) => c.id === senderId) || (type === 'character' ? character : undefined);
     if (!char || !char.emotions || char.emotions.length === 0) return null;
-
-    if (emotion && emotion.trim() && emotion.trim().toLowerCase() !== 'none') {
-      const emLower = emotion.trim().toLowerCase();
-      // 1. Direct match on name or label
-      const direct = char.emotions.find(
-        (e) => (e.name.toLowerCase() === emLower || e.label?.toLowerCase() === emLower) && e.avatar
-      );
-      if (direct?.avatar) return { avatar: direct.avatar, name: direct.label || direct.name };
-
-      // 2. Fuzzy synonym match (Russian & English)
-      const synonymGroups: Record<string, string[]> = {
-        happy: ['happy', 'joy', 'smile', 'радость', 'улыбка', 'веселье', 'счастье', 'радостный', 'веселый'],
-        sad: ['sad', 'sorrow', 'crying', 'грусть', 'печаль', 'слезы', 'тоска', 'грустный', 'печальный'],
-        angry: ['angry', 'furious', 'rage', 'гнев', 'злость', 'ярость', 'раздражение', 'злой', 'сердитый'],
-        blushing: ['blushing', 'shy', 'embarrassed', 'смущение', 'стыд', 'румянец', 'смущенный'],
-        smirk: ['smirk', 'tease', 'playful', 'усмешка', 'сарказм', 'ухмылка', 'ухмыляющийся'],
-        surprised: ['surprised', 'shocked', 'удивление', 'шок', 'испуг', 'удивленный'],
-        thoughtful: ['thoughtful', 'pensive', 'задумчивость', 'размышление', 'задумчивый'],
-        neutral: ['neutral', 'calm', 'нейтральный', 'спокойствие', 'спокойный'],
-      };
-
-      for (const [, words] of Object.entries(synonymGroups)) {
-        if (words.some((w) => emLower.includes(w) || w.includes(emLower))) {
-          const match = char.emotions.find((e) => {
-            const eName = (e.name + ' ' + (e.label || '')).toLowerCase();
-            return e.avatar && words.some((w) => eName.includes(w) || w.includes(eName));
-          });
-          if (match?.avatar) return { avatar: match.avatar, name: match.label || match.name };
-        }
-      }
-    }
-
-    // 3. Fallback: only if emotion is explicitly 'neutral'
-    if (emotion && emotion.trim().toLowerCase() === 'neutral') {
-      const fallback = char.emotions.find((e) => e.name === 'neutral' && e.avatar);
-      if (fallback?.avatar) {
-        return { avatar: fallback.avatar, name: fallback.label || fallback.name };
-      }
-    }
-
-    return null;
+    const name = resolveEmotion(emotion || '', char.emotions, char.name);
+    if (!name) return null;
+    const sprite = char.emotions.find((e) => e.name.toLowerCase() === name && e.avatar);
+    return sprite?.avatar ? { avatar: sprite.avatar, name: sprite.label || sprite.name } : null;
   };
 
   // Build current dialogue context string for AI
@@ -585,6 +525,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         group: group || undefined,
         groupCharacters: groupMembers,
         userPersona,
+        userName: userPersona?.name || freshSettings?.userName || undefined,
         textStyle: textStyleToUse,
         chatDirectives: session.chatDirectives,
         thoughtsEnabled: session.thoughtsEnabled === true,
@@ -624,6 +565,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const sceneNote = sceneNoteLines([
         buildSceneNote({
           speakerName: speaker.name,
+          userName: userPersona?.name || freshSettings?.userName || (dialogueLang === 'ru' ? 'собеседник' : 'the other person'),
+          language: dialogueLang,
           relationshipScore: affinity,
           memoryNodes,
           guidance: guidancePrompt,
@@ -737,13 +680,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
         userPersona?.name || '',
         ...allCharacters.filter((c) => c.id !== speaker.id && group?.characterIds.includes(c.id)).map((c) => c.name),
       ];
-      const speakerNames = [speaker.name, userPersona?.name || ''];
+      // Only the speaker's own name is stripped from the start; the stop list must not contain it,
+      // otherwise a reply that begins with "Name:" is cut to nothing.
+      const otherSpeakers = [
+        userPersona?.name || '',
+        ...allCharacters.filter((c) => c.id !== speaker.id && group?.characterIds.includes(c.id)).map((c) => c.name),
+      ];
 
       await streamChatCompletion({
         apiKeyConfig: (turnConfig ? turnConfig.apiKeyConfig : effectiveApiKey) as ApiKeyConfig,
         model: turnConfig ? turnConfig.textModel : effectiveModel,
         // Also stop if the model starts quoting the hidden scene note
-        extraStops: [...speakerStopStrings(otherNames), '[Scene note', '[Заметка сцены'],
+        extraStops: [...speakerStopStrings(otherSpeakers), '[Scene note', '[Заметка сцены'],
         messages: apiMessages,
         temperature: isLocal ? 0.7 : 0.85,
         maxTokens: 1024,
@@ -751,12 +699,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onToken: (tok) => {
           fullGenerated += tok;
           let currentThought = '';
-          let display = stripLeadingSpeakerName(fullGenerated, speakerNames);
+          let display = stripLeadingSpeakerName(fullGenerated, [speaker.name]);
 
           // Only an explicit <emotion> tag changes the avatar; prose never does
           const emotionMatch = fullGenerated.match(/<emotion>([^<]+)<\/emotion>/i);
           if (emotionMatch) {
-            setStreamingEmotion(emotionMatch[1].trim().toLowerCase());
+            setStreamingEmotion(resolveEmotion(emotionMatch[1], speaker.emotions, speaker.name) || null);
           }
 
           const thoughtMatch = display.match(/<thought>([\s\S]*?)<\/thought>/);
@@ -780,7 +728,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onComplete: async (rawCompleted) => {
           setIsGenerating(false);
           abortControllerRef.current = null;
-          const completed = stripLeadingSpeakerName(rawCompleted, speakerNames);
+          const completed = stripLeadingSpeakerName(rawCompleted, [speaker.name]);
 
           try {
             if (!completed || !completed.trim()) {
@@ -789,7 +737,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             }
 
             const { text: finalText, thought: finalThought, emotion: finalEmotion } =
-              extractEmotionAndCleanResponse(completed, speaker.emotions);
+              extractEmotionAndCleanResponse(completed, speaker.emotions, speaker.name);
 
             const newVariant: MessageVariant = {
               text: finalText || cleanArtifacts(completed),
@@ -1335,9 +1283,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
             const isThoughtExpanded = !!expandedThoughts[msg.id];
 
             const botChar = !isUser ? allCharacters.find((c) => c.id === msg.senderId) || (type === 'character' ? character : undefined) : undefined;
-            const botAvatar = !isUser
-              ? getSpeakerAvatar(msg.senderId, activeVariant.emotion || msg.emotion, botChar?.avatar || msg.senderAvatar || '')
-              : undefined;
+            // The avatar never changes with emotion: the emotion is shown as a sprite under the text
+            const botAvatar = !isUser ? (botChar?.avatar || msg.senderAvatar || '') : undefined;
 
             return (
               <div
@@ -1646,7 +1593,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <div className="flex justify-start items-end gap-2.5 animate-fade-in">
             <div className="relative w-8 h-8 rounded-xl overflow-hidden shrink-0 border border-silk-700 bg-silk-800 mb-1">
               <AvatarImage
-                src={getSpeakerAvatar(streamingSender.id, streamingEmotion || undefined, streamingSender.avatar)}
+                src={streamingSender.avatar}
                 alt={streamingSender.name}
                 className="w-full h-full object-cover"
               />

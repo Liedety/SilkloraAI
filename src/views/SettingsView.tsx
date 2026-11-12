@@ -1109,6 +1109,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </>)}
 
         {settingsTab === 'style' && (<>
+        {/* User name used when no persona is selected */}
+        <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-2">
+          <label className="text-xs font-bold uppercase tracking-wider text-slate-400">{t.userNameTitle}</label>
+          <p className="text-[11px] text-slate-500 leading-snug">{t.userNameDesc}</p>
+          <input
+            type="text"
+            value={settings?.userName || ''}
+            placeholder={t.userNamePlaceholder}
+            onChange={(e) => db.settings.update('default', { userName: e.target.value })}
+            className="w-full px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-sm text-white"
+          />
+        </div>
+
         {/* 5. Text & RP Styles */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
           <div className="flex items-center justify-between">
