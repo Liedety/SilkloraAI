@@ -13,7 +13,7 @@ On the first run it:
 
 1. Finds Python 3.10 to 3.13. If none is found, it downloads Python 3.12 with the small `uv` tool into `python_runtime\` (about 30 MB, one time). Linux and macOS do the same without the `uv` tool being installed by hand.
 2. Creates a private environment in `venv\` and installs all packages into it.
-3. Installs the inference engine for your graphics card (CUDA on NVIDIA, CPU otherwise).
+3. Installs the inference engine for your graphics card and checks it. The check loads a tiny test model (about 1 MB, downloaded once into `data\`) and generates a few tokens. If an engine crashes on this processor (error 0xC000001D), the next option is tried, and the CPU engine is the last resort.
 4. Opens the network port (8080 and up) for the phone in the Windows firewall (one administrator prompt).
 5. Starts the server and opens the dashboard at `http://localhost:8080`.
 
@@ -22,7 +22,7 @@ Later runs skip what is already installed and start in a few seconds.
 Options:
 
 - `start-server.bat install` installs everything and exits without starting the server. Use it to prepare the computer in advance.
-- `start-server.bat --repair` reinstalls the inference engine and asks for the firewall rule again.
+- `start-server.bat --repair` runs the engine selection again from the start: it tries the newest GPU builds first and checks each one. Use it after a model fails to load with an engine error.
 - `--no-browser` does not open the dashboard automatically.
 
 The launcher needs internet access once for the setup (Python, packages, engine). Later starts work without it.

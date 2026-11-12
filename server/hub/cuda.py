@@ -74,9 +74,9 @@ def register_dll_directories():
         candidates.append(sp / "llama_cpp" / "lib")
         nvidia = sp / "nvidia"
         if nvidia.is_dir():
-            for root, dirs, _files in os.walk(nvidia):
-                if "bin" in dirs:
-                    candidates.append(Path(root) / "bin")
+            for root, _dirs, files in os.walk(nvidia):
+                if any(name.lower().endswith(".dll") for name in files):
+                    candidates.append(Path(root))
     for path in candidates:
         if path.is_dir():
             try:

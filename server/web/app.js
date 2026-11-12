@@ -28,7 +28,6 @@
     };
 
     const ICONS = {
-        brand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18c4-1 6-6 9-6s5 5 9 6"/><path d="M3 12c4-1 6-6 9-6s5 5 9 6"/></svg>',
         check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
         alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5"/><path d="M12 17h.01"/></svg>',
         dots: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 12h.01M12 12h.01M18 12h.01"/></svg>',
@@ -124,7 +123,6 @@
         document.documentElement.lang = state.lang;
         $$("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
         $$("#lang button").forEach((b) => b.classList.toggle("active", b.dataset.lang === state.lang));
-        $("#brandMark").innerHTML = ICONS.brand;
     }
 
     function renderPill() {
@@ -168,6 +166,7 @@
             case "file_invalid": return t("errFileInvalid");
             case "out_of_memory": return t("errOom");
             case "load_failed": return t("errLoadFailed", { arch: err.arch || "?", engine: err.engine || "?" });
+            case "engine_crash": return t("errEngineCrash");
             default: return err.message || t("error");
         }
     }
@@ -285,7 +284,7 @@
                 "</div></div>";
             const box = $("#qrBox");
             if (window.QRCode) {
-                new QRCode(box, { text: url, width: 170, height: 170, colorDark: "#181530", colorLight: "#ffffff", correctLevel: QRCode.CorrectLevel.M });
+                new QRCode(box, { text: url, width: 170, height: 170, colorDark: "#0a0a0a", colorLight: "#ffffff", correctLevel: QRCode.CorrectLevel.M });
             }
             $("#copyUrl").onclick = () => {
                 const done = () => { $("#copyUrl").innerHTML = ICONS.check; setTimeout(() => { $("#copyUrl").innerHTML = ICONS.copy; }, 1500); };

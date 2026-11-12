@@ -54,6 +54,11 @@ def engine_info() -> Dict[str, Any]:
     }
 
 
+def is_illegal_instruction(text: str) -> bool:
+    low = (text or "").lower()
+    return "1073741795" in low or "0xc000001d" in low or "illegal instruction" in low
+
+
 def _handler_class(name: str):
     try:
         import importlib
@@ -345,11 +350,15 @@ class Engine:
                     last_error = str(e)
                     logger.warning(f"Attempt {number} failed: {e}")
                     gc.collect()
+                    if is_illegal_instruction(last_error):
+                        break
                     continue
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"Attempt {number} failed: {e}")
                 gc.collect()
+                if is_illegal_instruction(last_error):
+                    break
                 continue
 
             used = dict(plan)
@@ -368,7 +377,9 @@ class Engine:
     def _report_failure(self, info: Dict[str, Any], error: str):
         low = (error or "").lower()
         version = getattr(llama_cpp, "__version__", "unknown")
-        if "out of memory" in low or "cudamalloc" in low or "failed to allocate" in low:
+        if is_illegal_instruction(error):
+            self._fail("engine_crash", error, engine=version)
+        elif "out of memory" in low or "cudamalloc" in low or "failed to allocate" in low:
             self._fail("out_of_memory", error)
         else:
             self._fail("load_failed", error or "Failed to load model", arch=info.get("arch", ""), engine=version)

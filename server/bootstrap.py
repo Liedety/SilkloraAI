@@ -135,19 +135,30 @@ def compute_cap_number(info: dict) -> int:
 
 # --------------------------------------------------------------------------- engine
 
+TEST_MODEL_URL = "https://huggingface.co/ggml-org/tiny-llamas/resolve/main/stories260K.gguf"
+TEST_MODEL = DATA_DIR / "engine_test.gguf"
+TEST_MODEL_MIN_BYTES = 500_000
+# 0xC000001D STATUS_ILLEGAL_INSTRUCTION: the build uses a processor instruction set this CPU lacks.
+CRASH_CODES = (-1073741795, 3221225501)
+MAX_GPU_CANDIDATES = 4
+CUDA13_MIN_DRIVER = 580
+
+
 def probe_engine() -> dict:
     """Import llama_cpp in a fresh process so a crashing build cannot take the launcher down."""
     code = (
-        "import sys, json; sys.path.insert(0, %r)\n"
-        "from hub import cuda; cuda.link_cuda_dlls(); cuda.register_dll_directories()\n"
+        "import sys, json; sys.path.insert(0, sys.argv[1])\n"
+        "from hub import cuda; cuda.register_dll_directories(); cuda.link_cuda_dlls()\n"
         "import llama_cpp as l\n"
         "print(json.dumps({'version': getattr(l, '__version__', '0'), 'gpu': bool(l.llama_supports_gpu_offload())}))\n"
-    ) % str(BASE_DIR)
+    )
     try:
-        proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=90)
+        proc = subprocess.run([sys.executable, "-c", code, str(BASE_DIR)], capture_output=True, text=True, timeout=90)
     except Exception as e:
         return {"ok": False, "error": str(e)}
     if proc.returncode != 0:
+        if proc.returncode in CRASH_CODES:
+            return {"ok": False, "error": "illegal instruction (0xC000001D)", "code": proc.returncode}
         tail = (proc.stderr or "").strip().splitlines()[-1:] or [f"exit code {proc.returncode}"]
         return {"ok": False, "error": tail[0], "code": proc.returncode}
     try:
@@ -155,6 +166,52 @@ def probe_engine() -> dict:
         return {"ok": True, "version": data["version"], "gpu": data["gpu"]}
     except Exception:
         return {"ok": False, "error": "unexpected probe output"}
+
+
+def ensure_test_model() -> bool:
+    if TEST_MODEL.exists() and TEST_MODEL.stat().st_size >= TEST_MODEL_MIN_BYTES:
+        return True
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = TEST_MODEL.with_suffix(".part")
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(TEST_MODEL_URL, timeout=60) as resp, open(tmp, "wb") as f:
+            shutil.copyfileobj(resp, f)
+        os.replace(tmp, TEST_MODEL)
+        return True
+    except Exception as e:
+        say(f"      Could not download the engine test model: {e}")
+        tmp.unlink(missing_ok=True)
+        return False
+
+
+def engine_selftest(use_gpu: bool) -> tuple:
+    """Load a real tiny model and generate a few tokens. Returns (ok, reason)."""
+    if not ensure_test_model():
+        return False, "test model unavailable"
+    code = (
+        "import sys; sys.path.insert(0, sys.argv[1])\n"
+        "from hub import cuda; cuda.register_dll_directories(); cuda.link_cuda_dlls()\n"
+        "from llama_cpp import Llama\n"
+        "llm = Llama(model_path=sys.argv[2], n_ctx=256, n_gpu_layers=int(sys.argv[3]), verbose=False)\n"
+        "out = llm.create_completion('Once upon a time', max_tokens=4, temperature=0.0)\n"
+        "print('SELFTEST_OK', len(out['choices'][0]['text']))\n"
+    )
+    layers = "-1" if use_gpu else "0"
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code, str(BASE_DIR), str(TEST_MODEL), layers],
+            capture_output=True, text=True, timeout=240,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "the test model did not finish in time"
+    if proc.returncode in CRASH_CODES:
+        return False, "illegal instruction (0xC000001D): this build needs a processor feature this CPU does not have"
+    if proc.returncode == 0 and "SELFTEST_OK" in (proc.stdout or ""):
+        return True, "ok"
+    tail = (proc.stderr or "").strip().splitlines()[-1:] or [f"exit code {proc.returncode}"]
+    return False, tail[0]
 
 
 def version_tuple(text: str):
@@ -174,11 +231,21 @@ WHEEL_RE = re.compile(
 )
 
 
-def find_windows_cuda_wheel(cap: int, driver_major: int) -> Optional[tuple]:
-    """Pick a prebuilt CUDA wheel for this GPU generation and Python version."""
+def driver_major(gpu: dict) -> int:
+    match = re.match(r"\d+", gpu.get("driver", "") or "")
+    return int(match.group(0)) if match else 0
+
+
+def windows_cuda_candidates(gpu: dict) -> list:
+    """Prebuilt Windows CUDA wheels for this GPU, newest version first, best CUDA match first."""
+    cap = compute_cap_number(gpu)
+    if not cap:
+        return []
+    drv = driver_major(gpu)
     py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
-    candidates = []
-    for page in (1, 2, 3):
+    found = []
+    seen = set()
+    for page in (1, 2):
         try:
             releases = fetch_json(f"{WHEEL_RELEASES}?per_page=100&page={page}")
         except Exception:
@@ -188,54 +255,51 @@ def find_windows_cuda_wheel(cap: int, driver_major: int) -> Optional[tuple]:
         for release in releases:
             for asset in release.get("assets", []):
                 match = WHEEL_RE.match(asset["name"])
-                if not match:
-                    continue
-                if match["py"] not in (py_tag, "py3"):
+                if not match or match["py"] not in (py_tag, "py3"):
                     continue
                 sms = [int(n) for n in re.findall(r"sm(\d+)", match["arch"])]
                 if not sms:
                     continue
-                usable = [s for s in sms if s // 10 == cap // 10 and s <= cap] or [s for s in sms if cap >= 100 and s >= 100 and s <= cap]
+                if match["cuda"].startswith("13.") and drv < CUDA13_MIN_DRIVER:
+                    continue
+                usable = [s for s in sms if s // 10 == cap // 10 and s <= cap]
                 if not usable:
                     continue
-                cuda_order = ["13.0"] if cap >= 100 else (["12.1", "13.0"] if driver_major >= 580 else ["12.1"])
-                if match["cuda"] not in cuda_order:
+                if cap >= 100 and not match["cuda"].startswith("13."):
                     continue
-                candidates.append(
-                    (
-                        cuda_order.index(match["cuda"]),
+                key = asset["browser_download_url"]
+                if key in seen:
+                    continue
+                seen.add(key)
+                cuda_rank = 0 if match["cuda"].startswith("13.") else 1
+                found.append({
+                    "url": key,
+                    "version": match["ver"],
+                    "cuda": match["cuda"],
+                    "sort": (
+                        tuple(-n for n in version_tuple(match["ver"])),
+                        cuda_rank,
                         0 if cap in sms else 1,
                         0 if match["py"] == py_tag else 1,
-                        tuple(-n for n in version_tuple(match["ver"])),
-                        asset["browser_download_url"],
-                        match["cuda"],
-                    )
-                )
-    if not candidates:
-        return None
-    candidates.sort()
-    return candidates[0][4], candidates[0][5]
+                    ),
+                })
+    found.sort(key=lambda c: c["sort"])
+    return found[:MAX_GPU_CANDIDATES]
 
 
-def install_cuda_engine_windows(gpu: dict) -> bool:
-    cap = compute_cap_number(gpu)
-    driver_match = re.match(r"\d+", gpu.get("driver", "") or "")
-    driver_major = int(driver_match.group(0)) if driver_match else 0
-    found = find_windows_cuda_wheel(cap, driver_major) if cap else None
-    if not found:
-        say("      No prebuilt GPU engine matches this graphics card and Python version.")
-        return False
-    url, cuda_ver = found
-    say(f"      Installing GPU engine (CUDA {cuda_ver}, compute capability {cap // 10}.{cap % 10})")
-    runtime = ["nvidia-cuda-runtime", "nvidia-cublas"] if cuda_ver.startswith("13") else ["nvidia-cuda-runtime-cu12", "nvidia-cublas-cu12"]
-    pip("--prefer-binary", *runtime)
+def uninstall_engine():
     subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "llama-cpp-python"], capture_output=True)
-    return pip("--upgrade", "--no-cache-dir", url, quiet=False)
+
+
+def install_windows_candidate(cand: dict) -> bool:
+    runtime = ["nvidia-cuda-runtime", "nvidia-cublas"] if cand["cuda"].startswith("13.") else ["nvidia-cuda-runtime-cu12", "nvidia-cublas-cu12"]
+    pip("--prefer-binary", *runtime)
+    uninstall_engine()
+    return pip("--upgrade", "--no-cache-dir", cand["url"], quiet=False)
 
 
 def install_cpu_engine() -> bool:
-    say("      Installing CPU engine")
-    subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "llama-cpp-python"], capture_output=True)
+    uninstall_engine()
     if platform.system() == "Darwin":
         return (
             pip("--upgrade", "--prefer-binary", "--only-binary=llama-cpp-python", "llama-cpp-python", "--extra-index-url", METAL_INDEX, quiet=False)
@@ -248,56 +312,96 @@ def install_cpu_engine() -> bool:
 
 
 def install_cuda_engine_linux() -> bool:
-    say("      Installing GPU engine (CUDA 12)")
-    subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "llama-cpp-python"], capture_output=True)
+    uninstall_engine()
     return pip("--upgrade", "--prefer-binary", "--only-binary=llama-cpp-python", "llama-cpp-python", "--extra-index-url", CUDA_INDEX, quiet=False)
+
+
+def _record(state: dict, probe: dict, gpu: Optional[dict], source: str):
+    state["engine_verified"] = {
+        "version": probe["version"],
+        "gpu": gpu["name"] if gpu else "",
+        "gpu_mode": bool(probe["gpu"]),
+        "source": source,
+    }
+    state.pop("engine_gave_up", None)
+
+
+def _verified_for(state: dict, probe: dict, gpu: Optional[dict]) -> bool:
+    rec = state.get("engine_verified") or {}
+    return (
+        probe["ok"]
+        and rec.get("version") == probe["version"]
+        and rec.get("gpu") == (gpu["name"] if gpu else "")
+        and rec.get("gpu_mode") == bool(probe["gpu"])
+    )
 
 
 def ensure_engine(state: dict, repair: bool) -> dict:
     gpu = nvidia_info()
-    need_gpu = gpu is not None and platform.system() != "Darwin"
+    use_gpu = gpu is not None and platform.system() != "Darwin"
     probe = probe_engine()
 
     def outdated(p):
         return p["ok"] and version_tuple(p["version"]) < MIN_ENGINE_VERSION
 
-    if probe["ok"] and not outdated(probe) and (probe["gpu"] or not need_gpu) and not repair:
-        return probe
-
-    marker = [probe.get("version"), bool(gpu)]
-    if probe["ok"] and not outdated(probe) and state.get("engine_gave_up") == marker and not repair:
-        return probe
+    if probe["ok"] and not outdated(probe) and not repair:
+        if _verified_for(state, probe, gpu):
+            return probe
+        if (probe["gpu"] or not use_gpu):
+            say("      Checking the installed engine with a test model...")
+            ok, reason = engine_selftest(bool(probe["gpu"]))
+            if ok:
+                _record(state, probe, gpu, "installed")
+                return probe
+            say(f"      The installed engine failed the check: {reason}")
 
     if not probe["ok"]:
         say(f"      Inference engine is not ready: {probe.get('error', 'not installed')}")
     elif outdated(probe):
         say(f"      Inference engine {probe['version']} is outdated")
-    elif need_gpu and not probe["gpu"]:
+    elif use_gpu and not probe["gpu"]:
         say(f"      GPU detected ({gpu['name']}) but the engine runs on CPU only")
 
-    if need_gpu:
-        attempted = False
-        if IS_WINDOWS:
-            attempted = install_cuda_engine_windows(gpu)
-        elif platform.system() == "Linux":
-            attempted = install_cuda_engine_linux()
-        if attempted:
-            from hub import cuda
-
-            _ok, message = cuda.link_cuda_dlls()
-            say(f"      CUDA runtime: {message}")
+    if use_gpu and platform.system() == "Windows":
+        candidates = windows_cuda_candidates(gpu)
+        if not candidates:
+            say("      No prebuilt GPU engine matches this graphics card and driver.")
+        for number, cand in enumerate(candidates, start=1):
+            say(f"      GPU engine option {number}/{len(candidates)}: llama-cpp-python {cand['version']} (CUDA {cand['cuda']})")
+            if not install_windows_candidate(cand):
+                say("        installation failed, trying the next option")
+                continue
+            probe = probe_engine()
+            if not probe["ok"]:
+                say(f"        does not start: {probe.get('error', 'unknown error')}")
+                continue
+            ok, reason = engine_selftest(bool(probe["gpu"]))
+            if ok:
+                _record(state, probe, gpu, f"cuda-{cand['cuda']}-{cand['version']}")
+                return probe
+            say(f"        failed the check: {reason}")
+    elif use_gpu and platform.system() == "Linux":
+        say("      Installing GPU engine (CUDA 12)")
+        install_cuda_engine_linux()
         probe = probe_engine()
-        if probe["ok"] and probe["gpu"] and not outdated(probe):
-            state.pop("engine_gave_up", None)
+        if probe["ok"]:
+            ok, reason = engine_selftest(bool(probe["gpu"]))
+            if ok:
+                _record(state, probe, gpu, "linux-cuda12")
+                return probe
+            say(f"        failed the check: {reason}")
+
+    say("      Installing the CPU engine")
+    install_cpu_engine()
+    probe = probe_engine()
+    if probe["ok"]:
+        ok, reason = engine_selftest(False)
+        if ok:
+            _record(state, probe, gpu, "cpu")
             return probe
-        if attempted:
-            say("      The GPU engine did not start correctly.")
-
-    if not probe["ok"] or outdated(probe):
-        install_cpu_engine()
-        probe = probe_engine()
-
-    state["engine_gave_up"] = [probe.get("version"), bool(gpu)]
+        say(f"      The CPU engine failed the check: {reason}")
+        probe = dict(probe, ok=False, error=reason)
+    state.pop("engine_verified", None)
     return probe
 
 
