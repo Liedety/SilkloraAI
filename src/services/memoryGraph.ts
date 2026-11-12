@@ -392,8 +392,8 @@ export async function extractMemoryAndAffinity(
     return { newAffinity: currentAffinity, newNodes: [] };
   }
 
-  // If API key is available, use LLM to extract accurate memory node & affinity delta
-  if (apiKeyConfig && apiKeyConfig.key.trim()) {
+  // If API key is available or using local AI hub, use LLM to extract accurate memory node & affinity delta
+  if (apiKeyConfig && (apiKeyConfig.key.trim() || apiKeyConfig.provider === 'custom')) {
     let rawResponse = '';
     try {
       const extractionPrompt = isDialogueRu
@@ -446,19 +446,27 @@ Respond STRICTLY with valid JSON:
 If nothing important occurred, "nodes" MUST be an empty array: "nodes": [].
 No markdown wrappers, raw JSON only.`;
 
-      await streamChatCompletion({
-        apiKeyConfig,
-        model: model || 'deepseek/deepseek-chat',
-        messages: [
-          { role: 'system', content: 'You are an analytical memory module for an RPG engine.' },
-          { role: 'user', content: extractionPrompt },
-        ],
-        temperature: 0.3,
-        onToken: (tok) => {
-          rawResponse += tok;
-        },
-        onError: () => {},
-      });
+      const timeoutController = new AbortController();
+      const timeoutId = setTimeout(() => timeoutController.abort(), 15000);
+      try {
+        await streamChatCompletion({
+          apiKeyConfig,
+          model: model || 'deepseek/deepseek-chat',
+          messages: [
+            { role: 'system', content: 'You are an analytical memory module for an RPG engine.' },
+            { role: 'user', content: extractionPrompt },
+          ],
+          temperature: 0.2,
+          maxTokens: 256,
+          signal: timeoutController.signal,
+          onToken: (tok) => {
+            rawResponse += tok;
+          },
+          onError: () => {},
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       let cleaned = rawResponse.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
       const firstBrace = cleaned.indexOf('{');

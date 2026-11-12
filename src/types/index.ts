@@ -154,6 +154,20 @@ export interface ThemeConfig {
   lineHeight?: 'normal' | 'relaxed' | 'loose'; // dialogue line height
 }
 
+export type AiEngineMode = 'cloud' | 'local';
+
+/** Parts of the app that call a language model. Each one can run on the cloud or on the local PC. */
+export type AiComponent =
+  | 'chat'
+  | 'ghostwriter'
+  | 'memory'
+  | 'summary'
+  | 'characterGen'
+  | 'groupGen'
+  | 'vision';
+
+export type AiBackend = 'cloud' | 'local';
+
 export interface AppSettings {
   id: string; // singleton 'default'
   language: Language;
@@ -164,4 +178,12 @@ export interface AppSettings {
   contextWindowSize: number;
   customSystemPrompt?: string;
   customSystemPromptMode?: 'override' | 'augment';
+  aiEngineMode?: AiEngineMode;
+  /** Per-component backend. Missing entries follow aiEngineMode. */
+  aiRouting?: Partial<Record<AiComponent, AiBackend>>;
+  /** Name the AI should use for the person chatting when no persona is selected for the chat. */
+  userName?: string;
+  localHubUrl?: string;
+  /** Marks one-time default migrations that were already applied to this install. */
+  themeMigration?: string;
 }
