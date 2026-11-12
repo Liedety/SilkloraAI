@@ -231,7 +231,11 @@
         const gpuMissing = state.hw && state.hw.gpu.kind === "cuda" && s.engine.available && !s.engine.gpu_offload;
         let engineStep;
         if (!s.engine.available) engineStep = stepHtml("bad", "alert", t("stepEngine"), t("stepEngineBad"));
-        else if (gpuMissing) engineStep = stepHtml("warn", "alert", t("stepEngine"), t("stepEngineGpuMissing"));
+        else if (gpuMissing) {
+            const failed = ((s.engine_setup && s.engine_setup.attempts) || []).filter((a) => a.result === "failed" && a.reason);
+            const reason = failed.length ? " " + t("engineReason", { r: failed[failed.length - 1].reason }) : "";
+            engineStep = stepHtml("warn", "alert", t("stepEngine"), t("stepEngineGpuMissing") + reason);
+        }
         else engineStep = stepHtml("ok", "check", t("stepEngine"), t("stepEngineOk") + " (" + s.engine.version + ")");
 
         let modelStep;
@@ -829,8 +833,20 @@
         const backend = !e.available ? t("backendNone") : e.gpu_offload ? t("backendGpu") : t("backendCpu");
         let html = '<div class="card-head"><h2>' + t("engineTitle") + "</h2></div>" +
             '<dl class="kv"><dt>llama-cpp-python</dt><dd>' + esc(e.version || "-") + "</dd><dt>" + t("engineBackend") + "</dt><dd>" + esc(backend) + "</dd><dt>Hub</dt><dd>" + esc(s.version) + "</dd></dl>";
+        const setup = s.engine_setup || { gpu: {}, attempts: [] };
+        if (setup.gpu && setup.gpu.name) {
+            html += '<div class="small muted" style="margin-top:10px">' + esc(t("engineGpuFound", { g: setup.gpu.name, d: setup.gpu.driver || "-" })) + "</div>";
+        }
         if (!e.available) html += '<div class="note bad" style="margin-top:12px">' + t("stepEngineBad") + "</div><details><summary>" + t("errTechnical") + "</summary><pre>" + esc(e.error) + "</pre></details>";
         else if (state.hw && state.hw.gpu.kind === "cuda" && !e.gpu_offload) html += '<div class="note warn" style="margin-top:12px">' + t("stepEngineGpuMissing") + "</div>";
+        if (setup.attempts && setup.attempts.length) {
+            const labels = { ok: t("engineResultOk"), failed: t("engineResultFailed"), skipped: t("engineResultSkipped") };
+            html += '<details style="margin-top:12px"><summary>' + t("engineTried") + "</summary>" +
+                setup.attempts.map((a) => '<div class="small" style="margin-top:6px"><strong>' + esc(a.label) + "</strong>: " + esc(labels[a.result] || a.result) +
+                    (a.reason ? ' <span class="muted">(' + esc(a.reason) + ")</span>" : "") + "</div>").join("") + "</details>";
+        } else if (state.hw && state.hw.gpu.kind === "cuda" && !e.gpu_offload) {
+            html += '<div class="small muted" style="margin-top:10px">' + t("engineNoAttempts") + "</div>";
+        }
         $("#sysEngine").innerHTML = html;
     }
 

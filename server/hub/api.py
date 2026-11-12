@@ -25,7 +25,7 @@ from .engine import GenerationJob, engine, engine_info
 from .hardware import analyze_hardware, build_profile
 from .log import logger
 from .network import local_adapters
-from .paths import MODELS_DIR, WEB_DIR
+from .paths import DATA_DIR, MODELS_DIR, WEB_DIR
 
 DEFAULT_STOP_TOKENS = [
     "USER:", "User:", "ASSISTANT:", "Assistant:",
@@ -41,6 +41,19 @@ LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 EXPOSED_HEADERS = ["X-Silklora-Context"]
 
 started_at = time.time()
+
+
+def engine_setup_diagnostics() -> Dict[str, Any]:
+    """Last engine selection trace written by bootstrap.py, for the dashboard and remote checks."""
+    path = DATA_DIR / "setup_state.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"gpu": {}, "attempts": []}
+    return {
+        "gpu": data.get("gpu_info") or {},
+        "attempts": data.get("engine_attempts") or [],
+    }
 clients: Dict[str, float] = {}
 port_holder = {"port": 8080}
 
@@ -113,6 +126,8 @@ def create_app() -> FastAPI:
             "loading_step": status["loading_step"],
             "n_ctx": status["n_ctx"],
             "recommended_prompt_tokens": status["recommended_prompt_tokens"],
+            "engine_gpu_offload": bool(engine_info().get("gpu_offload")),
+            "engine_setup": engine_setup_diagnostics(),
             "uptime_sec": int(time.time() - started_at),
         }
 
@@ -243,6 +258,7 @@ def create_app() -> FastAPI:
             "uptime_sec": int(now - started_at),
             "port": port_holder["port"],
             "engine": engine_info(),
+            "engine_setup": engine_setup_diagnostics(),
             "model": engine.status(),
             "download": downloads.status(),
             "network": {"adapters": adapters, "primary_ip": primary},

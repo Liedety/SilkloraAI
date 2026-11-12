@@ -231,6 +231,33 @@ WHEEL_RE = re.compile(
 )
 
 
+OFFICIAL_CU124_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cu124/llama-cpp-python/"
+OFFICIAL_CU124_FALLBACK = "0.3.36"
+CUDA12_MIN_DRIVER = 527
+
+
+def official_cuda_candidate() -> Optional[dict]:
+    """Official abetlen CUDA 12 build for Windows, newest version listed in the index.
+
+    These are the project's own builds, so they are the safest GPU option and are tried first.
+    """
+    version = OFFICIAL_CU124_FALLBACK
+    try:
+        req = urllib.request.Request(OFFICIAL_CU124_INDEX, headers={"User-Agent": "SilkloraAI-Hub"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+        found = re.findall(r"llama_cpp_python-(\d+\.\d+\.\d+)-py3-none-win_amd64\.whl", html)
+        if found:
+            version = max(found, key=version_tuple)
+    except Exception:
+        pass
+    url = (
+        "https://github.com/abetlen/llama-cpp-python/releases/download/"
+        f"v{version}-cu124/llama_cpp_python-{version}-py3-none-win_amd64.whl"
+    )
+    return {"url": url, "version": version, "cuda": "12.4", "official": True, "sort": ()}
+
+
 def driver_major(gpu: dict) -> int:
     match = re.match(r"\d+", gpu.get("driver", "") or "")
     return int(match.group(0)) if match else 0
@@ -284,7 +311,16 @@ def windows_cuda_candidates(gpu: dict) -> list:
                     ),
                 })
     found.sort(key=lambda c: c["sort"])
-    return found[:MAX_GPU_CANDIDATES]
+    found = found[:MAX_GPU_CANDIDATES]
+
+    candidates = []
+    # CUDA 12 builds do not cover Blackwell; that generation needs CUDA 13
+    if drv >= CUDA12_MIN_DRIVER and cap < 100:
+        official = official_cuda_candidate()
+        if official:
+            candidates.append(official)
+            found = [c for c in found if not (c["version"] == official["version"] and c["cuda"].startswith("12."))]
+    return (candidates + found)[:MAX_GPU_CANDIDATES]
 
 
 def uninstall_engine():
@@ -336,18 +372,46 @@ def _verified_for(state: dict, probe: dict, gpu: Optional[dict]) -> bool:
     )
 
 
+def record_attempt(state: dict, label: str, result: str, reason: str = ""):
+    """Keeps a readable trace of every engine option that was tried, shown in the dashboard."""
+    attempts = state.setdefault("engine_attempts", [])
+    attempts.append({"label": label, "result": result, "reason": reason[:400]})
+
+    LOG_LIMIT = 12
+    if len(attempts) > LOG_LIMIT:
+        del attempts[: len(attempts) - LOG_LIMIT]
+
+
+def reset_attempts(state: dict):
+    state["engine_attempts"] = []
+
+
 def gpu_fingerprint(gpu: Optional[dict]) -> str:
     return f"{gpu['name']}|{gpu.get('driver', '')}" if gpu else ""
 
 
+# Bump when the candidate list changes, so an old "gave up" note does not block the new options.
+GPU_ATTEMPT_SCHEMA = 2
+
+
 def _gpu_gave_up(state: dict, fingerprint: str) -> bool:
     attempt = state.get("gpu_engine_attempt") or {}
-    return attempt.get("fingerprint") == fingerprint and attempt.get("result") == "failed"
+    return (
+        attempt.get("fingerprint") == fingerprint
+        and attempt.get("result") == "failed"
+        and attempt.get("schema") == GPU_ATTEMPT_SCHEMA
+    )
 
 
 def ensure_engine(state: dict, repair: bool) -> dict:
     gpu = nvidia_info()
     use_gpu = gpu is not None and platform.system() != "Darwin"
+    reset_attempts(state)
+    state["gpu_info"] = {
+        "name": gpu["name"] if gpu else "",
+        "driver": gpu.get("driver", "") if gpu else "",
+        "compute_cap": gpu.get("compute_cap", "") if gpu else "",
+    }
     fingerprint = gpu_fingerprint(gpu) if use_gpu else ""
     probe = probe_engine()
 
@@ -363,10 +427,13 @@ def ensure_engine(state: dict, repair: bool) -> dict:
             say("      Checking the installed engine with a test model...")
             ok, reason = engine_selftest(bool(probe["gpu"]))
             if ok:
+                record_attempt(state, f"installed engine {probe['version']}", "ok")
                 _record(state, probe, gpu, "installed")
                 return probe
+            record_attempt(state, f"installed engine {probe['version']}", "failed", reason)
             say(f"      The installed engine failed the check: {reason}")
         elif _gpu_gave_up(state, fingerprint):
+            record_attempt(state, "GPU engine search", "skipped", "already tried for this graphics card and driver; run --repair to retry")
             say("      GPU engines were already tried for this graphics card and driver without success.")
             say("      Run start-server.bat --repair to try them again.")
             skip_gpu = True
@@ -388,24 +455,33 @@ def ensure_engine(state: dict, repair: bool) -> dict:
     if use_gpu and not skip_gpu and platform.system() == "Windows":
         candidates = windows_cuda_candidates(gpu)
         if not candidates:
+            record_attempt(state, "GPU engine search", "failed", "no prebuilt build matches this graphics card, driver and Python version")
             say("      No prebuilt GPU engine matches this graphics card and driver.")
         for number, cand in enumerate(candidates, start=1):
             say(f"      GPU engine option {number}/{len(candidates)}: llama-cpp-python {cand['version']} (CUDA {cand['cuda']})")
+            source = "official" if cand.get("official") else "prebuilt"
+            label = f"GPU engine {cand['version']} (CUDA {cand['cuda']}, {source})"
+            if cand.get("official"):
+                say("        This build includes the CUDA libraries: about 500 MB, one time.")
             if not install_windows_candidate(cand):
+                record_attempt(state, label, "failed", "the package could not be installed (pip error)")
                 say("        installation failed, trying the next option")
                 continue
             probe = probe_engine()
             if not probe["ok"]:
+                record_attempt(state, label, "failed", probe.get("error", "the engine does not start"))
                 say(f"        does not start: {probe.get('error', 'unknown error')}")
                 continue
             ok, reason = engine_selftest(bool(probe["gpu"]))
             if ok:
+                record_attempt(state, label, "ok")
                 _record(state, probe, gpu, f"cuda-{cand['cuda']}-{cand['version']}")
-                state["gpu_engine_attempt"] = {"fingerprint": fingerprint, "result": "ok"}
+                state["gpu_engine_attempt"] = {"fingerprint": fingerprint, "result": "ok", "schema": GPU_ATTEMPT_SCHEMA}
                 return probe
+            record_attempt(state, label, "failed", reason)
             say(f"        failed the check: {reason}")
         if candidates:
-            state["gpu_engine_attempt"] = {"fingerprint": fingerprint, "result": "failed"}
+            state["gpu_engine_attempt"] = {"fingerprint": fingerprint, "result": "failed", "schema": GPU_ATTEMPT_SCHEMA}
     elif use_gpu and not skip_gpu and platform.system() == "Linux":
         say("      Installing GPU engine (CUDA 12)")
         install_cuda_engine_linux()
@@ -413,11 +489,13 @@ def ensure_engine(state: dict, repair: bool) -> dict:
         if probe["ok"]:
             ok, reason = engine_selftest(bool(probe["gpu"]))
             if ok:
+                record_attempt(state, "GPU engine (CUDA 12)", "ok")
                 _record(state, probe, gpu, "linux-cuda12")
-                state["gpu_engine_attempt"] = {"fingerprint": fingerprint, "result": "ok"}
+                state["gpu_engine_attempt"] = {"fingerprint": fingerprint, "result": "ok", "schema": GPU_ATTEMPT_SCHEMA}
                 return probe
+            record_attempt(state, "GPU engine (CUDA 12)", "failed", reason)
             say(f"        failed the check: {reason}")
-        state["gpu_engine_attempt"] = {"fingerprint": fingerprint, "result": "failed"}
+        state["gpu_engine_attempt"] = {"fingerprint": fingerprint, "result": "failed", "schema": GPU_ATTEMPT_SCHEMA}
 
     say("      Installing the CPU engine")
     install_cpu_engine()
@@ -425,8 +503,10 @@ def ensure_engine(state: dict, repair: bool) -> dict:
     if probe["ok"]:
         ok, reason = engine_selftest(False)
         if ok:
+            record_attempt(state, f"CPU engine {probe['version']}", "ok")
             _record(state, probe, gpu, "cpu")
             return probe
+        record_attempt(state, f"CPU engine {probe['version']}", "failed", reason)
         say(f"      The CPU engine failed the check: {reason}")
         probe = dict(probe, ok=False, error=reason)
     state.pop("engine_verified", None)

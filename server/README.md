@@ -27,7 +27,7 @@ Options:
 
 The launcher needs internet access once for the setup (Python, packages, engine). Later starts work without it.
 
-If the computer has an NVIDIA graphics card but the engine runs on the processor, the server tries the GPU builds on its next start by itself. A failed try is remembered for this card and driver, so it is not repeated on every start. A driver update or `--repair` starts the search again.
+If the computer has an NVIDIA graphics card but the engine runs on the processor, the server tries the GPU builds on its next start by itself. The first option is the official CUDA build of llama.cpp, about 500 MB to download once; it is the most reliable one. The System tab shows every option that was tried and why it did not work. A failed try is remembered for this card and driver, so it is not repeated on every start. A driver update or `--repair` starts the search again.
 
 ## Vision models (photos in chat)
 

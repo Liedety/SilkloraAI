@@ -102,7 +102,7 @@ class EngineFlowTests(unittest.TestCase):
         cpu_probe = {"ok": True, "version": "0.3.36", "gpu": False}
         state = {
             "engine_verified": {"version": "0.3.36", "gpu": "RTX 4060 Ti", "gpu_mode": False, "source": "cpu"},
-            "gpu_engine_attempt": {"fingerprint": "RTX 4060 Ti|581.15", "result": "failed"},
+            "gpu_engine_attempt": {"fingerprint": "RTX 4060 Ti|581.15", "result": "failed", "schema": bootstrap.GPU_ATTEMPT_SCHEMA},
         }
         result, calls, _ = self.run_flow(state, probes=[cpu_probe], selftests=[(True, "ok")], candidates=[cand("0.3.20", "13.0")])
         self.assertEqual(calls["install"], [])
@@ -114,10 +114,20 @@ class EngineFlowTests(unittest.TestCase):
         ok_probe = {"ok": True, "version": "0.3.20", "gpu": True}
         state = {
             "engine_verified": {"version": "0.3.36", "gpu": "RTX 4060 Ti", "gpu_mode": False, "source": "cpu"},
-            "gpu_engine_attempt": {"fingerprint": "RTX 4060 Ti|560.70", "result": "failed"},
+            "gpu_engine_attempt": {"fingerprint": "RTX 4060 Ti|560.70", "result": "failed", "schema": bootstrap.GPU_ATTEMPT_SCHEMA},
         }
         result, calls, _ = self.run_flow(state, probes=[cpu_probe, ok_probe], selftests=[(True, "ok")], candidates=[cand("0.3.20", "13.0")])
         self.assertEqual(calls["install"], ["0.3.20-13.0"])
+
+    def test_old_gave_up_note_from_previous_candidate_list_is_ignored(self):
+        cpu_probe = {"ok": True, "version": "0.3.36", "gpu": False}
+        ok_probe = {"ok": True, "version": "0.3.36", "gpu": True}
+        state = {
+            "engine_verified": {"version": "0.3.36", "gpu": "RTX 4060 Ti", "gpu_mode": False, "source": "cpu"},
+            "gpu_engine_attempt": {"fingerprint": "RTX 4060 Ti|560.94", "result": "failed", "schema": 1},
+        }
+        result, calls, _ = self.run_flow(state, probes=[cpu_probe, ok_probe], selftests=[(True, "ok")], candidates=[cand("0.3.36", "12.4")])
+        self.assertEqual(calls["install"], ["0.3.36-12.4"])
 
     def test_verified_engine_is_not_retested(self):
         probe = {"ok": True, "version": "0.3.20", "gpu": True}

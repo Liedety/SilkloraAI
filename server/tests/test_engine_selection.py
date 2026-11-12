@@ -34,25 +34,44 @@ RELEASES = [
 
 class CandidateTests(unittest.TestCase):
     def setUp(self):
+        from unittest import mock
+
         self._orig = bootstrap.fetch_json
         bootstrap.fetch_json = lambda url: RELEASES if "page=1" in url else []
+        self._official = mock.patch.object(
+            bootstrap,
+            "official_cuda_candidate",
+            lambda: {"url": "https://example.invalid/official.whl", "version": "0.3.36", "cuda": "12.4", "official": True, "sort": ()},
+        )
+        self._official.start()
 
     def tearDown(self):
         bootstrap.fetch_json = self._orig
+        self._official.stop()
 
     @staticmethod
     def gpu(name, cap, driver):
         return {"name": name, "compute_cap": cap, "driver": driver}
 
+    def test_official_cuda_build_is_tried_first(self):
+        cands = bootstrap.windows_cuda_candidates(self.gpu("RTX 4060 Ti", "8.9", "581.15"))
+        self.assertTrue(cands[0].get("official"))
+        self.assertEqual(cands[0]["cuda"], "12.4")
+
+    def test_official_build_skipped_on_cuda11_driver(self):
+        cands = bootstrap.windows_cuda_candidates(self.gpu("GTX 1660", "7.5", "470.05"))
+        self.assertFalse(any(c.get("official") for c in cands))
+
     def test_newest_cuda13_first_for_ada_with_new_driver(self):
         cands = bootstrap.windows_cuda_candidates(self.gpu("RTX 4060 Ti", "8.9", "581.15"))
-        self.assertEqual(cands[0]["version"], "0.3.20")
-        self.assertEqual(cands[0]["cuda"], "13.0")
+        newer = [c for c in cands if not c.get("official")]
+        self.assertEqual(newer[0]["version"], "0.3.20")
+        self.assertEqual(newer[0]["cuda"], "13.0")
 
     def test_cuda13_skipped_on_old_driver(self):
         cands = bootstrap.windows_cuda_candidates(self.gpu("RTX 4060 Ti", "8.9", "560.70"))
         self.assertTrue(cands)
-        self.assertTrue(all(c["cuda"] == "12.1" for c in cands))
+        self.assertFalse(any(c["cuda"].startswith("13.") for c in cands))
 
     def test_ada_card_never_gets_ampere_only_build_as_first_choice(self):
         cands = bootstrap.windows_cuda_candidates(self.gpu("RTX 4060 Ti", "8.9", "581.15"))
@@ -61,7 +80,8 @@ class CandidateTests(unittest.TestCase):
     def test_blackwell_only_gets_cuda13_builds(self):
         cands = bootstrap.windows_cuda_candidates(self.gpu("RTX 5070", "12.0", "581.15"))
         self.assertTrue(cands)
-        self.assertTrue(all(c["cuda"] == "13.0" for c in cands))
+        self.assertTrue(all(c["cuda"].startswith("13.") for c in cands))
+        self.assertFalse(any(c.get("official") for c in cands))
 
     def test_turing_card_gets_sm75_build(self):
         cands = bootstrap.windows_cuda_candidates(self.gpu("GTX 1660", "7.5", "581.15"))
