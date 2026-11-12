@@ -1,3 +1,11 @@
+<div align="center">
+
+![SilkloraAI Banner](docs/banner.png)
+
+**English** | [Русский](README.ru.md)
+
+</div>
+
 # SilkloraAI
 
 A local-first mobile roleplay client for Android (and modern web browsers), paired with an optional standalone desktop inference server (**Silklora Local AI Hub**) for running local GGUF models over Wi-Fi.
