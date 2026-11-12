@@ -41,13 +41,21 @@ import {
   fetchLocalContextInfo,
   cleanArtifacts,
   extractEmotionAndCleanResponse,
+  parseStreamingBotResponse,
+  stripEmotionTags,
+  enforceParagraphLimit,
   getEffectiveAiConfig,
   getComponentAiConfig,
   speakerStopStrings,
   resolveEmotion,
   stripLeadingSpeakerName,
 } from '../services/ai';
-import { buildSystemPrompt, buildSceneNote } from '../services/promptBuilder';
+import {
+  buildSystemPrompt,
+  buildSceneNote,
+  buildTurnGuidanceBlock,
+  parseLengthOverride,
+} from '../services/promptBuilder';
 import {
   estimateTokens,
   PER_MESSAGE_TOKENS,
@@ -77,13 +85,10 @@ const SCENE_NOTE_ALLOWANCE = 220;
 
 // Strips hidden thoughts and emotion tags so past turns do not inflate the prompt or trigger ballooning replies
 function cleanHistoryText(text: string): string {
-  return (text || '')
+  const withoutThoughts = (text || '')
     .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
-    .replace(/<thought>[\s\S]*$/gi, '')
-    .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
-    .replace(/<\s*emotion[:\s][^>]+>/gi, '')
-    .replace(/(?:\[|<|\()(?:эмоция|emotion):\s*[^\]>\)]+(?:\]|>|\))/gi, '')
-    .trim();
+    .replace(/<thought>[\s\S]*$/gi, '');
+  return stripEmotionTags(withoutThoughts, undefined, { stripLeadingUnknownAngleTag: true }).trim();
 }
 
 export const ChatView: React.FC<ChatViewProps> = ({
@@ -399,20 +404,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
   };
 
   // Build current dialogue context string for AI
-  const buildContextHistory = (msgList: ChatMessage[]): string => {
+  const buildContextHistory = (msgList: ChatMessage[], userLabelOverride?: string): string => {
     return msgList
       .slice(-8)
       .map((m) => {
         const v = m.variants[m.activeVariantIndex];
-        const raw = v ? v.text : '';
-        const cleaned = raw
-          .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
-          .replace(/<thought>[\s\S]*$/gi, '')
-          .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
-          .replace(/<\s*emotion[:\s][^>]+>/gi, '')
-          .replace(/(?:\[|<|\()(?:эмоция|emotion):\s*[^\]>\)]+(?:\]|>|\))/gi, '')
-          .trim();
-        return `${m.senderName}: ${cleaned}`;
+        const cleaned = cleanHistoryText(v ? v.text : '');
+        const label = m.senderId === 'user' && userLabelOverride
+          ? userLabelOverride
+          : m.senderName;
+        return `${label}: ${cleaned}`;
       })
       .join('\n');
   };
@@ -465,17 +466,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
     abortControllerRef.current = abortController;
 
     try {
+      // Load freshest chat session & settings so recently updated directives/persona take effect immediately
+      const freshChat = await db.chats.get(session.id);
+      const activeChat = freshChat || session;
+
       // Retrieve user persona
-      const userPersona = session.personaId
-        ? allCharacters.find((c) => c.id === session.personaId) || null
+      const userPersona = activeChat.personaId
+        ? allCharacters.find((c) => c.id === activeChat.personaId) || null
         : null;
 
       // Retrieve affinity score
-      const affinity = session.relationships?.[speaker.id] || 0;
+      const affinity = activeChat.relationships?.[speaker.id] || 0;
 
       // Query fresh settings & text style from database
       const freshSettings = await db.settings.get('default');
-      const styleId = session.textStyleId || freshSettings?.textStyleId || 'literary';
+      const styleId = activeChat.textStyleId || freshSettings?.textStyleId || 'literary';
       const rawStyle = (await db.textStyles.get(styleId)) || activeStyle;
 
       // Context sliding window with context compression
@@ -488,16 +493,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
         }
       }
 
-      // Determine dialogue language based on user's recent input to match narrative style language
+      // Determine dialogue language based on user's recent input (falling back to recent messages / character lore)
       const lastUserMsgInContext = [...msgsForContext].reverse().find((m) => m.senderId === 'user');
       const lastUserText = lastUserMsgInContext?.variants[lastUserMsgInContext.activeVariantIndex]?.text || '';
-      const dialogueLang: 'en' | 'ru' = /[а-яА-ЯёЁ]/.test(lastUserText) ? 'ru' : (/[a-zA-Z]/.test(lastUserText) ? 'en' : language);
+      const langProbe =
+        lastUserText ||
+        msgsForContext.slice(-3).map((m) => m.variants[m.activeVariantIndex]?.text || '').join(' ') ||
+        speaker.description ||
+        '';
+      const dialogueLang: 'en' | 'ru' = /[а-яА-ЯёЁ]/.test(langProbe) ? 'ru' : (/[a-zA-Z]/.test(langProbe) ? 'en' : language);
       const textStyleToUse = rawStyle ? getLocalizedTextStyle(rawStyle, dialogueLang) : undefined;
 
       // Context = stable system prompt + rolling summary + verbatim window (grows by appending) + scene note.
-      const freshChat = await db.chats.get(session.id);
-      const storedSummary = freshChat?.rollingSummary?.trim() || session.rollingSummary?.trim() || '';
-      const lastSummarizedId = freshChat?.lastSummarizedMsgId || session.lastSummarizedMsgId;
+      const storedSummary = activeChat.rollingSummary?.trim() || '';
+      const lastSummarizedId = activeChat.lastSummarizedMsgId;
 
       let promptTarget = CLOUD_PROMPT_TARGET;
       let maxVerbatim = CLOUD_MAX_VERBATIM;
@@ -519,16 +528,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
         summarizedCount = idx !== -1 ? idx + 1 : 0;
       }
 
+      const resolvedUserName = (userPersona?.name || freshSettings?.userName || '').trim();
       const groupMembers = type === 'group' ? allCharacters.filter((c) => group?.characterIds.includes(c.id)) : [];
+      const turnHasLengthOverride = Boolean(guidancePrompt && parseLengthOverride(guidancePrompt));
+
       const makeSystemPrompt = (summaryText: string) => buildSystemPrompt({
         character: speaker,
         group: group || undefined,
         groupCharacters: groupMembers,
         userPersona,
-        userName: userPersona?.name || freshSettings?.userName || undefined,
+        userName: resolvedUserName || undefined,
         textStyle: textStyleToUse,
-        chatDirectives: session.chatDirectives,
-        thoughtsEnabled: session.thoughtsEnabled === true,
+        chatDirectives: activeChat.chatDirectives,
+        turnGuidance: turnHasLengthOverride ? guidancePrompt : undefined,
+        thoughtsEnabled: activeChat.thoughtsEnabled === true,
         memoryNodes,
         relationshipScore: affinity,
         speakerCharacter: speaker,
@@ -554,7 +567,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
           .slice(-8)
           .map((m) => {
             const cleaned = cleanHistoryText(m.variants[m.activeVariantIndex]?.text || '');
-            return `${m.senderName}: ${cleaned.length > 80 ? cleaned.slice(0, 80) + '...' : cleaned}`;
+            const displaySender = m.senderId === 'user' && resolvedUserName ? resolvedUserName : m.senderName;
+            return `${displaySender}: ${cleaned.length > 80 ? cleaned.slice(0, 80) + '...' : cleaned}`;
           })
           .join('\n');
         const header = dialogueLang === 'ru' ? 'Недавние события диалога:\n' : 'Recent dialogue events:\n';
@@ -565,13 +579,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const sceneNote = sceneNoteLines([
         buildSceneNote({
           speakerName: speaker.name,
-          userName: userPersona?.name || freshSettings?.userName || (dialogueLang === 'ru' ? 'собеседник' : 'the other person'),
+          userName: resolvedUserName || (dialogueLang === 'ru' ? 'собеседник' : 'the other person'),
           language: dialogueLang,
           relationshipScore: affinity,
           memoryNodes,
-          guidance: guidancePrompt,
+          emotionNames: speaker.emotions?.map((e) => e.name),
         }),
       ]);
+      const turnGuidanceBlock = guidancePrompt?.trim()
+        ? buildTurnGuidanceBlock(guidancePrompt, dialogueLang)
+        : '';
+      const effectiveLengthRule = parseLengthOverride(guidancePrompt) || parseLengthOverride(activeChat.chatDirectives);
 
       // Build message array for API
       const apiMessages: any[] = [{ role: 'system', content: systemPrompt }];
@@ -588,7 +606,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
         // Strip any hidden <thought> tags and leaked emotion tags from history so past turns do not inflate prompt tokens or trigger ballooning responses
         let textContent = cleanHistoryText(activeVariant.text);
         if (type === 'group' && !isMe) {
-          textContent = `[${msg.senderName}]: ${textContent}`;
+          const displaySender = msg.senderId === 'user' && resolvedUserName ? resolvedUserName : msg.senderName;
+          textContent = `[${displaySender}]: ${textContent}`;
         }
 
         rawTurns.push({
@@ -641,31 +660,47 @@ export const ChatView: React.FC<ChatViewProps> = ({
         alternatingTurns.unshift({
           role: 'user',
           content: type === 'group'
-            ? (language === 'ru' ? '[Сцена начинается]' : '[Scene begins]')
-            : (language === 'ru' ? 'Привет.' : 'Hello.'),
+            ? (dialogueLang === 'ru' ? '[Сцена начинается]' : '[Scene begins]')
+            : (dialogueLang === 'ru' ? 'Привет.' : 'Hello.'),
         });
       }
 
       if (alternatingTurns.length === 0) {
         alternatingTurns.push({
           role: 'user',
-          content: language === 'ru' ? '[Сцена начинается. Начни разговор.]' : '[Scene begins. Start conversation.]',
+          content: dialogueLang === 'ru' ? '[Сцена начинается. Начни разговор.]' : '[Scene begins. Start conversation.]',
+        });
+      }
+
+      // Ensure conversation ends with a user turn (e.g. /continue or chained group turn) so volatile tail stays on user turn
+      if (alternatingTurns[alternatingTurns.length - 1]?.role === 'assistant' && (sceneNote || turnGuidanceBlock)) {
+        alternatingTurns.push({
+          role: 'user',
+          content: dialogueLang === 'ru' ? `[Ход ${speaker.name}. Продолжай.]` : `[${speaker.name}'s turn. Continue.]`,
         });
       }
 
       apiMessages.push(...alternatingTurns);
 
-      // Scene note goes to the end of the last user message, so the stable beginning stays cacheable
+      // Volatile tail (scene note + turn guidance) attaches cleanly to the end of the last user message
+      const tailBlocks: string[] = [];
       if (sceneNote) {
         const noteTitle = dialogueLang === 'ru' ? 'Заметка сцены (не цитируй и не упоминай)' : 'Scene note (do not quote or mention)';
-        const note = `[${noteTitle}:\n${sceneNote}]`;
+        tailBlocks.push(`[${noteTitle}:\n${sceneNote}]`);
+      }
+      if (turnGuidanceBlock) {
+        tailBlocks.push(turnGuidanceBlock);
+      }
+
+      if (tailBlocks.length > 0) {
+        const tailText = tailBlocks.join('\n\n');
         const last = apiMessages[apiMessages.length - 1];
         if (last && last.role === 'user' && typeof last.content === 'string') {
-          last.content = `${last.content}\n\n${note}`;
+          last.content = `${last.content}\n\n${tailText}`;
         } else if (last && last.role === 'user' && Array.isArray(last.content)) {
-          last.content.push({ type: 'text', text: note });
+          last.content.push({ type: 'text', text: tailText });
         } else {
-          apiMessages[0] = { role: 'system', content: `${systemPrompt}\n\n${note}` };
+          apiMessages[0] = { role: 'system', content: `${systemPrompt}\n\n${tailText}` };
         }
       }
 
@@ -675,55 +710,32 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const hasImages = apiMessages.some((m: any) => Array.isArray(m.content) && m.content.some((p: any) => p.type === 'image_url'));
       const turnConfig = hasImages ? getComponentAiConfig(settings, activeApiKey, 'vision') : null;
 
-      const otherNames = [
-        speaker.name,
-        userPersona?.name || '',
-        ...allCharacters.filter((c) => c.id !== speaker.id && group?.characterIds.includes(c.id)).map((c) => c.name),
-      ];
       // Only the speaker's own name is stripped from the start; the stop list must not contain it,
       // otherwise a reply that begins with "Name:" is cut to nothing.
       const otherSpeakers = [
-        userPersona?.name || '',
-        ...allCharacters.filter((c) => c.id !== speaker.id && group?.characterIds.includes(c.id)).map((c) => c.name),
-      ];
+        resolvedUserName,
+        ...allCharacters
+          .filter((c) => c.id !== speaker.id && c.id !== userPersona?.id && group?.characterIds.includes(c.id))
+          .map((c) => c.name),
+      ].filter(Boolean);
 
       await streamChatCompletion({
         apiKeyConfig: (turnConfig ? turnConfig.apiKeyConfig : effectiveApiKey) as ApiKeyConfig,
         model: turnConfig ? turnConfig.textModel : effectiveModel,
-        // Also stop if the model starts quoting the hidden scene note
-        extraStops: [...speakerStopStrings(otherSpeakers), '[Scene note', '[Заметка сцены'],
+        // Also stop if the model starts quoting the hidden scene note or turn guidance header
+        extraStops: [...speakerStopStrings(otherSpeakers), '[Scene note', '[Заметка сцены', '[УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ', '[USER TURN DIRECTIVE'],
         messages: apiMessages,
         temperature: isLocal ? 0.7 : 0.85,
         maxTokens: 1024,
         signal: abortController.signal,
         onToken: (tok) => {
           fullGenerated += tok;
-          let currentThought = '';
-          let display = stripLeadingSpeakerName(fullGenerated, [speaker.name]);
-
-          // Only an explicit <emotion> tag changes the avatar; prose never does
-          const emotionMatch = fullGenerated.match(/<emotion>([^<]+)<\/emotion>/i);
-          if (emotionMatch) {
-            setStreamingEmotion(resolveEmotion(emotionMatch[1], speaker.emotions, speaker.name) || null);
+          const parsed = parseStreamingBotResponse(fullGenerated, speaker.emotions, speaker.name, [speaker.name]);
+          if (parsed.emotion) {
+            setStreamingEmotion(parsed.emotion);
           }
-
-          const thoughtMatch = display.match(/<thought>([\s\S]*?)<\/thought>/);
-          if (thoughtMatch) {
-            currentThought = thoughtMatch[1].replace(/<emotion>[\s\S]*?<\/emotion>/gi, '').trim();
-            display = display.replace(/<thought>[\s\S]*?<\/thought>/, '').trimStart();
-          } else if (display.startsWith('<thought>')) {
-            currentThought = display.replace('<thought>', '').replace(/<emotion>[\s\S]*?<\/emotion>/gi, '');
-            display = '';
-          }
-
-          display = display
-            .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
-            .replace(/<\s*emotion[:\s][^>]+>/gi, '')
-            .replace(/(?:\[|<|\()(?:эмоция|emotion):\s*[^\]>\)]+(?:\]|>|\))/gi, '')
-            .trimStart();
-
-          setStreamingThought(currentThought);
-          setStreamingText(cleanArtifacts(display));
+          setStreamingThought(parsed.thought || '');
+          setStreamingText(parsed.text);
         },
         onComplete: async (rawCompleted) => {
           setIsGenerating(false);
@@ -738,9 +750,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
             const { text: finalText, thought: finalThought, emotion: finalEmotion } =
               extractEmotionAndCleanResponse(completed, speaker.emotions, speaker.name);
+            const boundedText = enforceParagraphLimit(
+              finalText || cleanArtifacts(completed, speaker.emotions),
+              effectiveLengthRule?.maxParagraphs,
+              effectiveLengthRule?.mode === 'shorter'
+            );
 
             const newVariant: MessageVariant = {
-              text: finalText || cleanArtifacts(completed),
+              text: boundedText,
               thought: finalThought || undefined,
               emotion: finalEmotion,
               timestamp: Date.now(),
@@ -904,7 +921,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       id: 'msg-' + Math.random().toString(36).substring(2, 10),
       chatId: session.id,
       senderId: 'user',
-      senderName: userPersona ? userPersona.name : (language === 'ru' ? 'Вы' : 'You'),
+      senderName: userPersona ? userPersona.name : (settings?.userName?.trim() || (language === 'ru' ? 'Вы' : 'You')),
       senderAvatar: userPersona ? userPersona.avatar : undefined,
       variants: [
         {
@@ -1050,7 +1067,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   // User Magic Wand Ghostwriter: streams the suggestion, can be stopped, keeps the partial text
   const handleExecuteUserWand = async () => {
-    if (!effectiveApiKey || (!effectiveApiKey.key.trim() && !isLocal)) {
+    const ghostCfg = getComponentAiConfig(settings, activeApiKey, 'ghostwriter');
+    const ghostKey = ghostCfg.apiKeyConfig;
+    if (!ghostKey || (!ghostKey.key?.trim() && !ghostCfg.isLocal)) {
       alert(language === 'ru' ? 'Сначала настройте подключение к ИИ в настройках' : 'Please configure AI connection in settings first');
       return;
     }
@@ -1059,19 +1078,32 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setWandPreview('');
     setIsWandGenerating(true);
     try {
-      const history = buildContextHistory(messages);
       const userPersona = session?.personaId
         ? allCharacters.find((c) => c.id === session.personaId) || null
         : null;
+      const wandUserName = (userPersona?.name || settings?.userName || '').trim() || undefined;
+      const history = buildContextHistory(messages, wandUserName);
+      const otherSpeakers = type === 'group'
+        ? allCharacters
+            .filter((c) => group?.characterIds.includes(c.id) && c.id !== userPersona?.id)
+            .map((c) => c.name)
+        : (character ? [character.name] : []);
+      const langProbe = history || userWandPrompt || character?.description || '';
+      const wandLang: 'en' | 'ru' = /[а-яА-ЯёЁ]/.test(langProbe) ? 'ru' : (/[a-zA-Z]/.test(langProbe) ? 'en' : language);
 
-      const ghostCfg = getComponentAiConfig(settings, activeApiKey, 'ghostwriter');
       const suggested = await suggestUserReply(
-        ghostCfg.apiKeyConfig as any,
+        ghostKey as any,
         ghostCfg.textModel,
         userPersona,
         userWandPrompt,
         history,
-        { onPartial: (text) => setWandPreview(text), signal: controller.signal }
+        {
+          userName: wandUserName,
+          otherSpeakers,
+          language: wandLang,
+          onPartial: (text) => setWandPreview(text),
+          signal: controller.signal,
+        }
       );
       setWandPreview(suggested.trim());
       if (!suggested.trim() && !controller.signal.aborted) {

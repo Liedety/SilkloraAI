@@ -3,10 +3,22 @@ import assert from 'node:assert/strict';
 import {
   cleanArtifacts,
   extractEmotionAndCleanResponse,
+  parseStreamingBotResponse,
+  stripEmotionTags,
+  enforceParagraphLimit,
+  buildGhostwriterMessages,
+  cleanGhostwriterOutput,
   normalizeLocalServerUrl,
   getEffectiveAiConfig,
 } from '../src/services/ai.ts';
-import { buildSystemPrompt, DEFAULT_CORE_SYSTEM_PROMPT } from '../src/services/promptBuilder.ts';
+import {
+  buildSystemPrompt,
+  buildSceneNote,
+  buildTurnGuidanceBlock,
+  buildLengthOverrideDirective,
+  parseLengthOverride,
+  DEFAULT_CORE_SYSTEM_PROMPT,
+} from '../src/services/promptBuilder.ts';
 import { translations } from '../src/i18n/index.ts';
 import { speakerStopStrings, stripLeadingSpeakerName, resolveEmotion } from '../src/services/ai.ts';
 import { estimateTokens, planWindow, planSummaryBatch, summaryLimits, sceneNoteLines, SUMMARY_BATCH } from '../src/services/contextBudget.ts';
@@ -1092,4 +1104,245 @@ test('resolveEmotion: unknown emotion is dropped when the character has a fixed 
   const emotions = [{ id: '1', name: 'happy', label: 'Радость', avatar: 'b' }];
   assert.strictEqual(resolveEmotion('экстаз', emotions, 'Мира'), undefined);
   assert.strictEqual(resolveEmotion('', emotions, 'Мира'), undefined);
+});
+
+test('extractEmotionAndCleanResponse & stripEmotionTags: handles shorthand <emotion>, <>, custom emotions, and post-tag prefixes', () => {
+  const emotions = [
+    { id: '1', name: 'neutral', label: 'Нейтральный', avatar: 'a' },
+    { id: '2', name: 'happy', label: 'Радость', avatar: 'b' },
+    { id: '3', name: 'smirk', label: 'Усмешка', avatar: 'c' },
+    { id: '4', name: 'custom_rage', label: 'Ярость', avatar: 'd' },
+  ];
+
+  // Shorthand <smirk> / <радость> / <custom_rage>
+  const r1 = extractEmotionAndCleanResponse('<smirk> *ухмыляется* Ну и кто тут главный?', emotions, 'Мира');
+  assert.strictEqual(r1.emotion, 'smirk');
+  assert.strictEqual(r1.text, '*ухмыляется* Ну и кто тут главный?');
+
+  const r2 = extractEmotionAndCleanResponse('<радость> *смеется* Привет!', emotions, 'Мира');
+  assert.strictEqual(r2.emotion, 'happy');
+  assert.strictEqual(r2.text, '*смеется* Привет!');
+
+  const r3 = extractEmotionAndCleanResponse('<custom_rage> *стискивает зубы*', emotions, 'Мира');
+  assert.strictEqual(r3.emotion, 'custom_rage');
+  assert.strictEqual(r3.text, '*стискивает зубы*');
+
+  // Empty <> or unknown leading <tag> or another character's <Алекс: happy> must be stripped from visible text
+  const rEmpty = extractEmotionAndCleanResponse('<> *хмыкает* Да ладно.', emotions, 'Мира');
+  assert.strictEqual(rEmpty.emotion, undefined);
+  assert.strictEqual(rEmpty.text, '*хмыкает* Да ладно.');
+
+  const rUnknown = extractEmotionAndCleanResponse('<экстаз> *вздыхает* Как хорошо.', emotions, 'Мира');
+  assert.strictEqual(rUnknown.emotion, undefined);
+  assert.strictEqual(rUnknown.text, '*вздыхает* Как хорошо.');
+
+  const rOtherChar = extractEmotionAndCleanResponse('<Алекс: happy> *смотрит на тебя* Привет.', emotions, 'Мира');
+  assert.strictEqual(rOtherChar.emotion, undefined);
+  assert.strictEqual(rOtherChar.text, '*смотрит на тебя* Привет.');
+
+  // Emotion tag followed by speaker name prefix "Мира:"
+  const rPrefixAfterTag = extractEmotionAndCleanResponse('<emotion>happy</emotion> Мира: *кивает* Договорились.', emotions, 'Мира');
+  assert.strictEqual(rPrefixAfterTag.emotion, 'happy');
+  assert.strictEqual(rPrefixAfterTag.text, '*кивает* Договорились.');
+
+  // Russian <эмоция> tag & tag after <thought>
+  const rRuTag = extractEmotionAndCleanResponse('<thought>Он блефует.</thought>\n<эмоция>ухмылка</эмоция>\n*прищурилась* Докажи.', emotions, 'Мира');
+  assert.strictEqual(rRuTag.emotion, 'smirk');
+  assert.strictEqual(rRuTag.thought, 'Он блефует.');
+  assert.strictEqual(rRuTag.text, '*прищурилась* Докажи.');
+
+  // Standard HTML <p>...</p> is not falsely matched by stripEmotionTags
+  assert.strictEqual(stripEmotionTags('<p>Текст</p>', emotions), '<p>Текст</p>');
+});
+
+test('parseStreamingBotResponse: holds partial angle tags and updates emotion live', () => {
+  const emotions = [
+    { id: '1', name: 'neutral', label: 'Нейтральный', avatar: 'a' },
+    { id: '2', name: 'happy', label: 'Радость', avatar: 'b' },
+    { id: '3', name: 'smirk', label: 'Усмешка', avatar: 'c' },
+  ];
+
+  // Unclosed partial leading tag should not flicker in visible streaming text
+  const partial1 = parseStreamingBotResponse('<emot', emotions, 'Мира');
+  assert.strictEqual(partial1.text, '');
+
+  const partial2 = parseStreamingBotResponse('<smir', emotions, 'Мира');
+  assert.strictEqual(partial2.text, '');
+
+  // Once closed, shorthand emotion resolves and is hidden from visible text
+  const ready = parseStreamingBotResponse('<smirk> Мира: *приподнимает бровь* Уверен', emotions, 'Мира');
+  assert.strictEqual(ready.emotion, 'smirk');
+  assert.strictEqual(ready.text, '*приподнимает бровь* Уверен');
+
+  // Unclosed <thought> routes cleanly into thought field
+  const thinking = parseStreamingBotResponse('<happy><thought>Странный тип', emotions, 'Мира');
+  assert.strictEqual(thinking.emotion, 'happy');
+  assert.strictEqual(thinking.thought, 'Странный тип');
+  assert.strictEqual(thinking.text, '');
+});
+
+test('parseLengthOverride & buildTurnGuidanceBlock: converts negative/vague user length wishes into explicit positive rules', () => {
+  assert.deepStrictEqual(parseLengthOverride('не пиши больше 2 абзацев'), { maxParagraphs: 2 });
+  assert.deepStrictEqual(parseLengthOverride('максимум один абзац пожалуйста'), { maxParagraphs: 1 });
+  assert.deepStrictEqual(parseLengthOverride('пиши меньше'), { mode: 'shorter' });
+  assert.deepStrictEqual(parseLengthOverride('короче, без воды'), { mode: 'shorter' });
+  assert.strictEqual(parseLengthOverride('не пиши слишком коротко'), null);
+
+  const dir2 = buildLengthOverrideDirective('не пиши больше 2 абзацев', 'ru');
+  assert.ok(dir2 && dir2.includes('НЕ БОЛЕЕ чем из 2 абзацев'));
+  assert.ok(dir2.includes('3-й абзац КАТЕГОРИЧЕСКИ ЗАПРЕЩЕН'));
+
+  const turnBlock = buildTurnGuidanceBlock('не пиши больше 2 абзацев', 'ru');
+  assert.ok(turnBlock.includes('УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ НА ЭТОТ ХОД'));
+  assert.ok(turnBlock.includes('НЕ БОЛЕЕ чем из 2 абзацев'));
+
+  // buildSceneNote keeps working cleanly without guidance contamination
+  const note = buildSceneNote({ speakerName: 'Мира', userName: 'Макс', language: 'ru', relationshipScore: 30 });
+  assert.ok(note.includes('Мира и Макс'));
+});
+
+test('buildSystemPrompt (ru): localizes sections, enforces anti-godmoding, includes userName, and gives chatDirectives recency priority', () => {
+  const mira: Character = {
+    id: 'mira',
+    name: 'Мира',
+    description: 'Наемница',
+    emotions: [
+      { id: '1', name: 'neutral', label: 'Нейтральный', avatar: 'a' },
+      { id: '2', name: 'smirk', label: 'Усмешка', avatar: 'b' },
+    ],
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const maxPersona: Character = {
+    id: 'max',
+    name: 'Макс',
+    description: 'Разведчик',
+    isPersona: true,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const kira: Character = {
+    id: 'kira',
+    name: 'Кира',
+    description: 'Взломщица',
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const group: Group = {
+    id: 'g1',
+    name: 'Отряд',
+    description: 'Киберпанк',
+    characterIds: ['mira', 'kira', 'max'],
+    turnMode: 'natural',
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const style: TextStylePreset = {
+    id: 'literary',
+    name: 'Литературный роман',
+    instruction: 'Пиши в 2-4 абзаца.',
+  };
+
+  // Without persona, fallback userName is still communicated and protected against godmoding
+  const noPersonaPrompt = buildSystemPrompt({
+    character: mira,
+    userName: 'Дмитрий',
+    textStyle: style,
+    chatDirectives: 'не пиши больше 2 абзацев',
+    language: 'ru',
+  });
+  assert.ok(noPersonaPrompt.includes('Дмитрий'));
+  assert.ok(noPersonaPrompt.includes('НИКОГДА не сокращай до <'));
+  assert.ok(!noPersonaPrompt.includes('ABSOLUTE RESPONSE LENGTH & PACING DIRECTIVE'));
+  assert.ok(noPersonaPrompt.includes('НЕ БОЛЕЕ чем из 2 абзацев'));
+  assert.ok(!noPersonaPrompt.includes('от 1 до 3 абзацев'));
+  const styleIdx = noPersonaPrompt.indexOf('ОБЯЗАТЕЛЬНЫЙ СТИЛЬ ТЕКСТА');
+  const dirIdx = noPersonaPrompt.indexOf('ПОСТОЯННЫЕ ПРАВИЛА ЭТОГО ЧАТА');
+  assert.ok(dirIdx > styleIdx && styleIdx !== -1, 'chatDirectives should come after textStyle to override it');
+
+  // With userPersona in groupCharacters, persona must not appear in AI NPC otherMembers
+  const groupPrompt = buildSystemPrompt({
+    character: mira,
+    group,
+    groupCharacters: [mira, kira, maxPersona],
+    userPersona: maxPersona,
+    speakerCharacter: mira,
+    language: 'ru',
+  });
+  assert.ok(groupPrompt.includes('Другие персонажи сцены (Кира) и Макс'));
+});
+
+test('buildGhostwriterMessages & cleanGhostwriterOutput: keeps Magic Wand strictly as player/persona in group chats', () => {
+  const maxPersona: Character = {
+    id: 'max',
+    name: 'Макс',
+    description: 'Хладнокровный разведчик.',
+    isPersona: true,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const history = 'Мира: План прост.\nКира: Охраны слишком много.\nВы: *осматривается* Я готов.';
+
+  const built = buildGhostwriterMessages({
+    userPersona: maxPersona,
+    prompt: 'подколи Миру',
+    recentHistory: history,
+    otherSpeakers: ['Мира', 'Кира'],
+    language: 'ru',
+  });
+  assert.strictEqual(built.speakerLabel, 'Макс');
+  assert.deepStrictEqual(built.otherSpeakers, ['Мира', 'Кира']);
+  assert.ok(built.system.includes('ТОЛЬКО одну следующую реплику игрока (Макс)'));
+  assert.ok(built.system.includes('Мира, Кира'));
+  assert.ok(built.userMsg.includes('Макс: *осматривается*'));
+  assert.ok(!built.userMsg.includes('\nВы:'));
+
+  // Strips copied persona/NPC name prefixes, leaked <>, and trailing multi-character turns
+  const dirty = '<smirk> Макс: *усмехается* Прорвемся.\nМира: *закатывает глаза* Посмотрим.';
+  assert.strictEqual(
+    cleanGhostwriterOutput(dirty, 'Макс', ['Мира', 'Кира']),
+    '*усмехается* Прорвемся.'
+  );
+  assert.strictEqual(
+    cleanGhostwriterOutput('Мира: *вздыхает* Ну давай.', 'Макс', ['Мира', 'Кира']),
+    '*вздыхает* Ну давай.'
+  );
+});
+
+test('enforceParagraphLimit & self-closing <smirk/> emotion tags + buildSceneNote emotion reminder', () => {
+  const emotions = [
+    { id: '1', name: 'neutral', label: 'Нейтральный', avatar: 'a' },
+    { id: '2', name: 'smirk', label: 'Усмешка', avatar: 'b' },
+    { id: '3', name: 'happy', label: 'Радость', avatar: 'c' },
+  ];
+
+  // Self-closing <smirk/> and closing </smirk>
+  const rSelf = extractEmotionAndCleanResponse('<smirk/> *ухмыляется* Ну-ну.', emotions, 'Мира');
+  assert.strictEqual(rSelf.emotion, 'smirk');
+  assert.strictEqual(rSelf.text, '*ухмыляется* Ну-ну.');
+
+  // Losslessly merges standalone *action* splits before slicing paragraphs
+  const split4 = '*Ухмыльнулась.*\n\nОпять спасаешь?\n\n*Потянула кинжал.*\n\nДержи ухо востро.';
+  assert.strictEqual(
+    enforceParagraphLimit(split4, 2, false),
+    '*Ухмыльнулась.* Опять спасаешь?\n\n*Потянула кинжал.* Держи ухо востро.'
+  );
+
+  // Explicit 3 full paragraphs trimmed cleanly at paragraph boundary when limit is 2
+  const full3 = 'Первый абзац.\n\nВторой абзац.\n\nТретий лишний абзац.';
+  assert.strictEqual(
+    enforceParagraphLimit(full3, 2, false),
+    'Первый абзац.\n\nВторой абзац.'
+  );
+
+  // buildSceneNote appends emotion tag cue only when emotionNames provided
+  const noteWithEmos = buildSceneNote({
+    speakerName: 'Мира',
+    userName: 'Макс',
+    language: 'ru',
+    relationshipScore: 20,
+    emotionNames: ['neutral', 'smirk', 'happy'],
+  });
+  assert.ok(noteWithEmos.includes('<emotion>название</emotion>'));
+  assert.ok(noteWithEmos.includes('neutral, smirk, happy'));
 });

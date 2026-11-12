@@ -283,6 +283,10 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
           '\n<user>',
           '\n<human>',
           '\nПользователь:',
+          '\nВы:',
+          '\nИгрок:',
+          '\nYou:',
+          '\nPlayer:',
           '<用户>',
           '<AI>',
         ],
@@ -596,26 +600,27 @@ export async function fetchVisionModels(
   ];
 }
 
-export function cleanArtifacts(str: string): string {
+export function cleanArtifacts(str: string, characterEmotions?: CharacterEmotion[]): string {
   if (!str) return '';
-  return str
+  let out = str
     // Strip tokenizer tokens like <|begin_of_sentence|>, < | begin__of__sentence | >, <|im_end|>, etc.
     .replace(/<\s*\|\s*[^>]+\s*\|\s*>/gi, '')
-    // Strip simulated turns starting with <user> or User:
+    // Strip simulated turns starting with <user>, User:, Вы:, Игрок:, Пользователь:
     .replace(/\n\s*<user>[\s\S]*$/gi, '')
     .replace(/\n\s*User:[\s\S]*$/gi, '')
-    // Strip leading turn prefixes like <user>, <bot>, <assistant>, User:, Bot:, Assistant:
+    .replace(/\n\s*(?:Пользователь|Вы|Игрок):[\s\S]*$/g, '')
+    // Strip leading turn prefixes like <user>, <bot>, <assistant>, User:, Bot:, Assistant:, Вы:, Игрок:
     .replace(/^\s*<user>[:\s]*/i, '')
     .replace(/^\s*<bot>[:\s]*/i, '')
     .replace(/^\s*<assistant>[:\s]*/i, '')
     .replace(/^\s*User:[:\s]*/i, '')
     .replace(/^\s*Bot:[:\s]*/i, '')
     .replace(/^\s*Assistant:[:\s]*/i, '')
-    // Strip raw emotion tags and standalone bracket emotions from visible chat text
-    .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
-    .replace(/<\s*emotion[:\s][^>]+>/gi, '')
-    .replace(/(?:\[|<|\()(?:эмоция|emotion):\s*[^\]>\)]+(?:\]|>|\))/gi, '')
-    .replace(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/gi, '')
+    .replace(/^\s*(?:Пользователь|Вы|Игрок|You|Player)\s*:\s*/i, '');
+
+  out = stripEmotionTags(out, characterEmotions, { stripLeadingUnknownAngleTag: true });
+
+  return out
     // Clean accidental bilingual translation parentheticals (e.g. "слово (word)")
     .replace(/([а-яА-ЯёЁ]{2,30})\s*\([a-zA-Z\s]{2,30}\)/g, '$1')
     .replace(/([a-zA-Z]{2,30})\s*\(([а-яА-ЯёЁ\s]{2,30})\)/g, '$2')
@@ -666,7 +671,7 @@ export function resolveEmotion(
   speakerName?: string
 ): string | undefined {
   if (!raw) return undefined;
-  let value = raw.trim().toLowerCase().replace(/^[*"'\[]+|[*"'\]]+$/g, '').trim();
+  let value = raw.trim().toLowerCase().replace(/^[*"'\[\/]+|[*"'\]\/]+$/g, '').trim();
   if (!value) return undefined;
 
   const named = value.match(/^([^:\-–—]{2,40})\s*[:–—-]\s*(.+)$/);
@@ -692,6 +697,133 @@ export function resolveEmotion(
   return list.length === 0 ? value : undefined;
 }
 
+const HTML_OR_SYSTEM_TAGS = new Set([
+  'thought', '/thought', 'p', '/p', 'br', 'b', '/b', 'i', '/i', 'em', '/em',
+  'strong', '/strong', 'u', '/u', 's', '/s', 'a', '/a', 'div', '/div',
+  'span', '/span', 'ul', '/ul', 'ol', '/ol', 'li', '/li', 'blockquote',
+  '/blockquote', 'code', '/code', 'pre', '/pre', 'hr',
+  'h1', '/h1', 'h2', '/h2', 'h3', '/h3', 'h4', '/h4', 'h5', '/h5', 'h6', '/h6',
+  'user', 'bot', 'assistant', 'human', 'system',
+]);
+
+const KNOWN_EMOTION_WORDS = Array.from(
+  new Set([
+    ...Object.values(EMOTION_SYNONYMS).flat(),
+    'shame', 'embarrassment', 'awkward', 'shock', 'pensive', 'tease',
+    'неловкость', 'испуг', 'шок', 'стыд', 'румянец', 'сарказм', 'спокойствие',
+  ])
+);
+
+function isStandardHtmlOrSystemTag(inner: string): boolean {
+  const norm = inner.trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!norm) return false;
+  if (norm.includes('://') || /^https?:/i.test(norm)) return true;
+  const tagHead = norm.split(/[\s/>]/)[0];
+  return HTML_OR_SYSTEM_TAGS.has(tagHead);
+}
+
+function buildEmotionWordSet(characterEmotions?: CharacterEmotion[]): Set<string> {
+  const set = new Set<string>(KNOWN_EMOTION_WORDS);
+  for (const em of characterEmotions || []) {
+    if (em.name?.trim()) set.add(em.name.trim().toLowerCase());
+    if (em.label?.trim()) set.add(em.label.trim().toLowerCase());
+  }
+  return set;
+}
+
+function isKnownOrConfiguredEmotionTag(inner: string, wordSet: Set<string>): boolean {
+  let val = inner.trim().toLowerCase().replace(/^[*"'\[\/]+|[*"'\]\/]+$/g, '').trim();
+  if (!val) return false;
+  const named = val.match(/^[^:\-–—]{2,40}\s*[:–—-]\s*(.+)$/);
+  if (named) {
+    val = named[1].trim();
+  }
+  if (wordSet.has(val)) return true;
+  // Also recognize multi-word / comma-separated variants like "wry smirk" or "happy, smirk"
+  return val.split(/[\s,;]+/).some((tok) => tok.length >= 3 && wordSet.has(tok));
+}
+
+/**
+ * Strips all raw emotion markers (<emotion>...</emotion>, [emotion: ...], <happy>,
+ * <smirk/>, <радость>, [happy], empty <>, or leaked leading <custom> tags) without touching
+ * <thought> blocks or HTML markup.
+ */
+export function stripEmotionTags(
+  text: string,
+  characterEmotions?: CharacterEmotion[],
+  options: { stripLeadingUnknownAngleTag?: boolean } = {}
+): string {
+  if (!text) return '';
+  const wordSet = buildEmotionWordSet(characterEmotions);
+  let out = text
+    .replace(/<(?:emotion|эмоция)(?:\s*[:=][^>\n]*)?>[\s\S]*?<\/(?:emotion|эмоция)>/gi, '')
+    .replace(/<\/?(?:emotion|эмоция)(?:\s*[:=][^>\n]*)?>/gi, '')
+    .replace(/(?:\[|<|\()(?:эмоция|emotion)\s*[:=]\s*[^\]>\)\n]+(?:\]|>|\))/gi, '')
+    .replace(/<\s*\/?\s*>/g, '')
+    .replace(/\[([^\[\]\n]{1,48})\]/g, (full, inner) => (isKnownOrConfiguredEmotionTag(inner, wordSet) ? '' : full))
+    .replace(/<(\/?[^<>\n]{1,48})>/g, (full, inner) =>
+      !isStandardHtmlOrSystemTag(inner) && !inner.includes('|') && isKnownOrConfiguredEmotionTag(inner, wordSet) ? '' : full
+    );
+
+  if (options.stripLeadingUnknownAngleTag !== false) {
+    for (let i = 0; i < 4; i++) {
+      const m = out.match(/^\s*<(\/?[^<>\n]{1,50})>\s*/);
+      if (!m) break;
+      const inner = m[1];
+      if (isStandardHtmlOrSystemTag(inner) || inner.includes('|')) break;
+      out = out.slice(m[0].length);
+    }
+  }
+
+  return out;
+}
+
+function extractEmotionFromText(
+  completed: string,
+  characterEmotions?: CharacterEmotion[],
+  speakerName?: string
+): string | undefined {
+  // 1. Standard <emotion>...</emotion> or <эмоция>...</эмоция> (including <emotion=happy>)
+  const emTagMatch = completed.match(/<(?:emotion|эмоция)(?:\s*=\s*([^>\n]+))?>([\s\S]*?)<\/(?:emotion|эмоция)>/i);
+  if (emTagMatch) {
+    const val = (emTagMatch[2] || '').trim() || (emTagMatch[1] || '').trim();
+    const resolved = resolveEmotion(val, characterEmotions, speakerName);
+    if (resolved) return resolved;
+  }
+
+  // 2. [emotion: ...], <emotion: ...>, (emotion: ...), <emotion=...>
+  const emBracketMatch = completed.match(/(?:<\s*(?:emotion|эмоция)\s*[:=]\s*([^>\n]+)>|(?:\[|\()(?:эмоция|emotion)\s*[:=]\s*([^\]\)\n]+)(?:\]|\)))/i);
+  if (emBracketMatch) {
+    const val = (emBracketMatch[1] || emBracketMatch[2] || '').trim();
+    const resolved = resolveEmotion(val, characterEmotions, speakerName);
+    if (resolved) return resolved;
+  }
+
+  const wordSet = buildEmotionWordSet(characterEmotions);
+
+  // 3. Standalone square bracket emotions like [happy] or [радость]
+  const bracketMatches = completed.matchAll(/\[([^\[\]\n]{1,48})\]/g);
+  for (const m of bracketMatches) {
+    if (isKnownOrConfiguredEmotionTag(m[1], wordSet)) {
+      const resolved = resolveEmotion(m[1], characterEmotions, speakerName);
+      if (resolved) return resolved;
+    }
+  }
+
+  // 4. Shorthand angle-bracket emotions like <happy>, <smirk/>, <радость>, <Мира: smirk>
+  const angleMatches = completed.matchAll(/<(\/?[^<>\n]{1,48})>/g);
+  for (const m of angleMatches) {
+    const inner = m[1];
+    if (isStandardHtmlOrSystemTag(inner) || inner.includes('|')) continue;
+    if (isKnownOrConfiguredEmotionTag(inner, wordSet)) {
+      const resolved = resolveEmotion(inner, characterEmotions, speakerName);
+      if (resolved) return resolved;
+    }
+  }
+
+  return undefined;
+}
+
 export function extractEmotionAndCleanResponse(
   completed: string,
   characterEmotions?: CharacterEmotion[],
@@ -701,51 +833,24 @@ export function extractEmotionAndCleanResponse(
     return { text: '' };
   }
 
-  let finalEmotion: string | undefined = undefined;
-
-  // 1. Match <emotion>...</emotion> anywhere in full generated response
-  const emTagMatch = completed.match(/<emotion>([\s\S]*?)<\/emotion>/i);
-  if (emTagMatch) {
-    finalEmotion = resolveEmotion(emTagMatch[1], characterEmotions, speakerName);
-  }
-
-  // 2. Match [emotion: ...] or <emotion: ...> or (emotion: ...)
-  if (!finalEmotion) {
-    const emBracketMatch = completed.match(/(?:\[|<|\()(?:эмоция|emotion):\s*([^\]>\)]+)(?:\]|>|\))/i);
-    if (emBracketMatch) {
-      finalEmotion = resolveEmotion(emBracketMatch[1], characterEmotions, speakerName);
-    }
-  }
-
-  // 3. Match standalone emotion brackets like [happy] or [радость]
-  if (!finalEmotion) {
-    const emWordMatch = completed.match(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/i);
-    if (emWordMatch) {
-      finalEmotion = resolveEmotion(emWordMatch[1], characterEmotions, speakerName);
-    }
-  }
+  let finalEmotion = extractEmotionFromText(completed, characterEmotions, speakerName);
 
   // Extract thoughts: <thought>...</thought>
   let finalThought = '';
-  let visibleText = completed;
+  let visibleText = stripEmotionTags(completed, characterEmotions, { stripLeadingUnknownAngleTag: true });
 
-  const thoughtMatch = completed.match(/<thought>([\s\S]*?)<\/thought>/);
+  const thoughtMatch = visibleText.match(/<thought>([\s\S]*?)<\/thought>/i);
   if (thoughtMatch) {
     finalThought = thoughtMatch[1].trim();
-    visibleText = completed.replace(/<thought>[\s\S]*?<\/thought>/, '').trim();
-  } else if (visibleText.startsWith('<thought>')) {
+    visibleText = visibleText.replace(/<thought>[\s\S]*?<\/thought>/i, '').trim();
+  } else if (/^\s*<thought>/i.test(visibleText)) {
     // Unclosed thought block
-    finalThought = visibleText.replace('<thought>', '').trim();
+    finalThought = visibleText.replace(/^\s*<thought>/i, '').trim();
     visibleText = '';
   }
 
-  // Strip emotion tags from thought content if they leaked inside
   if (finalThought) {
-    finalThought = finalThought
-      .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
-      .replace(/<\s*emotion[:\s][^>]+>/gi, '')
-      .replace(/(?:\[|<|\()(?:эмоция|emotion):\s*[^\]>\)]+(?:\]|>|\))/gi, '')
-      .trim();
+    finalThought = stripEmotionTags(finalThought, characterEmotions, { stripLeadingUnknownAngleTag: false }).trim();
   }
 
   // 4. Keyword inference from prose is off: the avatar changes only on an explicit <emotion> tag.
@@ -789,19 +894,61 @@ export function extractEmotionAndCleanResponse(
     }
   }
 
-  // Strip all emotion tags from visible text
-  visibleText = visibleText
-    .replace(/<emotion>[\s\S]*?<\/emotion>/gi, '')
-    .replace(/<\s*emotion[:\s][^>]+>/gi, '')
-    .replace(/(?:\[|<|\()(?:эмоция|emotion):\s*[^\]>\)]+(?:\]|>|\))/gi, '')
-    .replace(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/gi, '');
+  visibleText = stripEmotionTags(visibleText, characterEmotions, { stripLeadingUnknownAngleTag: true });
+  if (speakerName) {
+    visibleText = stripLeadingSpeakerName(visibleText, [speakerName]);
+  }
 
-  const cleaned = cleanArtifacts(visibleText);
+  const cleaned = cleanArtifacts(visibleText, characterEmotions);
 
   return {
-    text: cleaned || cleanArtifacts(completed),
+    text: cleaned || cleanArtifacts(completed, characterEmotions),
     thought: finalThought || undefined,
     emotion: finalEmotion,
+  };
+}
+
+/**
+ * Shared streaming parser used by ChatView while tokens arrive: extracts emotions,
+ * separates <thought>...</thought>, strips <emotion>/<word>/<> tags, and suppresses
+ * incomplete leading <...> buffer fragments before they close.
+ */
+export function parseStreamingBotResponse(
+  raw: string,
+  characterEmotions?: CharacterEmotion[],
+  speakerName?: string,
+  extraStripNames: string[] = []
+): ParsedBotResponse {
+  if (!raw) return { text: '' };
+  const emotion = extractEmotionFromText(raw, characterEmotions, speakerName);
+  const stripNames = [speakerName || '', ...extraStripNames].filter(Boolean);
+
+  let work = stripLeadingSpeakerName(raw, stripNames);
+  work = stripEmotionTags(work, characterEmotions, { stripLeadingUnknownAngleTag: true });
+
+  let thought = '';
+  const thoughtMatch = work.match(/<thought>([\s\S]*?)<\/thought>/i);
+  if (thoughtMatch) {
+    thought = stripEmotionTags(thoughtMatch[1], characterEmotions, { stripLeadingUnknownAngleTag: false }).trim();
+    work = work.replace(/<thought>[\s\S]*?<\/thought>/i, '').trimStart();
+  } else if (/^\s*<thought>/i.test(work)) {
+    thought = stripEmotionTags(work.replace(/^\s*<thought>/i, ''), characterEmotions, { stripLeadingUnknownAngleTag: false });
+    return { text: '', thought, emotion };
+  }
+
+  work = stripEmotionTags(work, characterEmotions, { stripLeadingUnknownAngleTag: true });
+
+  // Prevent flickering partial "<emotion", "<smirk", "<" at start of stream before ">" arrives
+  if (/^\s*<[^>\n]{0,55}$/.test(work)) {
+    return { text: '', thought: thought || undefined, emotion };
+  }
+
+  work = stripLeadingSpeakerName(work, stripNames);
+
+  return {
+    text: cleanArtifacts(work, characterEmotions),
+    thought: thought || undefined,
+    emotion,
   };
 }
 
@@ -1040,28 +1187,169 @@ Raw JSON only.`;
   return rolesMap;
 }
 
+export interface SuggestUserReplyOptions {
+  onPartial?: (text: string) => void;
+  signal?: AbortSignal;
+  userName?: string;
+  otherSpeakers?: string[];
+  language?: 'en' | 'ru';
+}
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function inferSpeakersFromHistory(recentHistory: string, excludeNames: string[]): string[] {
+  const excluded = new Set(
+    ['вы', 'you', 'игрок', 'player', 'user', 'assistant', 'bot', ...excludeNames]
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const found: string[] = [];
+  for (const line of recentHistory.split('\n')) {
+    const m = line.match(/^\s*\[?([^:\[\]\n]{2,40})\]?\s*:\s*\S/);
+    if (!m) continue;
+    const candidate = m[1].trim();
+    if (!excluded.has(candidate.toLowerCase()) && !found.includes(candidate)) {
+      found.push(candidate);
+    }
+  }
+  return found;
+}
+
+export function buildGhostwriterMessages(params: {
+  userPersona: Character | null;
+  prompt: string;
+  recentHistory: string;
+  userName?: string;
+  otherSpeakers?: string[];
+  language?: 'en' | 'ru';
+}): {
+  system: string;
+  userMsg: string;
+  speakerLabel: string;
+  otherSpeakers: string[];
+} {
+  const { userPersona, prompt, recentHistory, userName, otherSpeakers = [], language } = params;
+  const isRu = language === 'ru' || (!language && /[а-яА-ЯёЁ]/.test(recentHistory + (userPersona?.description || '') + (prompt || '')));
+  const speakerLabel =
+    (userPersona?.name || userName || '').trim() ||
+    (isRu ? 'Игрок' : 'Player');
+
+  const uniqueOthers = Array.from(
+    new Set([
+      ...otherSpeakers.map((s) => (s || '').trim()).filter((s) => s && s.toLowerCase() !== speakerLabel.toLowerCase()),
+      ...inferSpeakersFromHistory(recentHistory, [speakerLabel]),
+    ])
+  );
+
+  // Align generic "Вы:" / "You:" prefixes in history with the active persona/speaker label
+  const normalizedHistory = recentHistory.replace(
+    /^(\s*)(Вы|You|Игрок|Player)(\s*:)/gm,
+    `$1${speakerLabel}$3`
+  );
+
+  const effectivePrompt = prompt && prompt.trim()
+    ? prompt.trim()
+    : (isRu
+        ? `Придумай естественную, логичную и живую реакцию от лица ${speakerLabel} в текущей ситуации.`
+        : `Write a natural, vivid, in-character reply strictly on behalf of ${speakerLabel} in this scene.`);
+
+  const othersText = uniqueOthers.join(', ');
+
+  if (isRu) {
+    const personaLine = userPersona
+      ? `\nОписание персоны ${speakerLabel}: ${userPersona.description.slice(0, 320)}`
+      : '';
+    const othersLine = uniqueOthers.length > 0
+      ? `\nДругие персонажи сцены (они управляются отдельно): ${othersText}.`
+      : '';
+    const forbiddenNames = uniqueOthers.length > 0
+      ? ` («${speakerLabel}:», «Вы:», ${uniqueOthers.slice(0, 4).map((n) => `«${n}:»`).join(', ')})`
+      : ` («${speakerLabel}:», «Вы:», «Игрок:»)`;
+
+    const system = `Ты — помощник ролевой игры, формулирующий ТОЛЬКО одну следующую реплику игрока (${speakerLabel}).${personaLine}${othersLine}
+
+СТРОГИЕ ПРАВИЛА:
+1. Пиши ИСКЛЮЧИТЕЛЬНО от лица персонажа игрока (${speakerLabel}): действия и мимику в *звездочках*, прямую речь обычным текстом без кавычек-ёлочек и лишних пояснений.
+2. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать реплики, действия, реакции, чувства или мысли за ${othersText || 'других персонажей сцены'}. Остановись сразу после хода ${speakerLabel}.
+3. НИКОГДА не начинай ответ с имени или двоеточия${forbiddenNames} и не используй теги <emotion>, <> или <thought>.
+4. Выведи ТОЛЬКО саму реакцию ${speakerLabel}, готовый текст для отправки в чат (1–2 абзаца).`;
+
+    const userMsg = `Недавний диалог в сцене:\n${normalizedHistory}\n\nЗадача: напиши ТОЛЬКО следующий ход от лица «${speakerLabel}».${uniqueOthers.length > 0 ? ` Не описывай ходы и слова ${othersText}.` : ''}\nПожелание: ${effectivePrompt}\nНачни сразу с *действия* или фразы без имени в начале.`;
+
+    return { system, userMsg, speakerLabel, otherSpeakers: uniqueOthers };
+  }
+
+  const personaLineEn = userPersona
+    ? `\nUser persona details for ${speakerLabel}: ${userPersona.description.slice(0, 320)}`
+    : '';
+  const othersLineEn = uniqueOthers.length > 0
+    ? `\nOther characters in this scene (controlled separately): ${othersText}.`
+    : '';
+
+  const system = `You are a creative roleplay ghostwriter composing ONLY the next single turn on behalf of the player (${speakerLabel}).${personaLineEn}${othersLineEn}
+
+STRICT RULES:
+1. Write STRICTLY from ${speakerLabel}'s perspective: physical actions inside *asterisks*, spoken dialogue as plain text without outer quotation marks.
+2. NEVER write dialogue, actions, thoughts, or reactions on behalf of ${othersText || 'other characters'}. Stop immediately after ${speakerLabel}'s turn.
+3. NEVER start the response with a character name or colon ("${speakerLabel}:", "You:"${uniqueOthers.length > 0 ? `, "${uniqueOthers[0]}:"` : ''}) and NEVER output <emotion>, <>, or <thought> tags.
+4. Output ONLY ${speakerLabel}'s ready-to-send message (1–2 concise paragraphs) with no meta explanation.`;
+
+  const userMsg = `Recent Scene History:\n${normalizedHistory}\n\nTask: Write ONLY ${speakerLabel}'s next turn.${uniqueOthers.length > 0 ? ` Do NOT narrate or speak for ${othersText}.` : ''}\nUser's Intent: ${effectivePrompt}\nBegin directly with *action* or dialogue with no leading name prefix.`;
+
+  return { system, userMsg, speakerLabel, otherSpeakers: uniqueOthers };
+}
+
+export function cleanGhostwriterOutput(
+  raw: string,
+  speakerLabel: string,
+  otherSpeakers: string[] = []
+): string {
+  if (!raw) return '';
+  let out = raw
+    .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+    .replace(/^\s*<thought>[\s\S]*$/i, '');
+
+  out = stripEmotionTags(out, undefined, { stripLeadingUnknownAngleTag: true });
+
+  const allNames = Array.from(
+    new Set([speakerLabel, ...otherSpeakers, 'Вы', 'Игрок', 'You', 'Player'].filter(Boolean))
+  );
+  out = stripLeadingSpeakerName(out, allNames);
+
+  // Truncate if the model continued into another speaker's turn on a subsequent line
+  const stopTargets = Array.from(
+    new Set([...otherSpeakers, speakerLabel, 'Вы', 'Игрок', 'You', 'Player'].filter((n) => n && n.trim().length >= 2))
+  );
+  if (stopTargets.length > 0) {
+    const alt = stopTargets.map((n) => escapeRegex(n.trim())).join('|');
+    out = out.replace(new RegExp(`\\n+\\s*\\[?(?:${alt})\\]?\\s*:.*$`, 'is'), '');
+  }
+
+  out = cleanArtifacts(out);
+  out = stripLeadingSpeakerName(out, allNames);
+  return out.trim();
+}
+
 export async function suggestUserReply(
   apiKeyConfig: ApiKeyConfig,
   model: string,
   userPersona: Character | null,
   prompt: string,
   recentHistory: string,
-  options: { onPartial?: (text: string) => void; signal?: AbortSignal } = {}
+  options: SuggestUserReplyOptions = {}
 ): Promise<string> {
-  const isRu = /[а-яА-ЯёЁ]/.test(recentHistory + (userPersona?.description || ''));
-  const effectivePrompt = prompt && prompt.trim()
-    ? prompt.trim()
-    : (isRu
-        ? 'Придумай наиболее логичное, интересное и живое продолжение реплики от лица игрока / персоны в текущей ситуации.'
-        : 'Invent the most natural, clever, and compelling continuation of the dialogue on behalf of the player / persona in this scene.');
+  const { system, userMsg, speakerLabel, otherSpeakers } = buildGhostwriterMessages({
+    userPersona,
+    prompt,
+    recentHistory,
+    userName: options.userName,
+    otherSpeakers: options.otherSpeakers,
+    language: options.language,
+  });
 
-  const system = `You are a creative roleplay ghostwriter.
-Based on the current ongoing scene and dialogue context, formulate what the user's persona should say and do next.
-Match the language of the dialogue dynamically (if the conversation is in Russian, formulate in pure Russian; if in English, formulate in English, etc.).
-Write actions and body language in *asterisks* and spoken dialogue in plain text.
-Keep it natural, evocative, and strictly in character. Output ONLY the resulting action/speech with no meta explanation or quotation marks.`;
-
-  const userMsg = `Scene History:\n${recentHistory}\n\nUser Persona: ${userPersona ? userPersona.name + ' (' + userPersona.description.slice(0, 200) + ')' : 'Player'}\n\nUser's Intent/Guidance: ${effectivePrompt}`;
+  const extraStops = speakerStopStrings([speakerLabel, ...otherSpeakers, 'Вы', 'Игрок', 'You', 'Player']);
 
   let out = '';
   try {
@@ -1072,11 +1360,12 @@ Keep it natural, evocative, and strictly in character. Output ONLY the resulting
         { role: 'system', content: system },
         { role: 'user', content: userMsg },
       ],
+      extraStops,
       temperature: 0.85,
       signal: options.signal,
       onToken: (t) => {
         out += t;
-        options.onPartial?.(out.trim());
+        options.onPartial?.(cleanGhostwriterOutput(out, speakerLabel, otherSpeakers));
       },
       onError: (e) => { throw e; },
     });
@@ -1085,7 +1374,7 @@ Keep it natural, evocative, and strictly in character. Output ONLY the resulting
     if (!options.signal?.aborted) throw err;
   }
 
-  return out.trim();
+  return cleanGhostwriterOutput(out, speakerLabel, otherSpeakers);
 }
 
 export interface CompressOptions {
@@ -1216,19 +1505,67 @@ export function speakerStopStrings(names: string[]): string[] {
   for (const raw of names) {
     const name = (raw || '').trim();
     if (name.length < 3) continue;
-    stops.push(`\n${name}:`, `\n${name} :`);
+    stops.push(`\n${name}:`, `\n${name} :`, `\n[${name}]:`);
   }
   return Array.from(new Set(stops));
 }
 
-/** Removes a leading "Name:" or "[Name]:" that the model copied from the chat history. */
+/** Removes a leading "Name:" or "[Name]:" (even wrapped in quotes/bold) that the model copied from history. */
 export function stripLeadingSpeakerName(text: string, names: string[]): string {
   let out = text;
-  for (const raw of names) {
-    const name = (raw || '').trim();
-    if (name.length < 2) continue;
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    out = out.replace(new RegExp(`^\\s*\\[?${escaped}\\]?\\s*:\\s*`, 'i'), '');
+  for (let pass = 0; pass < 2; pass++) {
+    for (const raw of names) {
+      const name = (raw || '').trim();
+      if (name.length < 2) continue;
+      const escaped = escapeRegex(name);
+      out = out.replace(new RegExp(`^\\s*(?:\\*\\*)?\\[?${escaped}\\]?(?:\\*\\*)?\\s*:\\s*`, 'i'), '');
+    }
   }
   return out;
+}
+
+function isActionOnlyParagraph(paragraph: string): boolean {
+  const trimmed = paragraph.trim();
+  return /\*/.test(trimmed) && trimmed.replace(/\*[^*\n]+\*/g, '').trim() === '';
+}
+
+/**
+ * Enforces an explicit user paragraph cap or compact-brevity wish without breaking sentences:
+ * first merges isolated *action* paragraphs with their adjacent spoken dialogue line, and if
+ * an explicit maxParagraphs limit is still exceeded, trims trailing excess paragraphs cleanly.
+ */
+export function enforceParagraphLimit(
+  text: string,
+  maxParagraphs?: number,
+  compactBrevity = false
+): string {
+  const trimmed = (text || '').trim();
+  if (!trimmed) return '';
+  const targetMax = maxParagraphs && maxParagraphs > 0 ? maxParagraphs : (compactBrevity ? 2 : 0);
+  if (!targetMax) return trimmed;
+
+  let paras = trimmed.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  if (paras.length <= targetMax) return paras.join('\n\n');
+
+  // Step 1: Losslessly merge standalone *action* lines into adjacent speech paragraphs
+  while (paras.length > targetMax) {
+    const idx = paras.findIndex((p) => isActionOnlyParagraph(p));
+    if (idx === -1) break;
+    if (idx + 1 < paras.length && !isActionOnlyParagraph(paras[idx + 1])) {
+      paras.splice(idx, 2, `${paras[idx]} ${paras[idx + 1]}`);
+    } else if (idx > 0) {
+      paras.splice(idx - 1, 2, `${paras[idx - 1]} ${paras[idx]}`);
+    } else if (idx + 1 < paras.length) {
+      paras.splice(idx, 2, `${paras[idx]} ${paras[idx + 1]}`);
+    } else {
+      break;
+    }
+  }
+
+  // Step 2: Only for an explicit user cap (e.g. "не пиши больше 2 абзацев"), keep complete leading paragraphs
+  if (maxParagraphs && maxParagraphs > 0 && paras.length > maxParagraphs) {
+    paras = paras.slice(0, maxParagraphs);
+  }
+
+  return paras.join('\n\n');
 }
