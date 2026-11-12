@@ -28,6 +28,8 @@ import {
 } from 'lucide-react';
 import { db, DEFAULT_THEME, APP_THEMES, getLocalizedTextStyle } from '../db';
 import type {
+  AiBackend,
+  AiComponent,
   ApiKeyConfig,
   ApiProvider,
   AppSettings,
@@ -36,7 +38,7 @@ import type {
   ThemeConfig,
 } from '../types';
 import { translations } from '../i18n';
-import { fetchAvailableModels, fetchVisionModels, pingLocalServer, normalizeLocalServerUrl } from '../services/ai';
+import { fetchAvailableModels, fetchVisionModels, pingLocalServer, normalizeLocalServerUrl, AI_COMPONENTS, getComponentBackend } from '../services/ai';
 import { DEFAULT_CORE_SYSTEM_PROMPT } from '../services/promptBuilder';
 import { ChatPreviewCard } from '../components/ChatPreviewCard';
 import { QrScannerModal } from '../components/QrScannerModal';
@@ -58,6 +60,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const settings = useLiveQuery(() => db.settings.get('default'));
   const apiKeys = useLiveQuery(() => db.apiKeys.toArray()) || [];
   const textStyles = useLiveQuery(() => db.textStyles.toArray()) || [];
+
+  // Settings are grouped into tabs; the tab is remembered only for this visit
+  const [settingsTab, setSettingsTab] = useState<'ai' | 'models' | 'style' | 'look'>('ai');
+  const setComponentBackend = async (component: AiComponent, backend: AiBackend) => {
+    await db.settings.update('default', { aiRouting: { ...(settings?.aiRouting || {}), [component]: backend } });
+  };
+  const hasActiveCloudKey = apiKeys.some((k) => k.isActive && k.key.trim().length > 0);
 
   // Local AI Hub State
   const aiEngineMode = settings?.aiEngineMode || 'cloud';
@@ -421,6 +430,63 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     return true;
   });
 
+  // Per-function backend: cloud (your API key) or the local PC hub
+  const routingItems: Array<[AiComponent, string, string]> = [
+    ['chat', t.routingChat, t.routingChatDesc],
+    ['ghostwriter', t.routingGhost, t.routingGhostDesc],
+    ['memory', t.routingMemory, t.routingMemoryDesc],
+    ['summary', t.routingSummary, t.routingSummaryDesc],
+    ['characterGen', t.routingCharGen, t.routingCharGenDesc],
+    ['groupGen', t.routingGroupGen, t.routingGroupGenDesc],
+    ['vision', t.routingVision, t.routingVisionDesc],
+  ];
+  const renderRouting = () => {
+    const backends = AI_COMPONENTS.map((c) => getComponentBackend(settings, c));
+    const usesCloud = backends.includes('cloud');
+    const usesLocal = backends.includes('local');
+    return (
+      <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
+        <div>
+          <h2 className="text-sm font-semibold text-white">{t.routingTitle}</h2>
+          <p className="text-[11px] text-slate-400 leading-snug mt-1">{t.routingDesc}</p>
+        </div>
+        <div className="divide-y divide-silk-800/60">
+          {routingItems.map(([id, label, desc]) => {
+            const current = getComponentBackend(settings, id);
+            return (
+              <div key={id} className="flex items-center justify-between gap-3 py-2.5">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-slate-100">{label}</div>
+                  <div className="text-[11px] text-slate-500 leading-snug">{desc}</div>
+                </div>
+                <div className="flex shrink-0 rounded-xl border border-silk-700 overflow-hidden text-xs">
+                  {(['cloud', 'local'] as AiBackend[]).map((b) => (
+                    <button
+                      key={b}
+                      type="button"
+                      onClick={() => setComponentBackend(id, b)}
+                      className={`px-3 py-1.5 font-semibold transition-colors ${
+                        current === b ? 'bg-white text-black' : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {b === 'cloud' ? t.routingCloud : t.routingLocal}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {usesCloud && !hasActiveCloudKey && (
+          <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200">{t.routingNoCloud}</div>
+        )}
+        {usesLocal && aiEngineMode !== 'local' && !settings?.localHubUrl && (
+          <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200">{t.routingNoLocal}</div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="flex flex-col h-full overflow-hidden bg-silk-950 text-slate-100">
       {/* Top Header */}
@@ -428,8 +494,32 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <h1 className="text-xl font-bold tracking-tight text-white">{t.settingsTitle}</h1>
       </div>
 
+      {/* Tab bar */}
+      <div className="px-4 pt-3 pb-2 border-b border-silk-800/60 bg-silk-950 overflow-x-auto">
+        <div className="flex gap-1.5 min-w-max">
+          {([
+            ['ai', t.settingsTabAi],
+            ['models', t.settingsTabModels],
+            ['style', t.settingsTabStyle],
+            ['look', t.settingsTabLook],
+          ] as const).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setSettingsTab(id)}
+              className={`px-3.5 py-2 rounded-xl text-xs font-semibold transition-colors ${
+                settingsTab === id ? 'bg-white text-black' : 'text-slate-400 hover:text-white hover:bg-silk-800/60'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Main Settings Scroll */}
       <div className="flex-1 overflow-y-auto p-4 space-y-6 pb-28">
+        {settingsTab === 'ai' && (<>
         {/* AI Engine Mode Switcher: Cloud vs Local PC */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
           <div className="flex items-center justify-between">
@@ -475,6 +565,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
+        </>)}
+
+        {settingsTab === 'look' && (<>
         {/* 1. Language Section */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
           <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
@@ -507,6 +600,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
+        </>)}
+
+        {settingsTab === 'ai' && (<>
         {aiEngineMode === 'local' ? (
           /* LOCAL AI HUB SECTION (Replaces Cloud Keys & Models) */
           <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4 shadow-xl">
@@ -794,6 +890,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           )}
         </div>
 
+      </>
+    )}
+
+        </>)}
+
+        {settingsTab === 'models' && (<>
+        {renderRouting()}
+
         {/* 3. Text & RP Model Selector */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
           <div className="flex items-center justify-between">
@@ -1002,9 +1106,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             )}
           </div>
         </div>
-      </>
-    )}
+        </>)}
 
+        {settingsTab === 'style' && (<>
         {/* 5. Text & RP Styles */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
           <div className="flex items-center justify-between">
@@ -1149,6 +1253,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
+        </>)}
+
+        {settingsTab === 'look' && (<>
         {/* 7. Application Themes (Design & Interface) */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4">
           <div>
@@ -1426,6 +1533,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <ChatPreviewCard theme={currentTheme} />
           </div>
         </div>
+        </>)}
       </div>
 
       {/* Style Modal */}

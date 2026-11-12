@@ -1,4 +1,6 @@
-import type { ApiKeyConfig, AppSettings, Character, CharacterEmotion, Group, Language } from '../types';
+import type { AiBackend, AiComponent, ApiKeyConfig, AppSettings, Character, CharacterEmotion, Group, Language } from '../types';
+
+export const AI_COMPONENTS: AiComponent[] = ['chat', 'ghostwriter', 'memory', 'summary', 'characterGen', 'groupGen', 'vision'];
 
 export interface ChatCompletionMessage {
   role: 'system' | 'user' | 'assistant';
@@ -143,8 +145,29 @@ export function getEffectiveAiConfig(
   textModel: string;
   isLocal: boolean;
 } {
-  const isLocal = settings?.aiEngineMode === 'local';
-  if (isLocal) {
+  const { apiKeyConfig, textModel, isLocal } = getComponentAiConfig(settings, activeApiKey, 'chat');
+  return { apiKeyConfig, textModel, isLocal };
+}
+
+/** Backend for one component: its own routing choice, otherwise the global engine mode. */
+export function getComponentBackend(settings: AppSettings | undefined, component: AiComponent): AiBackend {
+  const explicit = settings?.aiRouting?.[component];
+  if (explicit) return explicit;
+  return settings?.aiEngineMode === 'local' ? 'local' : 'cloud';
+}
+
+export function getComponentAiConfig(
+  settings: AppSettings | undefined,
+  activeApiKey: ApiKeyConfig | undefined,
+  component: AiComponent
+): {
+  apiKeyConfig?: ApiKeyConfig;
+  textModel: string;
+  isLocal: boolean;
+  backend: AiBackend;
+} {
+  const backend = getComponentBackend(settings, component);
+  if (backend === 'local') {
     const baseUrl = normalizeLocalServerUrl(settings?.localHubUrl || 'http://192.168.1.55:8080/v1');
     return {
       apiKeyConfig: {
@@ -157,12 +180,17 @@ export function getEffectiveAiConfig(
       },
       textModel: 'local-model',
       isLocal: true,
+      backend,
     };
   }
+  const cloudModel = component === 'vision'
+    ? (settings?.visionModel || settings?.textModel || 'google/gemini-flash-1.5')
+    : (settings?.textModel || 'deepseek/deepseek-chat');
   return {
     apiKeyConfig: activeApiKey,
-    textModel: settings?.textModel || 'deepseek/deepseek-chat',
+    textModel: cloudModel,
     isLocal: false,
+    backend,
   };
 }
 
@@ -962,7 +990,8 @@ export async function suggestUserReply(
   model: string,
   userPersona: Character | null,
   prompt: string,
-  recentHistory: string
+  recentHistory: string,
+  options: { onPartial?: (text: string) => void; signal?: AbortSignal } = {}
 ): Promise<string> {
   const isRu = /[а-яА-ЯёЁ]/.test(recentHistory + (userPersona?.description || ''));
   const effectivePrompt = prompt && prompt.trim()
@@ -980,17 +1009,26 @@ Keep it natural, evocative, and strictly in character. Output ONLY the resulting
   const userMsg = `Scene History:\n${recentHistory}\n\nUser Persona: ${userPersona ? userPersona.name + ' (' + userPersona.description.slice(0, 200) + ')' : 'Player'}\n\nUser's Intent/Guidance: ${effectivePrompt}`;
 
   let out = '';
-  await streamChatCompletion({
-    apiKeyConfig,
-    model: model || 'deepseek/deepseek-chat',
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: userMsg },
-    ],
-    temperature: 0.85,
-    onToken: (t) => { out += t; },
-    onError: (e) => { throw e; },
-  });
+  try {
+    await streamChatCompletion({
+      apiKeyConfig,
+      model: model || 'deepseek/deepseek-chat',
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: userMsg },
+      ],
+      temperature: 0.85,
+      signal: options.signal,
+      onToken: (t) => {
+        out += t;
+        options.onPartial?.(out.trim());
+      },
+      onError: (e) => { throw e; },
+    });
+  } catch (err: any) {
+    // A stopped generation keeps the text received so far
+    if (!options.signal?.aborted) throw err;
+  }
 
   return out.trim();
 }

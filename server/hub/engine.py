@@ -259,6 +259,7 @@ class Engine:
                 if chat_handler is None:
                     projector_name = None
                     plan["projector_name"] = ""
+                    plan.setdefault("warnings", []).append("vision_handler_missing")
 
             self._set_step("Loading model into memory")
             llama, used_plan, last_error = self._instantiate(str(model_path), plan, chat_handler)

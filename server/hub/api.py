@@ -152,6 +152,18 @@ def create_app() -> FastAPI:
             message = "A model is still loading. Try again in a moment." if engine.is_loading else "No model is loaded. Open the dashboard and choose a model."
             return _error(503, "no_model", message)
 
+        has_images = any(
+            isinstance(m.get("content"), list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in m["content"])
+            for m in messages
+            if isinstance(m, dict)
+        )
+        if has_images and not engine.status()["projector"]:
+            return _error(
+                400,
+                "vision_unavailable",
+                "The loaded model cannot read images. Load a vision model together with its projector file in the dashboard (Models tab, 'With images').",
+            )
+
         n_ctx = engine.n_ctx
         stream = bool(body.get("stream", False))
         max_tokens = max(16, min(int(body.get("max_tokens") or 1024), max(256, n_ctx // 2)))

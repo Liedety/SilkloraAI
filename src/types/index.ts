@@ -156,6 +156,18 @@ export interface ThemeConfig {
 
 export type AiEngineMode = 'cloud' | 'local';
 
+/** Parts of the app that call a language model. Each one can run on the cloud or on the local PC. */
+export type AiComponent =
+  | 'chat'
+  | 'ghostwriter'
+  | 'memory'
+  | 'summary'
+  | 'characterGen'
+  | 'groupGen'
+  | 'vision';
+
+export type AiBackend = 'cloud' | 'local';
+
 export interface AppSettings {
   id: string; // singleton 'default'
   language: Language;
@@ -167,5 +179,7 @@ export interface AppSettings {
   customSystemPrompt?: string;
   customSystemPromptMode?: 'override' | 'augment';
   aiEngineMode?: AiEngineMode;
+  /** Per-component backend. Missing entries follow aiEngineMode. */
+  aiRouting?: Partial<Record<AiComponent, AiBackend>>;
   localHubUrl?: string;
 }

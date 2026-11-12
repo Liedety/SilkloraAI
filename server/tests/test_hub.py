@@ -144,6 +144,17 @@ class ContextTests(unittest.TestCase):
         first_dialogue = next(m for m in fitted if m["role"] != "system")
         self.assertEqual(first_dialogue["role"], "user")
 
+    def test_window_moves_in_blocks_so_the_prompt_prefix_stays_stable(self):
+        changes = 0
+        previous = None
+        for turns in range(90, 120):
+            fitted, _ = context.fit_messages(self.conversation(turns, size=60), 2048, 512, self.count)
+            prefix = fitted[0]["content"]
+            if previous is not None and prefix != previous:
+                changes += 1
+            previous = prefix
+        self.assertLessEqual(changes, 30 // context.BLOCK_MESSAGES + 2)
+
     def test_oversized_system_prompt_is_trimmed_not_dropped(self):
         msgs = [{"role": "system", "content": "RULES " + "lore " * 4000 + " END"}, {"role": "user", "content": "hi"}]
         fitted, report = context.fit_messages(msgs, 2048, 512, self.count)

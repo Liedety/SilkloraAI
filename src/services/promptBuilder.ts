@@ -15,6 +15,8 @@ export interface PromptBuildParams {
   customSystemPromptMode?: 'override' | 'augment';
   contextSummary?: string; // compressed rolling summary of older messages
   language?: 'en' | 'ru';
+  /** Affinity and memories are sent in the scene note at the end of the conversation instead. */
+  dynamicTail?: boolean;
 }
 
 export const DEFAULT_CORE_SYSTEM_PROMPT = `You are an expert creative writer and roleplay actor executing a vivid, unrestricted, immersive narrative.
@@ -81,6 +83,7 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
     customSystemPromptMode = 'augment',
     contextSummary,
     language = 'en',
+    dynamicTail = false,
   } = params;
 
   const currentSpeaker = speakerCharacter || character;
@@ -209,32 +212,34 @@ CRITICAL EMOTION SELECTION INSTRUCTIONS:
     prompt += `The user is the other participant in this scene.\n`;
   }
 
-  // Relationship Affinity
-  prompt += `\n### RELATIONSHIP DYNAMICS:\n`;
-  prompt += `Your current affinity score with the user is: ${relationshipScore} (on a scale from -100 Hostile/Enemies to +100 Deep Devotion/Love).\n`;
-  if (relationshipScore <= -40) {
-    prompt += `Current dynamic: Deep distrust, resentment, antagonism or open hostility.\n`;
-  } else if (relationshipScore < 10) {
-    prompt += `Current dynamic: Cautious, distant, neutral or professional.\n`;
-  } else if (relationshipScore < 50) {
-    prompt += `Current dynamic: Warm, friendly, cooperative, developing trust.\n`;
-  } else {
-    prompt += `Current dynamic: High intimacy, unconditional trust, deep passion or sworn loyalty.\n`;
-  }
-
-  // Memory Graph Injections
-  if (memoryNodes.length > 0) {
-    prompt += `\n### RELEVANT LONG-TERM MEMORIES & ESTABLISHED FACTS:\n`;
-    const sortedNodes = [...memoryNodes].sort((a, b) => {
-      if (a.isPinned && !b.isPinned) return -1;
-      if (!a.isPinned && b.isPinned) return 1;
-      return b.createdAt - a.createdAt;
-    });
-    for (const node of sortedNodes.slice(0, 6)) {
-      const pinTag = node.isPinned ? ' [CORE/PERMANENT]' : '';
-      prompt += `- [${node.type.toUpperCase()}${pinTag}] ${node.label}: ${node.detail}\n`;
+  if (!dynamicTail) {
+    // Relationship Affinity
+    prompt += `\n### RELATIONSHIP DYNAMICS:\n`;
+    prompt += `Your current affinity score with the user is: ${relationshipScore} (on a scale from -100 Hostile/Enemies to +100 Deep Devotion/Love).\n`;
+    if (relationshipScore <= -40) {
+      prompt += `Current dynamic: Deep distrust, resentment, antagonism or open hostility.\n`;
+    } else if (relationshipScore < 10) {
+      prompt += `Current dynamic: Cautious, distant, neutral or professional.\n`;
+    } else if (relationshipScore < 50) {
+      prompt += `Current dynamic: Warm, friendly, cooperative, developing trust.\n`;
+    } else {
+      prompt += `Current dynamic: High intimacy, unconditional trust, deep passion or sworn loyalty.\n`;
     }
-    prompt += `Maintain consistency with these established facts.\n`;
+
+    // Memory Graph Injections
+    if (memoryNodes.length > 0) {
+      prompt += `\n### RELEVANT LONG-TERM MEMORIES & ESTABLISHED FACTS:\n`;
+      const sortedNodes = [...memoryNodes].sort((a, b) => {
+        if (a.isPinned && !b.isPinned) return -1;
+        if (!a.isPinned && b.isPinned) return 1;
+        return b.createdAt - a.createdAt;
+      });
+      for (const node of sortedNodes.slice(0, 6)) {
+        const pinTag = node.isPinned ? ' [CORE/PERMANENT]' : '';
+        prompt += `- [${node.type.toUpperCase()}${pinTag}] ${node.label}: ${node.detail}\n`;
+      }
+      prompt += `Maintain consistency with these established facts.\n`;
+    }
   }
 
   // Rolling Context Compression / Recap of Earlier Events
@@ -279,3 +284,42 @@ Start your turn with <emotion>chosen_emotion</emotion> chosen from [${emotionNam
 
   return prompt;
 }
+
+function affinityLabel(score: number): string {
+  if (score <= -40) return 'Deep distrust, resentment, antagonism or open hostility.';
+  if (score < 10) return 'Cautious, distant, neutral or professional.';
+  if (score < 50) return 'Warm, friendly, cooperative, developing trust.';
+  return 'High intimacy, unconditional trust, deep passion or sworn loyalty.';
+}
+
+/**
+ * Volatile scene information kept out of the stable system prompt, so that the model can reuse
+ * its prompt cache for the whole conversation. Appended to the end of the last user message.
+ */
+export function buildSceneNote(params: {
+  speakerName: string;
+  relationshipScore?: number;
+  memoryNodes?: MemoryNode[];
+  guidance?: string;
+}): string {
+  const { speakerName, relationshipScore = 0, memoryNodes = [], guidance } = params;
+  const lines: string[] = [];
+  lines.push(`Affinity of ${speakerName} toward the user: ${relationshipScore} (-100 hostile .. +100 devoted). ${affinityLabel(relationshipScore)}`);
+  if (memoryNodes.length > 0) {
+    const sorted = [...memoryNodes].sort((a, b) => {
+      if (a.isPinned && !b.isPinned) return -1;
+      if (!a.isPinned && b.isPinned) return 1;
+      return b.createdAt - a.createdAt;
+    });
+    lines.push('Established facts (stay consistent with them):');
+    for (const node of sorted.slice(0, 6)) {
+      const pinTag = node.isPinned ? ' [CORE]' : '';
+      lines.push(`- [${node.type.toUpperCase()}${pinTag}] ${node.label}: ${node.detail}`);
+    }
+  }
+  if (guidance && guidance.trim()) {
+    lines.push(`Direction for this turn: ${guidance.trim()}`);
+  }
+  return lines.join('\n');
+}
+

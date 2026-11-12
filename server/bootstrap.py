@@ -336,33 +336,56 @@ def _verified_for(state: dict, probe: dict, gpu: Optional[dict]) -> bool:
     )
 
 
+def gpu_fingerprint(gpu: Optional[dict]) -> str:
+    return f"{gpu['name']}|{gpu.get('driver', '')}" if gpu else ""
+
+
+def _gpu_gave_up(state: dict, fingerprint: str) -> bool:
+    attempt = state.get("gpu_engine_attempt") or {}
+    return attempt.get("fingerprint") == fingerprint and attempt.get("result") == "failed"
+
+
 def ensure_engine(state: dict, repair: bool) -> dict:
     gpu = nvidia_info()
     use_gpu = gpu is not None and platform.system() != "Darwin"
+    fingerprint = gpu_fingerprint(gpu) if use_gpu else ""
     probe = probe_engine()
 
     def outdated(p):
         return p["ok"] and version_tuple(p["version"]) < MIN_ENGINE_VERSION
 
+    skip_gpu = False
     if probe["ok"] and not outdated(probe) and not repair:
-        if _verified_for(state, probe, gpu):
+        gpu_missing = use_gpu and not probe["gpu"]
+        if not gpu_missing and _verified_for(state, probe, gpu):
             return probe
-        if (probe["gpu"] or not use_gpu):
+        if not gpu_missing:
             say("      Checking the installed engine with a test model...")
             ok, reason = engine_selftest(bool(probe["gpu"]))
             if ok:
                 _record(state, probe, gpu, "installed")
                 return probe
             say(f"      The installed engine failed the check: {reason}")
+        elif _gpu_gave_up(state, fingerprint):
+            say("      GPU engines were already tried for this graphics card and driver without success.")
+            say("      Run start-server.bat --repair to try them again.")
+            skip_gpu = True
+            if _verified_for(state, probe, gpu):
+                return probe
+            ok, reason = engine_selftest(False)
+            if ok:
+                _record(state, probe, gpu, "cpu")
+                return probe
+            say(f"      The CPU engine failed the check: {reason}")
 
     if not probe["ok"]:
         say(f"      Inference engine is not ready: {probe.get('error', 'not installed')}")
     elif outdated(probe):
         say(f"      Inference engine {probe['version']} is outdated")
-    elif use_gpu and not probe["gpu"]:
-        say(f"      GPU detected ({gpu['name']}) but the engine runs on CPU only")
+    elif use_gpu and not probe["gpu"] and not skip_gpu:
+        say(f"      GPU detected ({gpu['name']}) but the engine runs on CPU only. Looking for a GPU engine...")
 
-    if use_gpu and platform.system() == "Windows":
+    if use_gpu and not skip_gpu and platform.system() == "Windows":
         candidates = windows_cuda_candidates(gpu)
         if not candidates:
             say("      No prebuilt GPU engine matches this graphics card and driver.")
@@ -378,9 +401,12 @@ def ensure_engine(state: dict, repair: bool) -> dict:
             ok, reason = engine_selftest(bool(probe["gpu"]))
             if ok:
                 _record(state, probe, gpu, f"cuda-{cand['cuda']}-{cand['version']}")
+                state["gpu_engine_attempt"] = {"fingerprint": fingerprint, "result": "ok"}
                 return probe
             say(f"        failed the check: {reason}")
-    elif use_gpu and platform.system() == "Linux":
+        if candidates:
+            state["gpu_engine_attempt"] = {"fingerprint": fingerprint, "result": "failed"}
+    elif use_gpu and not skip_gpu and platform.system() == "Linux":
         say("      Installing GPU engine (CUDA 12)")
         install_cuda_engine_linux()
         probe = probe_engine()
@@ -388,8 +414,10 @@ def ensure_engine(state: dict, repair: bool) -> dict:
             ok, reason = engine_selftest(bool(probe["gpu"]))
             if ok:
                 _record(state, probe, gpu, "linux-cuda12")
+                state["gpu_engine_attempt"] = {"fingerprint": fingerprint, "result": "ok"}
                 return probe
             say(f"        failed the check: {reason}")
+        state["gpu_engine_attempt"] = {"fingerprint": fingerprint, "result": "failed"}
 
     say("      Installing the CPU engine")
     install_cpu_engine()

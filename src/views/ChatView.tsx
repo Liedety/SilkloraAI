@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { db, DEFAULT_THEME, getLocalizedTextStyle } from '../db';
 import type {
+  ApiKeyConfig,
   Character,
   ChatMessage,
   ChatSession,
@@ -41,13 +42,15 @@ import {
   cleanArtifacts,
   extractEmotionAndCleanResponse,
   getEffectiveAiConfig,
+  getComponentAiConfig,
 } from '../services/ai';
-import { buildSystemPrompt } from '../services/promptBuilder';
+import { buildSystemPrompt, buildSceneNote } from '../services/promptBuilder';
 import {
   estimateTokens,
   PER_MESSAGE_TOKENS,
-  planDialogueWindow,
-  planCompression,
+  planWindow,
+  planSummaryBatch,
+  sceneNoteLines,
   summaryLimits,
 } from '../services/contextBudget';
 import { extractMemoryAndAffinity } from '../services/memoryGraph';
@@ -67,6 +70,7 @@ const CLOUD_MAX_VERBATIM = 8;
 const LOCAL_FALLBACK_PROMPT_TARGET = 3072;
 const LOCAL_MAX_VERBATIM = 40;
 const SYNOPSIS_ALLOWANCE = 200;
+const SCENE_NOTE_ALLOWANCE = 220;
 
 // Strips hidden thoughts and emotion tags so past turns do not inflate the prompt or trigger ballooning replies
 function cleanHistoryText(text: string): string {
@@ -205,6 +209,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [showUserWandModal, setShowUserWandModal] = useState(false);
   const [userWandPrompt, setUserWandPrompt] = useState('');
   const [isWandGenerating, setIsWandGenerating] = useState(false);
+  const [wandPreview, setWandPreview] = useState('');
+  const wandAbortRef = useRef<AbortController | null>(null);
 
   // Guided Regen modal
   const [guidedRegenTargetMsgId, setGuidedRegenTargetMsgId] = useState<string | null>(null);
@@ -546,7 +552,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const dialogueLang: 'en' | 'ru' = /[а-яА-ЯёЁ]/.test(lastUserText) ? 'ru' : (/[a-zA-Z]/.test(lastUserText) ? 'en' : language);
       const textStyleToUse = rawStyle ? getLocalizedTextStyle(rawStyle, dialogueLang) : undefined;
 
-      // Token-budgeted context: rolling summary + gap synopsis + newest turns word for word
+      // Context = stable system prompt + rolling summary + verbatim window (grows by appending) + scene note.
       const freshChat = await db.chats.get(session.id);
       const storedSummary = freshChat?.rollingSummary?.trim() || session.rollingSummary?.trim() || '';
       const lastSummarizedId = freshChat?.lastSummarizedMsgId || session.lastSummarizedMsgId;
@@ -568,7 +574,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       let summarizedCount = 0;
       if (lastSummarizedId) {
         const idx = msgsForContext.findIndex((m) => m.id === lastSummarizedId);
-        summarizedCount = idx !== -1 ? idx + 1 : (storedSummary ? -1 : 0);
+        summarizedCount = idx !== -1 ? idx + 1 : 0;
       }
 
       const groupMembers = type === 'group' ? allCharacters.filter((c) => group?.characterIds.includes(c.id)) : [];
@@ -587,18 +593,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
         customSystemPromptMode: freshSettings?.customSystemPromptMode,
         contextSummary: summaryText || undefined,
         language: dialogueLang,
+        dynamicTail: true,
       });
 
       let systemPrompt = makeSystemPrompt(storedSummary);
-      const dialogueBudget = Math.max(600, promptTarget - estimateTokens(systemPrompt) - SYNOPSIS_ALLOWANCE);
-      const windowPlan = planDialogueWindow(historyTokens, summarizedCount, dialogueBudget, maxVerbatim);
-      const contextMsgs = msgsForContext.slice(windowPlan.verbatimFrom);
+      const dialogueBudget = Math.max(600, promptTarget - estimateTokens(systemPrompt) - SYNOPSIS_ALLOWANCE - SCENE_NOTE_ALLOWANCE);
+      const windowPlan = planWindow(historyTokens, summarizedCount, dialogueBudget, maxVerbatim);
+      const contextMsgs = msgsForContext.slice(windowPlan.windowFrom);
 
-      // Messages that are neither summarized nor verbatim get a short synopsis until the next compression
-      const gapMsgs = msgsForContext.slice(windowPlan.gapFrom, windowPlan.verbatimFrom).filter((m) => m.variants[m.activeVariantIndex]?.text?.trim());
+      // Only when the window had to skip messages before the next summary batch: a short synopsis covers them
+      const skippedMsgs = msgsForContext
+        .slice(summarizedCount, windowPlan.windowFrom)
+        .filter((m) => m.variants[m.activeVariantIndex]?.text?.trim());
       let contextSummary = storedSummary;
-      if (gapMsgs.length > 0) {
-        const synopsis = gapMsgs
+      if (skippedMsgs.length > 0) {
+        const synopsis = skippedMsgs
           .slice(-8)
           .map((m) => {
             const cleaned = cleanHistoryText(m.variants[m.activeVariantIndex]?.text || '');
@@ -610,9 +619,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
         systemPrompt = makeSystemPrompt(contextSummary);
       }
 
-      if (guidancePrompt && guidancePrompt.trim()) {
-        systemPrompt += `\n### USER GUIDED GENERATION INSTRUCTION FOR THIS TURN:\n${guidancePrompt.trim()}\n`;
-      }
+      const sceneNote = sceneNoteLines([
+        buildSceneNote({
+          speakerName: speaker.name,
+          relationshipScore: affinity,
+          memoryNodes,
+          guidance: guidancePrompt,
+        }),
+      ]);
 
       // Build message array for API
       const apiMessages: any[] = [{ role: 'system', content: systemPrompt }];
@@ -696,11 +710,29 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       apiMessages.push(...alternatingTurns);
 
+      // Scene note goes to the end of the last user message, so the stable beginning stays cacheable
+      if (sceneNote) {
+        const noteTitle = dialogueLang === 'ru' ? 'Заметка сцены (не цитируй и не упоминай)' : 'Scene note (do not quote or mention)';
+        const note = `[${noteTitle}:\n${sceneNote}]`;
+        const last = apiMessages[apiMessages.length - 1];
+        if (last && last.role === 'user' && typeof last.content === 'string') {
+          last.content = `${last.content}\n\n${note}`;
+        } else if (last && last.role === 'user' && Array.isArray(last.content)) {
+          last.content.push({ type: 'text', text: note });
+        } else {
+          apiMessages[0] = { role: 'system', content: `${systemPrompt}\n\n${note}` };
+        }
+      }
+
       let fullGenerated = '';
 
+      // Photos in the context go to the vision backend; plain text stays on the chat backend
+      const hasImages = apiMessages.some((m: any) => Array.isArray(m.content) && m.content.some((p: any) => p.type === 'image_url'));
+      const turnConfig = hasImages ? getComponentAiConfig(settings, activeApiKey, 'vision') : null;
+
       await streamChatCompletion({
-        apiKeyConfig: effectiveApiKey,
-        model: effectiveModel,
+        apiKeyConfig: (turnConfig ? turnConfig.apiKeyConfig : effectiveApiKey) as ApiKeyConfig,
+        model: turnConfig ? turnConfig.textModel : effectiveModel,
         messages: apiMessages,
         temperature: isLocal ? 0.7 : 0.85,
         maxTokens: 1024,
@@ -788,6 +820,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
               ? existingBotMsgToVariant.id
               : updatedMsgList[updatedMsgList.length - 1]?.id;
 
+            const memoryConfig = getComponentAiConfig(settings, activeApiKey, 'memory');
+            const summaryConfig = getComponentAiConfig(settings, activeApiKey, 'summary');
+
             // Run automated memory graph extraction and affinity change in background with fresh DB messages
             const freshHistory = await db.messages.where('chatId').equals(session.id).sortBy('createdAt');
             extractMemoryAndAffinity(
@@ -795,8 +830,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
               speaker.id,
               affinity,
               freshHistory,
-              effectiveApiKey,
-              effectiveModel,
+              memoryConfig.apiKeyConfig,
+              memoryConfig.textModel,
               targetTurnMsgId
             ).then(async ({ newAffinity }) => {
               if (newAffinity !== affinity) {
@@ -828,7 +863,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 }
               }
 
-              const end = planCompression(histTokens, covered, dialogueBudget, maxVerbatim);
+              const end = planSummaryBatch(histTokens, covered, dialogueBudget, maxVerbatim);
               if (end !== null) {
                 // Keep the summarization request itself inside the model context
                 const inputBudget = Math.round(promptTarget * 0.6);
@@ -847,8 +882,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 const limits = summaryLimits(promptTarget);
                 compressionRunningRef.current = true;
                 compressChatHistory(
-                  effectiveApiKey,
-                  effectiveModel,
+                  summaryConfig.apiKeyConfig as any,
+                  summaryConfig.textModel,
                   toSummarize,
                   prevSummary,
                   isLocal ? { maxChars: limits.maxChars, maxTokens: limits.maxTokens, timeoutMs: 120000 } : undefined
@@ -1054,12 +1089,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
     await runBotGeneration(speaker, guidance, msg);
   };
 
-  // User Magic Wand Ghostwriter
+  // User Magic Wand Ghostwriter: streams the suggestion, can be stopped, keeps the partial text
   const handleExecuteUserWand = async () => {
     if (!effectiveApiKey || (!effectiveApiKey.key.trim() && !isLocal)) {
       alert(language === 'ru' ? 'Сначала настройте подключение к ИИ в настройках' : 'Please configure AI connection in settings first');
       return;
     }
+    const controller = new AbortController();
+    wandAbortRef.current = controller;
+    setWandPreview('');
     setIsWandGenerating(true);
     try {
       const history = buildContextHistory(messages);
@@ -1067,35 +1105,47 @@ export const ChatView: React.FC<ChatViewProps> = ({
         ? allCharacters.find((c) => c.id === session.personaId) || null
         : null;
 
+      const ghostCfg = getComponentAiConfig(settings, activeApiKey, 'ghostwriter');
       const suggested = await suggestUserReply(
-        effectiveApiKey,
-        effectiveModel,
+        ghostCfg.apiKeyConfig as any,
+        ghostCfg.textModel,
         userPersona,
         userWandPrompt,
-        history
+        history,
+        { onPartial: (text) => setWandPreview(text), signal: controller.signal }
       );
-
-      if (!suggested || !suggested.trim()) {
+      setWandPreview(suggested.trim());
+      if (!suggested.trim() && !controller.signal.aborted) {
         alert(language === 'ru' ? 'Модель вернула пустой ответ. Попробуйте еще раз.' : 'Model returned empty suggestion. Please try again.');
-        return;
-      }
-
-      setInputText(suggested.trim());
-      setShowUserWandModal(false);
-      setUserWandPrompt('');
-      if (textareaRef.current) {
-        requestAnimationFrame(() => {
-          if (textareaRef.current) {
-            textareaRef.current.style.height = 'auto';
-            textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 192)}px`;
-          }
-        });
       }
     } catch (err: any) {
       alert((language === 'ru' ? 'Ошибка подсказки реплики: ' : 'Ghostwriter failed: ') + err.message);
     } finally {
+      wandAbortRef.current = null;
       setIsWandGenerating(false);
     }
+  };
+
+  const applyWandPreview = () => {
+    if (!wandPreview.trim()) return;
+    setInputText(wandPreview.trim());
+    setShowUserWandModal(false);
+    setUserWandPrompt('');
+    setWandPreview('');
+    if (textareaRef.current) {
+      requestAnimationFrame(() => {
+        if (textareaRef.current) {
+          textareaRef.current.style.height = 'auto';
+          textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 192)}px`;
+        }
+      });
+    }
+  };
+
+  const closeWandModal = () => {
+    wandAbortRef.current?.abort();
+    setShowUserWandModal(false);
+    setWandPreview('');
   };
 
   // Slash commands handler
@@ -1121,9 +1171,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
       setSummaryModalText(language === 'ru' ? 'Генерация сводки сцены...' : 'Generating scene recap...');
       try {
         const history = buildContextHistory(messages);
+        const summaryCfg = getComponentAiConfig(settings, activeApiKey, 'summary');
         const recap = await summarizeScene(
-          effectiveApiKey,
-          effectiveModel,
+          summaryCfg.apiKeyConfig as any,
+          summaryCfg.textModel,
           history,
           language
         );
@@ -1810,46 +1861,74 @@ export const ChatView: React.FC<ChatViewProps> = ({
       {/* User Ghostwriter Wand Modal */}
       {showUserWandModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-3">
+          <div className="w-full max-w-md bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Wand2 className="w-4 h-4 text-violet-400" />
                 <h3 className="font-semibold text-sm text-white">{t.ghostwriterTitle}</h3>
               </div>
-              <button
-                onClick={() => setShowUserWandModal(false)}
-                className="text-slate-400 hover:text-white"
-              >
+              <button onClick={closeWandModal} className="text-slate-400 hover:text-white">
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             <textarea
-              rows={3}
+              rows={2}
               value={userWandPrompt}
               onChange={(e) => setUserWandPrompt(e.target.value)}
               placeholder={t.ghostwriterPromptPlaceholder}
-              className="w-full px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white resize-none"
+              disabled={isWandGenerating}
+              className="w-full px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white resize-none disabled:opacity-60"
               autoFocus
             />
 
+            {(isWandGenerating || wandPreview) && (
+              <div className="max-h-56 overflow-y-auto px-3 py-2 bg-silk-800/60 border border-silk-700 rounded-xl text-sm text-slate-100 whitespace-pre-wrap leading-relaxed">
+                {wandPreview || (
+                  <span className="text-slate-500 text-xs">{language === 'ru' ? 'Ожидание первого слова...' : 'Waiting for the first words...'}</span>
+                )}
+                {isWandGenerating && <span className="inline-block w-1.5 h-4 ml-0.5 align-middle bg-violet-400 animate-pulse" />}
+              </div>
+            )}
+
             <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setShowUserWandModal(false)}
-                type="button"
-                className="px-3 py-1.5 text-xs text-slate-400 hover:text-white"
-              >
-                {t.cancel}
-              </button>
-              <button
-                onClick={handleExecuteUserWand}
-                disabled={isWandGenerating}
-                type="button"
-                className="flex items-center gap-1.5 px-4 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-md"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>{isWandGenerating ? (language === 'ru' ? 'Формулирую...' : 'Formulating...') : t.applyToInput}</span>
-              </button>
+              {isWandGenerating ? (
+                <button
+                  onClick={() => wandAbortRef.current?.abort()}
+                  type="button"
+                  className="flex items-center gap-1.5 px-4 py-1.5 bg-silk-700 hover:bg-silk-600 text-white rounded-xl text-xs font-semibold"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  <span>{language === 'ru' ? 'Стоп' : 'Stop'}</span>
+                </button>
+              ) : (
+                <>
+                  <button
+                    onClick={closeWandModal}
+                    type="button"
+                    className="px-3 py-1.5 text-xs text-slate-400 hover:text-white"
+                  >
+                    {t.cancel}
+                  </button>
+                  {wandPreview && (
+                    <button
+                      onClick={handleExecuteUserWand}
+                      type="button"
+                      className="px-3 py-1.5 text-xs text-slate-200 border border-silk-700 hover:border-violet-500 rounded-xl"
+                    >
+                      {language === 'ru' ? 'Ещё вариант' : 'Another version'}
+                    </button>
+                  )}
+                  <button
+                    onClick={wandPreview ? applyWandPreview : handleExecuteUserWand}
+                    type="button"
+                    className="flex items-center gap-1.5 px-4 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-md"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>{wandPreview ? t.applyToInput : (language === 'ru' ? 'Сформулировать' : 'Generate')}</span>
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

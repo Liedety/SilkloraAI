@@ -117,7 +117,8 @@ window.I18N = {
     withVision: "с поддержкой изображений",
     archUnsupported: "Архитектура {a} не поддерживается установленным движком",
     archUnknown: "Поддержка архитектуры не проверена",
-    visionNote: "Работа с изображениями зависит от версии движка. Если обработчик не найден, модель загрузится как текстовая.",
+    visionNote: "Для изображений нужны два файла: сама модель и её проектор (mmproj). Они скачиваются вместе и подбираются автоматически. Без проектора модель работает только с текстом.",
+    warnVisionNoHandler: "Проектор найден, но движок не умеет с ним работать, поэтому изображения не будут распознаваться. Обновите движок (start-server.bat --repair) или выберите другую модель.",
     offlineStore: "Нет доступа к Hugging Face. Проверьте интернет или положите .gguf файлы в папку models вручную.",
 
     searchPlaceholder: "Название модели или ссылка на Hugging Face",
@@ -317,7 +318,8 @@ window.I18N = {
     withVision: "with image support",
     archUnsupported: "Architecture {a} is not supported by the installed engine",
     archUnknown: "Architecture support was not verified",
-    visionNote: "Image support depends on the engine version. If no handler is found, the model loads as text only.",
+    visionNote: "Images need two files: the model itself and its projector (mmproj). They download together and pair automatically. Without a projector the model works with text only.",
+    warnVisionNoHandler: "The projector was found, but the engine cannot use it, so images will not be read. Update the engine (start-server.bat --repair) or choose another model.",
     offlineStore: "Cannot reach Hugging Face. Check your internet or put .gguf files into the models folder manually.",
 
     searchPlaceholder: "Model name or Hugging Face link",

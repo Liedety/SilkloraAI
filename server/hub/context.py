@@ -3,6 +3,10 @@
 The client already keeps its prompt inside a token budget. This module is the safety net that
 guarantees a request always fits the loaded context window, without losing the beginning of the
 story: dropped turns are condensed into a short digest instead of being discarded.
+
+The window moves in blocks of BLOCK_MESSAGES messages, not one message per turn. The llama.cpp
+prompt cache can only be reused while the beginning of the prompt stays identical, so a window
+that shifts on every turn would force a full re-read of the prompt on every reply.
 """
 
 from typing import Any, Callable, Dict, List, Tuple
@@ -13,6 +17,7 @@ SAFETY_MARGIN = 96
 MIN_REPLY_RESERVE = 256
 DIGEST_LINE_CHARS = 140
 DIGEST_HEADER = "[Earlier conversation, condensed automatically]"
+BLOCK_MESSAGES = 4
 
 TokenCounter = Callable[[str], int]
 
@@ -83,6 +88,22 @@ def _truncate_middle(text: str, max_tokens: int, count: TokenCounter) -> str:
     return text[:head].rstrip() + "\n[...]\n" + text[-tail:].lstrip()
 
 
+def _block_start(dialogue_sizes: List[int], dialogue_roles: List[str], budget: int) -> int:
+    """First dialogue index to keep: aligned to BLOCK_MESSAGES and starting on a user turn."""
+    n = len(dialogue_sizes)
+    used = 0
+    minimal = n - 1
+    for i in range(n - 1, -1, -1):
+        if used + dialogue_sizes[i] > budget and i < n - 1:
+            break
+        used += dialogue_sizes[i]
+        minimal = i
+    start = min(((minimal + BLOCK_MESSAGES - 1) // BLOCK_MESSAGES) * BLOCK_MESSAGES, n - 1)
+    while start < n - 1 and dialogue_roles[start] != "user":
+        start += 1
+    return start
+
+
 def fit_messages(
     messages: List[Dict[str, Any]],
     n_ctx: int,
@@ -123,20 +144,12 @@ def fit_messages(
     digest_budget = min(700, int(budget * 0.12))
     dialogue_budget = budget - system_tokens - digest_budget
 
-    kept: List[int] = []
-    used = 0
-    for i in reversed(dialogue):
-        if kept and used + sizes[i] > dialogue_budget:
-            break
-        kept.append(i)
-        used += sizes[i]
-    kept.reverse()
+    d_sizes = [sizes[i] for i in dialogue]
+    d_roles = [msgs[i].get("role", "user") for i in dialogue]
+    start = _block_start(d_sizes, d_roles, dialogue_budget)
+    kept_idx = dialogue[start:]
+    dropped = dialogue[:start]
 
-    # The history must start with a user turn for most chat templates.
-    while len(kept) > 1 and msgs[kept[0]].get("role") == "assistant":
-        kept.pop(0)
-
-    dropped = [i for i in dialogue if i not in kept]
     digest_lines: List[str] = []
     digest_tokens = 0
     for i in reversed(dropped):
@@ -153,8 +166,8 @@ def fit_messages(
         digest_tokens += line_tokens
     digest_lines.reverse()
 
-    result: List[Dict[str, Any]] = []
     digest_text = (DIGEST_HEADER + "\n" + "\n".join(digest_lines)) if digest_lines else ""
+    result: List[Dict[str, Any]] = []
     digest_attached = False
     for i, m in enumerate(msgs):
         if i in system_idx:
@@ -164,7 +177,7 @@ def fit_messages(
                 digest_attached = True
             else:
                 result.append(m)
-        elif i in kept:
+        elif i in kept_idx:
             result.append(m)
     if digest_text and not digest_attached:
         result.insert(0, {"role": "system", "content": digest_text})

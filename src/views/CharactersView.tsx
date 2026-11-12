@@ -21,7 +21,7 @@ import type { Character, CharacterEmotion, Folder, Group, ImageCropOffset, Langu
 import { translations } from '../i18n';
 import { ImageCropperModal } from '../components/ImageCropperModal';
 import { AvatarImage } from '../components/AvatarImage';
-import { generatePersonaWithAI, getEffectiveAiConfig } from '../services/ai';
+import { generatePersonaWithAI, getEffectiveAiConfig, getComponentAiConfig } from '../services/ai';
 
 interface CharactersViewProps {
   language: Language;
@@ -365,9 +365,11 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
         }
       }
 
+      // A reference photo goes to the vision backend, the rest to the character generator backend
+      const genCfg = getComponentAiConfig(settings, activeApiKey, genPhotoRef ? 'vision' : 'characterGen');
       const generated = await generatePersonaWithAI(
-        effectiveApiKey,
-        effectiveModel,
+        genCfg.apiKeyConfig as any,
+        genCfg.textModel,
         genConcept,
         genDo,
         genDont,

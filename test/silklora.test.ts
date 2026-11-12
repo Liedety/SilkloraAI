@@ -8,7 +8,7 @@ import {
 } from '../src/services/ai.ts';
 import { buildSystemPrompt, DEFAULT_CORE_SYSTEM_PROMPT } from '../src/services/promptBuilder.ts';
 import { translations } from '../src/i18n/index.ts';
-import { estimateTokens, planDialogueWindow, planCompression, summaryLimits } from '../src/services/contextBudget.ts';
+import { estimateTokens, planWindow, planSummaryBatch, summaryLimits, sceneNoteLines, SUMMARY_BATCH } from '../src/services/contextBudget.ts';
 import { normalizeLabel, calculateNodeScore, findDuplicateNodes, selectNodesToPrune, isSignificantTurn } from '../src/services/memoryGraph.ts';
 import { getLocalizedTextStyle, DEFAULT_STYLES, DEFAULT_THEME, APP_THEMES } from '../src/db/index.ts';
 import type { Character, Group, MemoryNode, MemoryEdge, TextStylePreset, AppSettings, ApiKeyConfig } from '../src/types/index.ts';
@@ -1014,59 +1014,61 @@ test('contextBudget: estimateTokens weighs Cyrillic heavier than Latin', () => {
   assert.strictEqual(estimateTokens(''), 0);
 });
 
-test('contextBudget: window keeps newest turns within the token budget', () => {
-  const tokens = new Array(30).fill(100);
-  const plan = planDialogueWindow(tokens, 0, 1000, 40);
-  assert.strictEqual(plan.verbatimFrom, 20);
-  assert.strictEqual(plan.gapFrom, 0);
+test('contextBudget: window starts at the anchor when everything fits', () => {
+  const plan = planWindow(new Array(20).fill(10), 6, 100000, 40);
+  assert.strictEqual(plan.windowFrom, 6);
+});
+
+test('contextBudget: window moves forward only when the budget is exceeded', () => {
+  const plan = planWindow(new Array(30).fill(100), 0, 1000, 40);
+  assert.ok(plan.windowFrom > 0);
+  const kept = (30 - plan.windowFrom) * 100;
+  assert.ok(kept <= 1000);
+  assert.strictEqual(30 - plan.windowFrom, 10);
 });
 
 test('contextBudget: window honors the verbatim message cap', () => {
-  const plan = planDialogueWindow(new Array(30).fill(10), 0, 100000, 8);
-  assert.strictEqual(plan.verbatimFrom, 22);
+  const plan = planWindow(new Array(30).fill(10), 0, 100000, 8);
+  assert.strictEqual(plan.windowFrom, 22);
 });
 
-test('contextBudget: always keeps the latest message even when it exceeds the budget', () => {
-  const plan = planDialogueWindow([50, 50, 5000], 0, 300, 40);
-  assert.strictEqual(plan.verbatimFrom, 2);
+test('contextBudget: the newest message is always kept, even above the budget', () => {
+  const plan = planWindow([50, 50, 5000], 0, 300, 40);
+  assert.strictEqual(plan.windowFrom, 2);
 });
 
-test('contextBudget: verbatim zone never overlaps the summarized zone', () => {
-  const tokens = new Array(20).fill(10);
-  const plan = planDialogueWindow(tokens, 15, 100000, 40);
-  assert.strictEqual(plan.verbatimFrom, 15);
-  assert.strictEqual(plan.gapFrom, 15);
+test('contextBudget: window never starts before the anchor', () => {
+  const plan = planWindow(new Array(20).fill(100), 15, 500, 40);
+  assert.ok(plan.windowFrom >= 15);
 });
 
-test('contextBudget: messages between summary and window are reported as a gap', () => {
-  const tokens = new Array(20).fill(100);
-  const plan = planDialogueWindow(tokens, 4, 500, 40);
-  assert.strictEqual(plan.verbatimFrom, 15);
-  assert.strictEqual(plan.gapFrom, 4);
+test('contextBudget: window start is stable while messages are appended', () => {
+  const starts = [];
+  for (let n = 10; n <= 14; n++) starts.push(planWindow(new Array(n).fill(10), 4, 100000, 40).windowFrom);
+  assert.deepStrictEqual(starts, [4, 4, 4, 4, 4]);
 });
 
-test('contextBudget: unknown summary coverage produces no gap', () => {
-  const plan = planDialogueWindow(new Array(20).fill(100), -1, 500, 40);
-  assert.strictEqual(plan.gapFrom, plan.verbatimFrom);
+test('contextBudget: no summary batch while the window is healthy', () => {
+  assert.strictEqual(planSummaryBatch(new Array(10).fill(10), 0, 4000, 40), null);
 });
 
-test('contextBudget: compression waits until the window is nearly full', () => {
-  assert.strictEqual(planCompression(new Array(10).fill(100), 0, 4000, 40), null);
-});
-
-test('contextBudget: compression batches older turns and leaves about half the budget verbatim', () => {
-  const tokens = new Array(30).fill(100);
-  const end = planCompression(tokens, 0, 2000, 40);
+test('contextBudget: summary batches move the anchor in steps of the batch size', () => {
+  const end = planSummaryBatch(new Array(40).fill(100), 0, 2000, 40);
   assert.ok(end !== null);
-  assert.strictEqual(end, 20);
+  assert.strictEqual(end % SUMMARY_BATCH, 0);
+  assert.ok(end > 0 && end < 40);
 });
 
-test('contextBudget: compression triggers on message count for small caps', () => {
-  const end = planCompression(new Array(12).fill(10), 0, 100000, 8);
-  assert.ok(end !== null && end > 0 && end < 12);
+test('contextBudget: summary batch triggers on message count for small caps', () => {
+  const end = planSummaryBatch(new Array(20).fill(10), 0, 100000, 8);
+  assert.ok(end !== null && end >= SUMMARY_BATCH);
 });
 
 test('contextBudget: summary limits scale with the prompt budget', () => {
   assert.ok(summaryLimits(8000).maxChars > summaryLimits(1500).maxChars);
   assert.ok(summaryLimits(100000).maxChars <= 3200);
+});
+
+test('contextBudget: scene note skips empty lines', () => {
+  assert.strictEqual(sceneNoteLines(['a', '', '  ', 'b']), 'a\nb');
 });

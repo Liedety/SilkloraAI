@@ -27,6 +27,12 @@ Options:
 
 The launcher needs internet access once for the setup (Python, packages, engine). Later starts work without it.
 
+If the computer has an NVIDIA graphics card but the engine runs on the processor, the server tries the GPU builds on its next start by itself. A failed try is remembered for this card and driver, so it is not repeated on every start. A driver update or `--repair` starts the search again.
+
+## Vision models (photos in chat)
+
+An image-capable model needs two files: the model and its projector (`mmproj`). The dashboard downloads them together and pairs them automatically. Load the model from the Models tab, choose "With images". Without a projector the server answers photos with the error `vision_unavailable` instead of ignoring them.
+
 ## Using the dashboard
 
 - **Home**: setup checklist, QR code for the phone, current model, quick chat test.

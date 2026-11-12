@@ -48,14 +48,14 @@ export class SilkloraDatabase extends Dexie {
 export const db = new SilkloraDatabase();
 
 export const DEFAULT_THEME: ThemeConfig = {
-  id: 'violet-dark',
-  name: 'Midnight Velvet',
-  accentColor: '#8b5cf6', // Violet
-  actionColor: '#f43f5e', // Rose accent for *actions*
-  appBgColor: '#0a0814', // Rich deep violet-black
-  appSurfaceColor: '#141126', // Panel/card surface
-  bubbleUserBg: '#1e1b4b', // Deep indigo
-  bubbleBotBg: '#1e293b', // Slate 800
+  id: 'graphite',
+  name: 'Graphite',
+  accentColor: '#52525b', // Graphite: matches the monochrome Hub dashboard; white text stays readable on it
+  actionColor: '#a1a1aa', // Light grey for *actions*
+  appBgColor: '#0a0a0a', // Near black, as in the Hub logo
+  appSurfaceColor: '#121212', // Panel/card surface
+  bubbleUserBg: '#27272a', // Zinc 800
+  bubbleBotBg: '#18181b', // Zinc 900
   bubbleRadius: 18,
   bubbleOpacity: 0.85,
   fontSize: 15,
@@ -166,17 +166,17 @@ export const DEFAULT_STYLES: TextStylePreset[] = [
 
 export const APP_THEMES: Array<{ id: string; name: string; theme: ThemeConfig }> = [
   {
-    id: 'violet-dark',
-    name: 'Midnight Violet (Фиолетовый)',
+    id: 'graphite',
+    name: 'Graphite (Графит)',
     theme: {
-      id: 'violet-dark',
-      name: 'Midnight Violet',
-      accentColor: '#8b5cf6',
-      actionColor: '#fb7185',
-      appBgColor: '#0a0814',
-      appSurfaceColor: '#141126',
-      bubbleUserBg: '#1e1b4b',
-      bubbleBotBg: '#1e293b',
+      id: 'graphite',
+      name: 'Graphite',
+      accentColor: '#52525b',
+      actionColor: '#a1a1aa',
+      appBgColor: '#0a0a0a',
+      appSurfaceColor: '#121212',
+      bubbleUserBg: '#27272a',
+      bubbleBotBg: '#18181b',
       bubbleRadius: 18,
       bubbleOpacity: 0.85,
       fontSize: 15,

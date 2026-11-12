@@ -20,7 +20,7 @@ import type { Group, ImageCropOffset, Language } from '../types';
 import { translations } from '../i18n';
 import { ImageCropperModal } from '../components/ImageCropperModal';
 import { AvatarImage } from '../components/AvatarImage';
-import { generateGroupWithAI, generateGroupRolesWithAI, getEffectiveAiConfig } from '../services/ai';
+import { generateGroupWithAI, generateGroupRolesWithAI, getEffectiveAiConfig, getComponentAiConfig } from '../services/ai';
 
 interface GroupsViewProps {
   language: Language;
@@ -211,9 +211,10 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
     const selectedChars = characters.filter((c) => currentFormRef.current.characterIds.includes(c.id));
     setIsGeneratingRoles(true);
     try {
+      const groupCfg = getComponentAiConfig(settings, activeApiKey, 'groupGen');
       const generated = await generateGroupRolesWithAI(
-        effectiveApiKey!,
-        effectiveModel,
+        groupCfg.apiKeyConfig as any,
+        groupCfg.textModel,
         currentFormRef.current.name || 'Group',
         currentFormRef.current.description || '',
         selectedChars,
@@ -238,9 +239,10 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
     if (!genConcept.trim()) return;
     setIsGeneratingGroup(true);
     try {
+      const groupCfg = getComponentAiConfig(settings, activeApiKey, 'groupGen');
       const res = await generateGroupWithAI(
-        effectiveApiKey,
-        effectiveModel,
+        groupCfg.apiKeyConfig as any,
+        groupCfg.textModel,
         genConcept,
         language
       );

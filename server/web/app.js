@@ -179,6 +179,7 @@
             fallback_settings: "warnFallback",
             layout_unknown: "warnLayout",
             ctx_above_training: "warnCtxTrain",
+            vision_handler_missing: "warnVisionNoHandler",
         };
         return (plan.warnings || []).filter((w) => map[w]).map((w) => t(map[w]));
     }
