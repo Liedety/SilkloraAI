@@ -182,4 +182,6 @@ export interface AppSettings {
   /** Per-component backend. Missing entries follow aiEngineMode. */
   aiRouting?: Partial<Record<AiComponent, AiBackend>>;
   localHubUrl?: string;
+  /** Marks one-time default migrations that were already applied to this install. */
+  themeMigration?: string;
 }

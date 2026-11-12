@@ -308,6 +308,17 @@ export const APP_THEMES: Array<{ id: string; name: string; theme: ThemeConfig }>
 ];
 
 export async function initDatabaseDefaults() {
+  // One-time move of installs that still carry the old violet default to the Graphite theme.
+  // A theme picked by hand (any other id) is kept.
+  const existing = await db.settings.get('default');
+  if (existing && existing.themeMigration !== 'graphite-1') {
+    const isOldDefault = existing.theme?.id === 'violet-dark';
+    await db.settings.update('default', {
+      themeMigration: 'graphite-1',
+      ...(isOldDefault ? { theme: DEFAULT_THEME } : {}),
+    });
+  }
+
   const settingsCount = await db.settings.count();
   if (settingsCount === 0) {
     await db.settings.put({
