@@ -1,7 +1,7 @@
 {
   "name": "silklora-ai",
   "private": true,
-  "version": "1.0.1",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,6 +15,7 @@
     "@capacitor/core": "^6.1.2",
     "dexie": "^4.0.10",
     "dexie-react-hooks": "^1.1.7",
+    "jsqr": "^1.4.0",
     "lucide-react": "^0.454.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"

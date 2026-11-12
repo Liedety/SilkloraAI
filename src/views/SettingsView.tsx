@@ -18,9 +18,18 @@ import {
   Download,
   Upload,
   RotateCcw,
+  Cloud,
+  Monitor,
+  Wifi,
+  Activity,
+  Info,
+  Shield,
+  Scan,
 } from 'lucide-react';
 import { db, DEFAULT_THEME, APP_THEMES, getLocalizedTextStyle } from '../db';
 import type {
+  AiBackend,
+  AiComponent,
   ApiKeyConfig,
   ApiProvider,
   AppSettings,
@@ -29,9 +38,10 @@ import type {
   ThemeConfig,
 } from '../types';
 import { translations } from '../i18n';
-import { fetchAvailableModels, fetchVisionModels } from '../services/ai';
+import { fetchAvailableModels, fetchVisionModels, pingLocalServer, normalizeLocalServerUrl, AI_COMPONENTS, getComponentBackend } from '../services/ai';
 import { DEFAULT_CORE_SYSTEM_PROMPT } from '../services/promptBuilder';
 import { ChatPreviewCard } from '../components/ChatPreviewCard';
+import { QrScannerModal } from '../components/QrScannerModal';
 
 interface SettingsViewProps {
   language: Language;
@@ -50,6 +60,87 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const settings = useLiveQuery(() => db.settings.get('default'));
   const apiKeys = useLiveQuery(() => db.apiKeys.toArray()) || [];
   const textStyles = useLiveQuery(() => db.textStyles.toArray()) || [];
+
+  // Settings are grouped into tabs; the tab is remembered only for this visit
+  const [settingsTab, setSettingsTab] = useState<'ai' | 'models' | 'style' | 'look'>('ai');
+  const setComponentBackend = async (component: AiComponent, backend: AiBackend) => {
+    await db.settings.update('default', { aiRouting: { ...(settings?.aiRouting || {}), [component]: backend } });
+  };
+  const hasActiveCloudKey = apiKeys.some((k) => k.isActive && k.key.trim().length > 0);
+
+  // Local AI Hub State
+  const aiEngineMode = settings?.aiEngineMode || 'cloud';
+  const [localServerUrl, setLocalServerUrl] = useState(
+    settings?.localHubUrl || 'http://192.168.1.55:8080/v1'
+  );
+  const [isPinging, setIsPinging] = useState(false);
+  const [pingResult, setPingResult] = useState<{
+    ok: boolean;
+    pingMs: number;
+    activeModel?: string;
+    error?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (settings?.localHubUrl) {
+      setLocalServerUrl(settings.localHubUrl);
+    }
+  }, [settings?.localHubUrl]);
+
+  const handleSetAiEngineMode = async (mode: 'cloud' | 'local') => {
+    await db.settings.update('default', { aiEngineMode: mode });
+  };
+
+  const handleUpdateLocalServerUrl = async (val: string) => {
+    setLocalServerUrl(val);
+    await db.settings.update('default', { localHubUrl: val });
+  };
+
+  const handlePingServer = async () => {
+    setIsPinging(true);
+    setPingResult(null);
+    try {
+      const res = await pingLocalServer(localServerUrl);
+      setPingResult(res);
+      if (res.ok) {
+        const normalized = normalizeLocalServerUrl(localServerUrl);
+        if (normalized !== localServerUrl) {
+          setLocalServerUrl(normalized);
+          await db.settings.update('default', { localHubUrl: normalized });
+        }
+      }
+    } catch (err: any) {
+      setPingResult({
+        ok: false,
+        pingMs: 0,
+        error: err.message || 'Error',
+      });
+    } finally {
+      setIsPinging(false);
+    }
+  };
+
+  const [showQrScanner, setShowQrScanner] = useState(false);
+
+  const handleQrScanSuccess = async (scannedUrl: string) => {
+    const normalized = normalizeLocalServerUrl(scannedUrl);
+    setLocalServerUrl(normalized);
+    await db.settings.update('default', { localHubUrl: normalized });
+    setIsPinging(true);
+    setPingResult(null);
+    try {
+      const res = await pingLocalServer(normalized);
+      setPingResult(res);
+    } catch (err: any) {
+      setPingResult({
+        ok: false,
+        pingMs: 0,
+        error: err.message || 'Error',
+      });
+    } finally {
+      setIsPinging(false);
+    }
+  };
 
   // API Key Form State
   const [showAddKey, setShowAddKey] = useState(false);
@@ -339,6 +430,63 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     return true;
   });
 
+  // Per-function backend: cloud (your API key) or the local PC hub
+  const routingItems: Array<[AiComponent, string, string]> = [
+    ['chat', t.routingChat, t.routingChatDesc],
+    ['ghostwriter', t.routingGhost, t.routingGhostDesc],
+    ['memory', t.routingMemory, t.routingMemoryDesc],
+    ['summary', t.routingSummary, t.routingSummaryDesc],
+    ['characterGen', t.routingCharGen, t.routingCharGenDesc],
+    ['groupGen', t.routingGroupGen, t.routingGroupGenDesc],
+    ['vision', t.routingVision, t.routingVisionDesc],
+  ];
+  const renderRouting = () => {
+    const backends = AI_COMPONENTS.map((c) => getComponentBackend(settings, c));
+    const usesCloud = backends.includes('cloud');
+    const usesLocal = backends.includes('local');
+    return (
+      <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
+        <div>
+          <h2 className="text-sm font-semibold text-white">{t.routingTitle}</h2>
+          <p className="text-[11px] text-slate-400 leading-snug mt-1">{t.routingDesc}</p>
+        </div>
+        <div className="divide-y divide-silk-800/60">
+          {routingItems.map(([id, label, desc]) => {
+            const current = getComponentBackend(settings, id);
+            return (
+              <div key={id} className="flex items-center justify-between gap-3 py-2.5">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-slate-100">{label}</div>
+                  <div className="text-[11px] text-slate-500 leading-snug">{desc}</div>
+                </div>
+                <div className="flex shrink-0 rounded-xl border border-silk-700 overflow-hidden text-xs">
+                  {(['cloud', 'local'] as AiBackend[]).map((b) => (
+                    <button
+                      key={b}
+                      type="button"
+                      onClick={() => setComponentBackend(id, b)}
+                      className={`px-3 py-1.5 font-semibold transition-colors ${
+                        current === b ? 'bg-white text-black' : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {b === 'cloud' ? t.routingCloud : t.routingLocal}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {usesCloud && !hasActiveCloudKey && (
+          <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200">{t.routingNoCloud}</div>
+        )}
+        {usesLocal && aiEngineMode !== 'local' && !settings?.localHubUrl && (
+          <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200">{t.routingNoLocal}</div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="flex flex-col h-full overflow-hidden bg-silk-950 text-slate-100">
       {/* Top Header */}
@@ -346,8 +494,80 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <h1 className="text-xl font-bold tracking-tight text-white">{t.settingsTitle}</h1>
       </div>
 
+      {/* Tab bar */}
+      <div className="px-4 pt-3 pb-2 border-b border-silk-800/60 bg-silk-950 overflow-x-auto">
+        <div className="flex gap-1.5 min-w-max">
+          {([
+            ['ai', t.settingsTabAi],
+            ['models', t.settingsTabModels],
+            ['style', t.settingsTabStyle],
+            ['look', t.settingsTabLook],
+          ] as const).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setSettingsTab(id)}
+              className={`px-3.5 py-2 rounded-xl text-xs font-semibold transition-colors ${
+                settingsTab === id ? 'bg-white text-black' : 'text-slate-400 hover:text-white hover:bg-silk-800/60'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Main Settings Scroll */}
       <div className="flex-1 overflow-y-auto p-4 space-y-6 pb-28">
+        {settingsTab === 'ai' && (<>
+        {/* AI Engine Mode Switcher: Cloud vs Local PC */}
+        <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+              <Monitor className="w-4 h-4 text-violet-400" />
+              <span>{t.sectionAiEngineMode}</span>
+            </div>
+            <span
+              className={`text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider ${
+                aiEngineMode === 'local'
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                  : 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+              }`}
+            >
+              {aiEngineMode === 'local' ? 'Local Hub' : 'Cloud'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => handleSetAiEngineMode('cloud')}
+              className={`py-2.5 px-3 rounded-xl text-xs font-semibold border flex items-center justify-center gap-2 transition-all ${
+                aiEngineMode === 'cloud'
+                  ? 'bg-violet-600 border-violet-500 text-white shadow-lg shadow-violet-600/30'
+                  : 'bg-silk-800 border-silk-700 text-slate-400 hover:text-white'
+              }`}
+            >
+              <Cloud className="w-4 h-4" />
+              <span>{t.aiModeCloud}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSetAiEngineMode('local')}
+              className={`py-2.5 px-3 rounded-xl text-xs font-semibold border flex items-center justify-center gap-2 transition-all ${
+                aiEngineMode === 'local'
+                  ? 'bg-violet-600 border-violet-500 text-white shadow-lg shadow-violet-600/30'
+                  : 'bg-silk-800 border-silk-700 text-slate-400 hover:text-white'
+              }`}
+            >
+              <Monitor className="w-4 h-4" />
+              <span>{t.aiModeLocal}</span>
+            </button>
+          </div>
+        </div>
+
+        </>)}
+
+        {settingsTab === 'look' && (<>
         {/* 1. Language Section */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
           <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
@@ -380,8 +600,140 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
-        {/* 2. API Keys Section */}
-        <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
+        </>)}
+
+        {settingsTab === 'ai' && (<>
+        {aiEngineMode === 'local' ? (
+          /* LOCAL AI HUB SECTION (Replaces Cloud Keys & Models) */
+          <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4 shadow-xl">
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-300">
+              <Wifi className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>{t.localHubTitle}</span>
+            </div>
+
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              {t.localHubDesc}
+            </p>
+
+            {/* Server Address Input & Ping Button */}
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between">
+                <label className="block text-xs font-semibold text-slate-300">
+                  {t.localServerUrlLabel}
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowQrScanner(true)}
+                  className="flex items-center gap-1.5 px-2.5 py-1 bg-silk-800 hover:bg-silk-750 border border-violet-500/30 hover:border-violet-400/60 text-violet-300 rounded-lg text-[11px] font-medium transition-all active:scale-95 shadow-sm"
+                >
+                  <Scan className="w-3.5 h-3.5 text-violet-400" />
+                  <span>{t.scanQrCode}</span>
+                </button>
+              </div>
+
+              <input
+                type="text"
+                value={localServerUrl}
+                onChange={(e) => handleUpdateLocalServerUrl(e.target.value)}
+                placeholder={t.localServerUrlPlaceholder}
+                className="w-full px-3.5 py-2.5 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white font-mono placeholder-slate-500 focus:outline-none focus:border-violet-500"
+              />
+              <button
+                type="button"
+                onClick={handlePingServer}
+                disabled={isPinging}
+                className="w-full py-2.5 px-4 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-2 shadow-md transition-all active:scale-[0.98]"
+              >
+                <Activity className={`w-4 h-4 ${isPinging ? 'animate-spin' : ''}`} />
+                <span>{isPinging ? t.checkingConnection : t.checkConnection}</span>
+              </button>
+            </div>
+
+            {/* Ping Result Status Banner */}
+            {pingResult && (
+              <div
+                className={`p-3 rounded-xl border transition-all ${
+                  pingResult.ok
+                    ? 'bg-emerald-950/40 border-emerald-500/60 text-emerald-200'
+                    : 'bg-rose-950/40 border-rose-500/60 text-rose-200'
+                }`}
+              >
+                <div className="flex items-start gap-2.5">
+                  {pingResult.ok ? (
+                    <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 mt-1 shrink-0 animate-pulse shadow-[0_0_8px_#34d399]" />
+                  ) : (
+                    <div className="w-2.5 h-2.5 rounded-full bg-rose-400 mt-1 shrink-0" />
+                  )}
+                  <div className="flex-1 text-xs space-y-1">
+                    <div className="font-semibold flex items-center justify-between">
+                      <span>
+                        {pingResult.ok
+                          ? t.connectionSuccess.replace('{ms}', String(pingResult.pingMs))
+                          : t.connectionFailed}
+                      </span>
+                      {pingResult.ok && (
+                        <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">
+                          {pingResult.pingMs} ms
+                        </span>
+                      )}
+                    </div>
+                    {pingResult.ok && pingResult.activeModel && (
+                      <div className="text-[11px] text-emerald-300/90 font-mono">
+                        {t.activeModelPc.replace('{model}', pingResult.activeModel)}
+                      </div>
+                    )}
+                    {!pingResult.ok && (
+                      <p className="text-[11px] text-rose-300/90 leading-snug">
+                        {t.connectionFailedHint.replace('{url}', localServerUrl)}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Model Management Notice */}
+            <div className="p-3 rounded-xl bg-silk-850/70 border border-silk-800 text-[11px] text-slate-400 flex items-start gap-2">
+              <Info className="w-4 h-4 text-violet-400 shrink-0 mt-0.5" />
+              <p className="leading-relaxed">
+                {t.localModelManagedOnPc}
+              </p>
+            </div>
+
+            {/* Step-by-Step Wi-Fi Setup Guide */}
+            <div className="p-3.5 rounded-xl bg-silk-850 border border-silk-800 space-y-2.5">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
+                <Wifi className="w-4 h-4 text-violet-400 shrink-0" />
+                <span>{t.wifiGuideTitle}</span>
+              </div>
+              <ul className="text-[11px] text-slate-400 space-y-2 leading-relaxed">
+                <li className="flex items-start gap-2">
+                  <span className="text-violet-400 font-mono font-bold shrink-0">1.</span>
+                  <span>{t.wifiStep1}</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="text-violet-400 font-mono font-bold shrink-0">2.</span>
+                  <span>{t.wifiStep2}</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="text-violet-400 font-mono font-bold shrink-0">3.</span>
+                  <span>{t.wifiStep3}</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="text-violet-400 font-mono font-bold shrink-0">4.</span>
+                  <span>{t.wifiStep4}</span>
+                </li>
+              </ul>
+              <div className="flex items-start gap-1.5 pt-2 border-t border-silk-800/80 text-[10px] text-slate-500">
+                <Shield className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-400" />
+                <span>{t.wifiFirewallTip}</span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* 2. API Keys Section */}
+            <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
               <Key className="w-4 h-4 text-violet-400" />
@@ -537,6 +889,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
           )}
         </div>
+
+      </>
+    )}
+
+        </>)}
+
+        {settingsTab === 'models' && (<>
+        {renderRouting()}
 
         {/* 3. Text & RP Model Selector */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
@@ -746,6 +1106,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             )}
           </div>
         </div>
+        </>)}
+
+        {settingsTab === 'style' && (<>
+        {/* User name used when no persona is selected */}
+        <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-2">
+          <label className="text-xs font-bold uppercase tracking-wider text-slate-400">{t.userNameTitle}</label>
+          <p className="text-[11px] text-slate-500 leading-snug">{t.userNameDesc}</p>
+          <input
+            type="text"
+            value={settings?.userName || ''}
+            placeholder={t.userNamePlaceholder}
+            onChange={(e) => db.settings.update('default', { userName: e.target.value })}
+            className="w-full px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-sm text-white"
+          />
+        </div>
 
         {/* 5. Text & RP Styles */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
@@ -891,6 +1266,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
+        </>)}
+
+        {settingsTab === 'look' && (<>
         {/* 7. Application Themes (Design & Interface) */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4">
           <div>
@@ -1168,6 +1546,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <ChatPreviewCard theme={currentTheme} />
           </div>
         </div>
+        </>)}
       </div>
 
       {/* Style Modal */}
@@ -1238,6 +1617,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* QR Code Camera Scanner Modal */}
+      <QrScannerModal
+        isOpen={showQrScanner}
+        onClose={() => setShowQrScanner(false)}
+        onScanSuccess={handleQrScanSuccess}
+        title={t.scanQrTitle}
+        hint={t.scanQrHint}
+      />
     </div>
   );
 };

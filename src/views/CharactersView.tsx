@@ -21,7 +21,7 @@ import type { Character, CharacterEmotion, Folder, Group, ImageCropOffset, Langu
 import { translations } from '../i18n';
 import { ImageCropperModal } from '../components/ImageCropperModal';
 import { AvatarImage } from '../components/AvatarImage';
-import { generatePersonaWithAI } from '../services/ai';
+import { generatePersonaWithAI, getEffectiveAiConfig, getComponentAiConfig } from '../services/ai';
 
 interface CharactersViewProps {
   language: Language;
@@ -42,6 +42,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
   const groups = useLiveQuery(() => db.groups.toArray()) || [];
   const activeApiKey = useLiveQuery(() => db.apiKeys.filter((k) => k.isActive).first());
   const settings = useLiveQuery(() => db.settings.get('default'));
+  const { apiKeyConfig: effectiveApiKey, textModel: effectiveModel, isLocal } = getEffectiveAiConfig(settings, activeApiKey);
 
   // Active folder filter: null = all, 'none' = no folder, or folderId
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
@@ -200,9 +201,14 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
   const handleDeleteCharacter = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (window.confirm(t.confirmDeleteCharacter)) {
+      const associatedChats = await db.chats.where('targetId').equals(id).toArray();
+      for (const chat of associatedChats) {
+        await db.messages.where('chatId').equals(chat.id).delete();
+        await db.memoryNodes.where('chatId').equals(chat.id).delete();
+        await db.memoryEdges.where('chatId').equals(chat.id).delete();
+        await db.chats.delete(chat.id);
+      }
       await db.characters.delete(id);
-      // clean associated chats
-      await db.chats.where('targetId').equals(id).delete();
     }
   };
 
@@ -339,8 +345,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
   };
 
   const handleRunAiGenerator = async () => {
-    if (!activeApiKey || !activeApiKey.key.trim()) {
-      alert(language === 'ru' ? 'Сначала настройте API ключ во вкладке Настройки.' : 'Please add and configure an API key in the Settings tab first.');
+    if (!effectiveApiKey || (!effectiveApiKey.key.trim() && !isLocal)) {
+      alert(language === 'ru' ? 'Сначала настройте подключение к ИИ во вкладке Настройки.' : 'Please configure AI connection in the Settings tab first.');
       return;
     }
     setIsGenerating(true);
@@ -359,9 +365,11 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
         }
       }
 
+      // A reference photo goes to the vision backend, the rest to the character generator backend
+      const genCfg = getComponentAiConfig(settings, activeApiKey, genPhotoRef ? 'vision' : 'characterGen');
       const generated = await generatePersonaWithAI(
-        activeApiKey,
-        settings?.textModel || 'deepseek/deepseek-chat',
+        genCfg.apiKeyConfig as any,
+        genCfg.textModel,
         genConcept,
         genDo,
         genDont,

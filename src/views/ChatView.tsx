@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { db, DEFAULT_THEME, getLocalizedTextStyle } from '../db';
 import type {
+  ApiKeyConfig,
   Character,
   ChatMessage,
   ChatSession,
@@ -32,8 +33,37 @@ import type {
   MessageVariant,
 } from '../types';
 import { translations } from '../i18n';
-import { streamChatCompletion, suggestUserReply, summarizeScene, compressChatHistory, cleanArtifacts } from '../services/ai';
-import { buildSystemPrompt } from '../services/promptBuilder';
+import {
+  streamChatCompletion,
+  suggestUserReply,
+  summarizeScene,
+  compressChatHistory,
+  fetchLocalContextInfo,
+  cleanArtifacts,
+  extractEmotionAndCleanResponse,
+  parseStreamingBotResponse,
+  stripEmotionTags,
+  enforceParagraphLimit,
+  getEffectiveAiConfig,
+  getComponentAiConfig,
+  speakerStopStrings,
+  resolveEmotion,
+  stripLeadingSpeakerName,
+} from '../services/ai';
+import {
+  buildSystemPrompt,
+  buildSceneNote,
+  buildTurnGuidanceBlock,
+  parseLengthOverride,
+} from '../services/promptBuilder';
+import {
+  estimateTokens,
+  PER_MESSAGE_TOKENS,
+  planWindow,
+  planSummaryBatch,
+  sceneNoteLines,
+  summaryLimits,
+} from '../services/contextBudget';
 import { extractMemoryAndAffinity } from '../services/memoryGraph';
 import { ChatSettingsModal } from './ChatSettingsModal';
 import { AvatarImage } from '../components/AvatarImage';
@@ -43,6 +73,22 @@ interface ChatViewProps {
   targetId: string;
   language: Language;
   onBack: () => void;
+}
+
+// Prompt budgets in tokens. Local models take their budget from the hub; cloud models use a fixed target.
+const CLOUD_PROMPT_TARGET = 6000;
+const CLOUD_MAX_VERBATIM = 8;
+const LOCAL_FALLBACK_PROMPT_TARGET = 3072;
+const LOCAL_MAX_VERBATIM = 40;
+const SYNOPSIS_ALLOWANCE = 200;
+const SCENE_NOTE_ALLOWANCE = 220;
+
+// Strips hidden thoughts and emotion tags so past turns do not inflate the prompt or trigger ballooning replies
+function cleanHistoryText(text: string): string {
+  const withoutThoughts = (text || '')
+    .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+    .replace(/<thought>[\s\S]*$/gi, '');
+  return stripEmotionTags(withoutThoughts, undefined, { stripLeadingUnknownAngleTag: true }).trim();
 }
 
 export const ChatView: React.FC<ChatViewProps> = ({
@@ -65,9 +111,48 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const allCharacters = useLiveQuery(() => db.characters.toArray()) || [];
   const settings = useLiveQuery(() => db.settings.get('default'));
   const activeApiKey = useLiveQuery(() => db.apiKeys.filter((k) => k.isActive).first());
+  const { apiKeyConfig: effectiveApiKey, textModel: effectiveModel, isLocal } = getEffectiveAiConfig(settings, activeApiKey);
 
   // Active Session state
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+
+  // Sessions whose greeting was already being inserted, so a re-render cannot add it twice
+  const greetingSeedingRef = useRef<Set<string>>(new Set());
+
+  // Adds the character's opening line when the chat has no messages yet.
+  // Runs also for chats created before the character data finished loading, which used to leave them empty.
+  const seedGreetingIfEmpty = async (chatId: string) => {
+    if (type !== 'character' || !character || !character.greeting || !character.greetingEnabled) return;
+    if (greetingSeedingRef.current.has(chatId)) return;
+    greetingSeedingRef.current.add(chatId);
+    try {
+      const count = await db.messages.where('chatId').equals(chatId).count();
+      if (count > 0) return;
+      const parsedGreeting = extractEmotionAndCleanResponse(character.greeting, character.emotions, character.name);
+      const greetingMsg: ChatMessage = {
+        id: 'msg-' + Math.random().toString(36).substring(2, 10),
+        chatId,
+        senderId: character.id,
+        senderName: character.name,
+        senderAvatar: character.avatar,
+        emotion: parsedGreeting.emotion,
+        variants: [
+          {
+            text: parsedGreeting.text || character.greeting,
+            emotion: parsedGreeting.emotion,
+            thought: parsedGreeting.thought,
+            timestamp: Date.now(),
+          },
+        ],
+        activeVariantIndex: 0,
+        createdAt: Date.now(),
+      };
+      await db.messages.put(greetingMsg);
+      await db.chats.update(chatId, { updatedAt: Date.now() });
+    } finally {
+      greetingSeedingRef.current.delete(chatId);
+    }
+  };
 
   // Initialize or fetch active session
   useEffect(() => {
@@ -80,6 +165,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       if (existing) {
         setCurrentSessionId(existing.id);
+        await seedGreetingIfEmpty(existing.id);
       } else {
         const title = type === 'character'
           ? (character?.name || (language === 'ru' ? 'Чат' : 'Chat'))
@@ -97,26 +183,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         };
         await db.chats.put(newSession);
         setCurrentSessionId(newSession.id);
-
-        // Seed initial greeting if character has greeting enabled
-        if (type === 'character' && character && character.greeting && character.greetingEnabled) {
-          const greetingMsg: ChatMessage = {
-            id: 'msg-' + Math.random().toString(36).substring(2, 10),
-            chatId: newSession.id,
-            senderId: character.id,
-            senderName: character.name,
-            senderAvatar: character.avatar,
-            variants: [
-              {
-                text: character.greeting,
-                timestamp: Date.now(),
-              },
-            ],
-            activeVariantIndex: 0,
-            createdAt: Date.now(),
-          };
-          await db.messages.put(greetingMsg);
-        }
+        await seedGreetingIfEmpty(newSession.id);
       }
     }
 
@@ -156,6 +223,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [streamingThought, setStreamingThought] = useState<string>('');
   const [streamingEmotion, setStreamingEmotion] = useState<string | null>(null);
   const [streamingSender, setStreamingSender] = useState<Character | null>(null);
+  const compressionRunningRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -165,6 +233,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [showUserWandModal, setShowUserWandModal] = useState(false);
   const [userWandPrompt, setUserWandPrompt] = useState('');
   const [isWandGenerating, setIsWandGenerating] = useState(false);
+  const [wandPreview, setWandPreview] = useState('');
+  const wandAbortRef = useRef<AbortController | null>(null);
 
   // Guided Regen modal
   const [guidedRegenTargetMsgId, setGuidedRegenTargetMsgId] = useState<string | null>(null);
@@ -320,101 +390,30 @@ export const ChatView: React.FC<ChatViewProps> = ({
     adjustTextareaHeight();
   };
 
-  const getSpeakerAvatar = (
-    senderId: string,
-    emotion?: string,
-    fallbackAvatar?: string
-  ): string => {
-    const char = allCharacters.find((c) => c.id === senderId) || (type === 'character' ? character : undefined);
-    if (!char) return fallbackAvatar || '';
-    if (emotion && char.emotions && char.emotions.length > 0) {
-      const emLower = emotion.trim().toLowerCase();
-      // 1. Direct match on name or label
-      const direct = char.emotions.find(
-        (e) => e.name.toLowerCase() === emLower || e.label?.toLowerCase() === emLower
-      );
-      if (direct?.avatar) return direct.avatar;
-
-      // 2. Fuzzy synonym match (Russian & English)
-      const synonymGroups: Record<string, string[]> = {
-        happy: ['happy', 'joy', 'smile', 'радость', 'улыбка', 'веселье', 'счастье'],
-        sad: ['sad', 'sorrow', 'crying', 'грусть', 'печаль', 'слезы', 'тоска'],
-        angry: ['angry', 'furious', 'rage', 'гнев', 'злость', 'ярость', 'раздражение'],
-        blushing: ['blushing', 'shy', 'embarrassed', 'смущение', 'стыд', 'румянец'],
-        smirk: ['smirk', 'tease', 'playful', 'усмешка', 'сарказм', 'ухмылка'],
-        surprised: ['surprised', 'shocked', 'удивление', 'шок', 'испуг'],
-        thoughtful: ['thoughtful', 'pensive', 'задумчивость', 'размышление'],
-        neutral: ['neutral', 'calm', 'нейтральный', 'спокойствие'],
-      };
-
-      for (const [, words] of Object.entries(synonymGroups)) {
-        if (words.some((w) => emLower.includes(w))) {
-          const match = char.emotions.find((e) => {
-            const eName = (e.name + ' ' + (e.label || '')).toLowerCase();
-            return words.some((w) => eName.includes(w));
-          });
-          if (match?.avatar) return match.avatar;
-        }
-      }
-    }
-    return char.avatar || fallbackAvatar || '';
-  };
-
-  // Dedicated helper to retrieve emotion sprite illustrations
+  // Emotion sprite shown under the message text. The avatar itself never changes.
   const getEmotionSprite = (
     senderId: string,
     emotion?: string
   ): { avatar: string; name: string } | null => {
     const char = allCharacters.find((c) => c.id === senderId) || (type === 'character' ? character : undefined);
     if (!char || !char.emotions || char.emotions.length === 0) return null;
-
-    if (emotion && emotion.trim()) {
-      const emLower = emotion.trim().toLowerCase();
-      // 1. Direct match on name or label
-      const direct = char.emotions.find(
-        (e) => e.name.toLowerCase() === emLower || e.label?.toLowerCase() === emLower
-      );
-      if (direct?.avatar) return { avatar: direct.avatar, name: direct.label || direct.name };
-
-      // 2. Fuzzy synonym match (Russian & English)
-      const synonymGroups: Record<string, string[]> = {
-        happy: ['happy', 'joy', 'smile', 'радость', 'улыбка', 'веселье', 'счастье'],
-        sad: ['sad', 'sorrow', 'crying', 'грусть', 'печаль', 'слезы', 'тоска'],
-        angry: ['angry', 'furious', 'rage', 'гнев', 'злость', 'ярость', 'раздражение'],
-        blushing: ['blushing', 'shy', 'embarrassed', 'смущение', 'стыд', 'румянец'],
-        smirk: ['smirk', 'tease', 'playful', 'усмешка', 'сарказм', 'ухмылка'],
-        surprised: ['surprised', 'shocked', 'удивление', 'шок', 'испуг'],
-        thoughtful: ['thoughtful', 'pensive', 'задумчивость', 'размышление'],
-        neutral: ['neutral', 'calm', 'нейтральный', 'спокойствие'],
-      };
-
-      for (const [, words] of Object.entries(synonymGroups)) {
-        if (words.some((w) => emLower.includes(w))) {
-          const match = char.emotions.find((e) => {
-            const eName = (e.name + ' ' + (e.label || '')).toLowerCase();
-            return words.some((w) => eName.includes(w));
-          });
-          if (match?.avatar) return { avatar: match.avatar, name: match.label || match.name };
-        }
-      }
-    }
-
-    // 3. Fallback: if character has neutral sprite with avatar or first sprite with avatar
-    const fallback = char.emotions.find((e) => e.name === 'neutral' && e.avatar) || char.emotions.find((e) => e.avatar);
-    if (fallback?.avatar) {
-      return { avatar: fallback.avatar, name: fallback.label || fallback.name };
-    }
-
-    return null;
+    const name = resolveEmotion(emotion || '', char.emotions, char.name);
+    if (!name) return null;
+    const sprite = char.emotions.find((e) => e.name.toLowerCase() === name && e.avatar);
+    return sprite?.avatar ? { avatar: sprite.avatar, name: sprite.label || sprite.name } : null;
   };
 
   // Build current dialogue context string for AI
-  const buildContextHistory = (msgList: ChatMessage[]): string => {
+  const buildContextHistory = (msgList: ChatMessage[], userLabelOverride?: string): string => {
     return msgList
-      .slice(-12)
+      .slice(-8)
       .map((m) => {
         const v = m.variants[m.activeVariantIndex];
-        return `${m.senderName}: ${v ? v.text : ''}`;
+        const cleaned = cleanHistoryText(v ? v.text : '');
+        const label = m.senderId === 'user' && userLabelOverride
+          ? userLabelOverride
+          : m.senderName;
+        return `${label}: ${cleaned}`;
       })
       .join('\n');
   };
@@ -426,8 +425,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
     existingBotMsgToVariant?: ChatMessage
   ) => {
     if (!session) return;
-    if (!activeApiKey || !activeApiKey.key.trim()) {
-      alert(language === 'ru' ? 'Пожалуйста, настройте активный API ключ в Настройках.' : 'Please configure an active API key in Settings.');
+    if (!effectiveApiKey || (!effectiveApiKey.key.trim() && !isLocal)) {
+      alert(language === 'ru' ? 'Пожалуйста, настройте подключение к ИИ в Настройках.' : 'Please configure AI connection in Settings.');
       return;
     }
 
@@ -467,17 +466,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
     abortControllerRef.current = abortController;
 
     try {
+      // Load freshest chat session & settings so recently updated directives/persona take effect immediately
+      const freshChat = await db.chats.get(session.id);
+      const activeChat = freshChat || session;
+
       // Retrieve user persona
-      const userPersona = session.personaId
-        ? allCharacters.find((c) => c.id === session.personaId) || null
+      const userPersona = activeChat.personaId
+        ? allCharacters.find((c) => c.id === activeChat.personaId) || null
         : null;
 
       // Retrieve affinity score
-      const affinity = session.relationships?.[speaker.id] || 0;
+      const affinity = activeChat.relationships?.[speaker.id] || 0;
 
       // Query fresh settings & text style from database
       const freshSettings = await db.settings.get('default');
-      const styleId = session.textStyleId || freshSettings?.textStyleId || 'literary';
+      const styleId = activeChat.textStyleId || freshSettings?.textStyleId || 'literary';
       const rawStyle = (await db.textStyles.get(styleId)) || activeStyle;
 
       // Context sliding window with context compression
@@ -490,57 +493,103 @@ export const ChatView: React.FC<ChatViewProps> = ({
         }
       }
 
-      // Determine dialogue language based on user's recent input to match narrative style language
+      // Determine dialogue language based on user's recent input (falling back to recent messages / character lore)
       const lastUserMsgInContext = [...msgsForContext].reverse().find((m) => m.senderId === 'user');
       const lastUserText = lastUserMsgInContext?.variants[lastUserMsgInContext.activeVariantIndex]?.text || '';
-      const dialogueLang: 'en' | 'ru' = /[а-яА-ЯёЁ]/.test(lastUserText) ? 'ru' : (/[a-zA-Z]/.test(lastUserText) ? 'en' : language);
+      const langProbe =
+        lastUserText ||
+        msgsForContext.slice(-3).map((m) => m.variants[m.activeVariantIndex]?.text || '').join(' ') ||
+        speaker.description ||
+        '';
+      const dialogueLang: 'en' | 'ru' = /[а-яА-ЯёЁ]/.test(langProbe) ? 'ru' : (/[a-zA-Z]/.test(langProbe) ? 'en' : language);
       const textStyleToUse = rawStyle ? getLocalizedTextStyle(rawStyle, dialogueLang) : undefined;
 
-      // Keep recent 12 dialogue turns verbatim; compress older dialogue turns into concise rolling summary
-      const RECENT_DIALOGUE_TURNS = 12;
-      let olderMsgs: ChatMessage[] = [];
-      let contextMsgs = msgsForContext;
+      // Context = stable system prompt + rolling summary + verbatim window (grows by appending) + scene note.
+      const storedSummary = activeChat.rollingSummary?.trim() || '';
+      const lastSummarizedId = activeChat.lastSummarizedMsgId;
 
-      if (msgsForContext.length > RECENT_DIALOGUE_TURNS) {
-        olderMsgs = msgsForContext.slice(0, -RECENT_DIALOGUE_TURNS);
-        contextMsgs = msgsForContext.slice(-RECENT_DIALOGUE_TURNS);
+      let promptTarget = CLOUD_PROMPT_TARGET;
+      let maxVerbatim = CLOUD_MAX_VERBATIM;
+      if (isLocal && effectiveApiKey?.baseUrl) {
+        const localInfo = await fetchLocalContextInfo(effectiveApiKey.baseUrl);
+        promptTarget = localInfo
+          ? localInfo.recommendedPromptTokens || Math.max(1024, localInfo.nCtx - 1280)
+          : LOCAL_FALLBACK_PROMPT_TARGET;
+        maxVerbatim = LOCAL_MAX_VERBATIM;
       }
 
-      // Prepare context compression summary for older messages (read fresh from DB)
-      const freshChat = await db.chats.get(session.id);
-      let contextSummary = freshChat?.rollingSummary?.trim() || session.rollingSummary?.trim() || '';
-      if (!contextSummary && olderMsgs.length > 0) {
-        const synopsis = olderMsgs
-          .slice(-8)
-          .map((m) => {
-            const v = m.variants[m.activeVariantIndex]?.text?.trim() || '';
-            return `${m.senderName}: ${v.length > 100 ? v.slice(0, 100) + '...' : v}`;
-          })
-          .join('\n');
-        contextSummary = (dialogueLang === 'ru' ? 'Предыдущие события диалога:\n' : 'Earlier dialogue events:\n') + synopsis;
+      const historyTokens = msgsForContext.map((m) => {
+        const text = cleanHistoryText(m.variants[m.activeVariantIndex]?.text || '');
+        return text ? estimateTokens(text) + PER_MESSAGE_TOKENS : 0;
+      });
+      let summarizedCount = 0;
+      if (lastSummarizedId) {
+        const idx = msgsForContext.findIndex((m) => m.id === lastSummarizedId);
+        summarizedCount = idx !== -1 ? idx + 1 : 0;
       }
 
-      // Build system prompt
+      const resolvedUserName = (userPersona?.name || freshSettings?.userName || '').trim();
       const groupMembers = type === 'group' ? allCharacters.filter((c) => group?.characterIds.includes(c.id)) : [];
-      let systemPrompt = buildSystemPrompt({
+      const turnHasLengthOverride = Boolean(guidancePrompt && parseLengthOverride(guidancePrompt));
+
+      const makeSystemPrompt = (summaryText: string) => buildSystemPrompt({
         character: speaker,
         group: group || undefined,
         groupCharacters: groupMembers,
         userPersona,
+        userName: resolvedUserName || undefined,
         textStyle: textStyleToUse,
-        chatDirectives: session.chatDirectives,
-        thoughtsEnabled: session.thoughtsEnabled === true,
+        chatDirectives: activeChat.chatDirectives,
+        turnGuidance: turnHasLengthOverride ? guidancePrompt : undefined,
+        thoughtsEnabled: activeChat.thoughtsEnabled === true,
         memoryNodes,
         relationshipScore: affinity,
         speakerCharacter: speaker,
         customSystemPrompt: freshSettings?.customSystemPrompt,
         customSystemPromptMode: freshSettings?.customSystemPromptMode,
-        contextSummary: contextSummary || undefined,
+        contextSummary: summaryText || undefined,
+        language: dialogueLang,
+        dynamicTail: true,
       });
 
-      if (guidancePrompt && guidancePrompt.trim()) {
-        systemPrompt += `\n### USER GUIDED GENERATION INSTRUCTION FOR THIS TURN:\n${guidancePrompt.trim()}\n`;
+      let systemPrompt = makeSystemPrompt(storedSummary);
+      const dialogueBudget = Math.max(600, promptTarget - estimateTokens(systemPrompt) - SYNOPSIS_ALLOWANCE - SCENE_NOTE_ALLOWANCE);
+      const windowPlan = planWindow(historyTokens, summarizedCount, dialogueBudget, maxVerbatim);
+      const contextMsgs = msgsForContext.slice(windowPlan.windowFrom);
+
+      // Only when the window had to skip messages before the next summary batch: a short synopsis covers them
+      const skippedMsgs = msgsForContext
+        .slice(summarizedCount, windowPlan.windowFrom)
+        .filter((m) => m.variants[m.activeVariantIndex]?.text?.trim());
+      let contextSummary = storedSummary;
+      if (skippedMsgs.length > 0) {
+        const synopsis = skippedMsgs
+          .slice(-8)
+          .map((m) => {
+            const cleaned = cleanHistoryText(m.variants[m.activeVariantIndex]?.text || '');
+            const displaySender = m.senderId === 'user' && resolvedUserName ? resolvedUserName : m.senderName;
+            return `${displaySender}: ${cleaned.length > 80 ? cleaned.slice(0, 80) + '...' : cleaned}`;
+          })
+          .join('\n');
+        const header = dialogueLang === 'ru' ? 'Недавние события диалога:\n' : 'Recent dialogue events:\n';
+        contextSummary = (storedSummary ? storedSummary + '\n\n' : '') + header + synopsis;
+        systemPrompt = makeSystemPrompt(contextSummary);
       }
+
+      const sceneNote = sceneNoteLines([
+        buildSceneNote({
+          speakerName: speaker.name,
+          userName: resolvedUserName || (dialogueLang === 'ru' ? 'собеседник' : 'the other person'),
+          language: dialogueLang,
+          relationshipScore: affinity,
+          memoryNodes,
+          emotionNames: speaker.emotions?.map((e) => e.name),
+        }),
+      ]);
+      const turnGuidanceBlock = guidancePrompt?.trim()
+        ? buildTurnGuidanceBlock(guidancePrompt, dialogueLang)
+        : '';
+      const effectiveLengthRule = parseLengthOverride(guidancePrompt) || parseLengthOverride(activeChat.chatDirectives);
 
       // Build message array for API
       const apiMessages: any[] = [{ role: 'system', content: systemPrompt }];
@@ -554,12 +603,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
         const isMe = type === 'group' ? msg.senderId === speaker.id : msg.senderId !== 'user';
         const role: 'user' | 'assistant' = isMe ? 'assistant' : 'user';
 
-        let textContent = activeVariant.text.trim();
+        // Strip any hidden <thought> tags and leaked emotion tags from history so past turns do not inflate prompt tokens or trigger ballooning responses
+        let textContent = cleanHistoryText(activeVariant.text);
         if (type === 'group' && !isMe) {
-          textContent = `[${msg.senderName}]: ${textContent}`;
-        }
-        if (isMe && activeVariant.thought && session.thoughtsEnabled) {
-          textContent = `<thought>${activeVariant.thought}</thought>\n${textContent}`;
+          const displaySender = msg.senderId === 'user' && resolvedUserName ? resolvedUserName : msg.senderName;
+          textContent = `[${displaySender}]: ${textContent}`;
         }
 
         rawTurns.push({
@@ -612,53 +660,87 @@ export const ChatView: React.FC<ChatViewProps> = ({
         alternatingTurns.unshift({
           role: 'user',
           content: type === 'group'
-            ? (language === 'ru' ? '[Сцена начинается]' : '[Scene begins]')
-            : (language === 'ru' ? 'Привет.' : 'Hello.'),
+            ? (dialogueLang === 'ru' ? '[Сцена начинается]' : '[Scene begins]')
+            : (dialogueLang === 'ru' ? 'Привет.' : 'Hello.'),
         });
       }
 
       if (alternatingTurns.length === 0) {
         alternatingTurns.push({
           role: 'user',
-          content: language === 'ru' ? '[Сцена начинается. Начни разговор.]' : '[Scene begins. Start conversation.]',
+          content: dialogueLang === 'ru' ? '[Сцена начинается. Начни разговор.]' : '[Scene begins. Start conversation.]',
+        });
+      }
+
+      // Ensure conversation ends with a user turn (e.g. /continue or chained group turn) so volatile tail stays on user turn
+      if (alternatingTurns[alternatingTurns.length - 1]?.role === 'assistant' && (sceneNote || turnGuidanceBlock)) {
+        alternatingTurns.push({
+          role: 'user',
+          content: dialogueLang === 'ru' ? `[Ход ${speaker.name}. Продолжай.]` : `[${speaker.name}'s turn. Continue.]`,
         });
       }
 
       apiMessages.push(...alternatingTurns);
 
+      // Volatile tail (scene note + turn guidance) attaches cleanly to the end of the last user message
+      const tailBlocks: string[] = [];
+      if (sceneNote) {
+        const noteTitle = dialogueLang === 'ru' ? 'Заметка сцены (не цитируй и не упоминай)' : 'Scene note (do not quote or mention)';
+        tailBlocks.push(`[${noteTitle}:\n${sceneNote}]`);
+      }
+      if (turnGuidanceBlock) {
+        tailBlocks.push(turnGuidanceBlock);
+      }
+
+      if (tailBlocks.length > 0) {
+        const tailText = tailBlocks.join('\n\n');
+        const last = apiMessages[apiMessages.length - 1];
+        if (last && last.role === 'user' && typeof last.content === 'string') {
+          last.content = `${last.content}\n\n${tailText}`;
+        } else if (last && last.role === 'user' && Array.isArray(last.content)) {
+          last.content.push({ type: 'text', text: tailText });
+        } else {
+          apiMessages[0] = { role: 'system', content: `${systemPrompt}\n\n${tailText}` };
+        }
+      }
+
       let fullGenerated = '';
 
+      // Photos in the context go to the vision backend; plain text stays on the chat backend
+      const hasImages = apiMessages.some((m: any) => Array.isArray(m.content) && m.content.some((p: any) => p.type === 'image_url'));
+      const turnConfig = hasImages ? getComponentAiConfig(settings, activeApiKey, 'vision') : null;
+
+      // Only the speaker's own name is stripped from the start; the stop list must not contain it,
+      // otherwise a reply that begins with "Name:" is cut to nothing.
+      const otherSpeakers = [
+        resolvedUserName,
+        ...allCharacters
+          .filter((c) => c.id !== speaker.id && c.id !== userPersona?.id && group?.characterIds.includes(c.id))
+          .map((c) => c.name),
+      ].filter(Boolean);
+
       await streamChatCompletion({
-        apiKeyConfig: activeApiKey,
-        model: settings?.textModel || 'deepseek/deepseek-chat',
+        apiKeyConfig: (turnConfig ? turnConfig.apiKeyConfig : effectiveApiKey) as ApiKeyConfig,
+        model: turnConfig ? turnConfig.textModel : effectiveModel,
+        // Also stop if the model starts quoting the hidden scene note or turn guidance header
+        extraStops: [...speakerStopStrings(otherSpeakers), '[Scene note', '[Заметка сцены', '[УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ', '[USER TURN DIRECTIVE'],
         messages: apiMessages,
+        temperature: isLocal ? 0.7 : 0.85,
+        maxTokens: 1024,
         signal: abortController.signal,
         onToken: (tok) => {
           fullGenerated += tok;
-          let currentThought = '';
-          let display = fullGenerated;
-
-          const thoughtMatch = display.match(/<thought>([\s\S]*?)<\/thought>/);
-          if (thoughtMatch) {
-            currentThought = thoughtMatch[1].trim();
-            display = display.replace(/<thought>[\s\S]*?<\/thought>/, '').trimStart();
-          } else if (display.startsWith('<thought>')) {
-            currentThought = display.replace('<thought>', '');
-            display = '';
+          const parsed = parseStreamingBotResponse(fullGenerated, speaker.emotions, speaker.name, [speaker.name]);
+          if (parsed.emotion) {
+            setStreamingEmotion(parsed.emotion);
           }
-
-          const emotionMatch = display.match(/<emotion>([^<]+)<\/emotion>/i);
-          if (emotionMatch) {
-            setStreamingEmotion(emotionMatch[1].trim().toLowerCase());
-            display = display.replace(/<emotion>[\s\S]*?<\/emotion>/gi, '').trimStart();
-          }
-
-          setStreamingThought(currentThought);
-          setStreamingText(cleanArtifacts(display));
+          setStreamingThought(parsed.thought || '');
+          setStreamingText(parsed.text);
         },
-        onComplete: async (completed) => {
+        onComplete: async (rawCompleted) => {
           setIsGenerating(false);
           abortControllerRef.current = null;
+          const completed = stripLeadingSpeakerName(rawCompleted, [speaker.name]);
 
           try {
             if (!completed || !completed.trim()) {
@@ -666,58 +748,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
               return;
             }
 
-            let finalThought = '';
-            let finalText = completed;
-            let finalEmotion: string | undefined = undefined;
-
-            const match = completed.match(/<thought>([\s\S]*?)<\/thought>/);
-            if (match) {
-              finalThought = match[1].trim();
-              finalText = completed.replace(/<thought>[\s\S]*?<\/thought>/, '').trim();
-            }
-
-            // 1. Match <emotion>...</emotion>
-            const emTagMatch = finalText.match(/<emotion>([\s\S]*?)<\/emotion>/i);
-            if (emTagMatch) {
-              finalEmotion = emTagMatch[1].trim().toLowerCase();
-              finalText = finalText.replace(/<emotion>[\s\S]*?<\/emotion>/gi, '').trim();
-            }
-
-            // 2. Match [emotion: ...] or [эмоция: ...]
-            if (!finalEmotion) {
-              const emBracketMatch = finalText.match(/\[(?:эмоция|emotion):\s*([^\]]+)\]/i);
-              if (emBracketMatch) {
-                finalEmotion = emBracketMatch[1].trim().toLowerCase();
-                finalText = finalText.replace(/\[(?:эмоция|emotion):\s*[^\]]+\]/gi, '').trim();
-              }
-            }
-
-            // 3. Match standalone emotion brackets
-            if (!finalEmotion) {
-              const emWordMatch = finalText.match(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/i);
-              if (emWordMatch) {
-                finalEmotion = emWordMatch[1].trim().toLowerCase();
-                finalText = finalText.replace(/\[(neutral|happy|angry|sad|blushing|smirk|surprised|thoughtful|радость|счастье|улыбка|веселье|грусть|печаль|тоска|слезы|злость|гнев|ярость|раздражение|смущение|румянец|стыд|неловкость|усмешка|сарказм|ухмылка|удивление|шок|испуг|задумчивость|размышление|нейтральный|спокойствие)\]/gi, '').trim();
-              }
-            }
-
-            // 4. Fallback from actions if character has emotions configured
-            if (!finalEmotion && speaker.emotions && speaker.emotions.length > 0) {
-              const lower = finalText.toLowerCase();
-              if (/\*(?:.*)(?:улыб|сме|радост|счаст|smile|laugh|happy)(?:.*)\*/.test(lower)) finalEmotion = 'happy';
-              else if (/\*(?:.*)(?:плач|слез|груст|печал|вздох|sad|cry)(?:.*)\*/.test(lower)) finalEmotion = 'sad';
-              else if (/\*(?:.*)(?:гнев|злос|ярост|хмур|рыч|angry|rage)(?:.*)\*/.test(lower)) finalEmotion = 'angry';
-              else if (/\*(?:.*)(?:смущ|красне|румян|shy|blush)(?:.*)\*/.test(lower)) finalEmotion = 'blushing';
-              else if (/\*(?:.*)(?:ухмыл|усмеш|сарказм|smirk)(?:.*)\*/.test(lower)) finalEmotion = 'smirk';
-              else if (/\*(?:.*)(?:вздраг|удивл|шок|surpris|shock)(?:.*)\*/.test(lower)) finalEmotion = 'surprised';
-              else if (/\*(?:.*)(?:задум|размышл|pensive|thought)(?:.*)\*/.test(lower)) finalEmotion = 'thoughtful';
-              else finalEmotion = 'neutral';
-            }
-
-            finalText = cleanArtifacts(finalText);
+            const { text: finalText, thought: finalThought, emotion: finalEmotion } =
+              extractEmotionAndCleanResponse(completed, speaker.emotions, speaker.name);
+            const boundedText = enforceParagraphLimit(
+              finalText || cleanArtifacts(completed, speaker.emotions),
+              effectiveLengthRule?.maxParagraphs,
+              effectiveLengthRule?.mode === 'shorter'
+            );
 
             const newVariant: MessageVariant = {
-              text: finalText || cleanArtifacts(completed),
+              text: boundedText,
               thought: finalThought || undefined,
               emotion: finalEmotion,
               timestamp: Date.now(),
@@ -756,6 +796,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
               ? existingBotMsgToVariant.id
               : updatedMsgList[updatedMsgList.length - 1]?.id;
 
+            const memoryConfig = getComponentAiConfig(settings, activeApiKey, 'memory');
+            const summaryConfig = getComponentAiConfig(settings, activeApiKey, 'summary');
+
             // Run automated memory graph extraction and affinity change in background with fresh DB messages
             const freshHistory = await db.messages.where('chatId').equals(session.id).sortBy('createdAt');
             extractMemoryAndAffinity(
@@ -763,8 +806,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
               speaker.id,
               affinity,
               freshHistory,
-              activeApiKey,
-              settings?.textModel,
+              memoryConfig.apiKeyConfig,
+              memoryConfig.textModel,
               targetTurnMsgId
             ).then(async ({ newAffinity }) => {
               if (newAffinity !== affinity) {
@@ -778,44 +821,60 @@ export const ChatView: React.FC<ChatViewProps> = ({
               console.warn('Background memory extraction error:', err);
             });
 
-            // Run automated context compression in background if conversation exceeds recent window
-            if (freshHistory.length > RECENT_DIALOGUE_TURNS && activeApiKey?.key) {
-              const older = freshHistory.slice(0, -RECENT_DIALOGUE_TURNS);
-              const lastOlder = older[older.length - 1];
+            // Fold older turns into the rolling summary in batches so that no turn is left uncovered
+            if ((effectiveApiKey?.key || isLocal) && !compressionRunningRef.current) {
               const latestChat = await db.chats.get(session.id);
-              if (lastOlder && latestChat?.lastSummarizedMsgId !== lastOlder.id) {
-                let newTurnsToSummarize = older;
-                let prevSummaryToPass = latestChat?.rollingSummary;
-                if (latestChat?.lastSummarizedMsgId) {
-                  const lastIdx = older.findIndex((m) => m.id === latestChat.lastSummarizedMsgId);
-                  if (lastIdx !== -1) {
-                    newTurnsToSummarize = older.slice(lastIdx + 1);
-                  } else {
-                    prevSummaryToPass = undefined;
-                  }
+              const histTokens = freshHistory.map((m) => {
+                const text = cleanHistoryText(m.variants[m.activeVariantIndex]?.text || '');
+                return text ? estimateTokens(text) + PER_MESSAGE_TOKENS : 0;
+              });
+              let covered = 0;
+              let prevSummary = latestChat?.rollingSummary;
+              if (latestChat?.lastSummarizedMsgId) {
+                const idx = freshHistory.findIndex((m) => m.id === latestChat.lastSummarizedMsgId);
+                if (idx !== -1) {
+                  covered = idx + 1;
+                } else {
+                  prevSummary = undefined;
                 }
+              }
 
-                if (newTurnsToSummarize.length > 0) {
-                  const toSummarize = newTurnsToSummarize.map((m) => ({
-                    senderName: m.senderName,
-                    text: m.variants[m.activeVariantIndex]?.text || '',
-                  }));
-                  compressChatHistory(
-                    activeApiKey,
-                    settings?.textModel || 'deepseek/deepseek-chat',
-                    toSummarize,
-                    prevSummaryToPass
-                  ).then(async (summary) => {
-                    if (summary && summary.trim()) {
-                      await db.chats.update(session.id, {
-                        rollingSummary: summary.trim(),
-                        lastSummarizedMsgId: lastOlder.id,
-                      });
-                    }
-                  }).catch((err) => {
-                    console.warn('Background compression error:', err);
-                  });
+              const end = planSummaryBatch(histTokens, covered, dialogueBudget, maxVerbatim);
+              if (end !== null) {
+                // Keep the summarization request itself inside the model context
+                const inputBudget = Math.round(promptTarget * 0.6);
+                let stop = covered;
+                let used = 0;
+                while (stop < end && (stop === covered || used + histTokens[stop] <= inputBudget)) {
+                  used += histTokens[stop];
+                  stop++;
                 }
+                const batch = freshHistory.slice(covered, stop);
+                const lastCovered = batch[batch.length - 1];
+                const toSummarize = batch.map((m) => ({
+                  senderName: m.senderName,
+                  text: cleanHistoryText(m.variants[m.activeVariantIndex]?.text || ''),
+                }));
+                const limits = summaryLimits(promptTarget);
+                compressionRunningRef.current = true;
+                compressChatHistory(
+                  summaryConfig.apiKeyConfig as any,
+                  summaryConfig.textModel,
+                  toSummarize,
+                  prevSummary,
+                  isLocal ? { maxChars: limits.maxChars, maxTokens: limits.maxTokens, timeoutMs: 120000 } : undefined
+                ).then(async (summary) => {
+                  if (summary && summary.trim()) {
+                    await db.chats.update(session.id, {
+                      rollingSummary: summary.trim(),
+                      lastSummarizedMsgId: lastCovered.id,
+                    });
+                  }
+                }).catch((err) => {
+                  console.warn('Background compression error:', err);
+                }).finally(() => {
+                  compressionRunningRef.current = false;
+                });
               }
             }
           } catch (err: any) {
@@ -862,7 +921,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       id: 'msg-' + Math.random().toString(36).substring(2, 10),
       chatId: session.id,
       senderId: 'user',
-      senderName: userPersona ? userPersona.name : (language === 'ru' ? 'Вы' : 'You'),
+      senderName: userPersona ? userPersona.name : (settings?.userName?.trim() || (language === 'ru' ? 'Вы' : 'You')),
       senderAvatar: userPersona ? userPersona.avatar : undefined,
       variants: [
         {
@@ -1006,48 +1065,78 @@ export const ChatView: React.FC<ChatViewProps> = ({
     await runBotGeneration(speaker, guidance, msg);
   };
 
-  // User Magic Wand Ghostwriter
+  // User Magic Wand Ghostwriter: streams the suggestion, can be stopped, keeps the partial text
   const handleExecuteUserWand = async () => {
-    if (!activeApiKey) {
-      alert(language === 'ru' ? 'Сначала укажите API-ключ в настройках' : 'Please configure an API key in settings first');
+    const ghostCfg = getComponentAiConfig(settings, activeApiKey, 'ghostwriter');
+    const ghostKey = ghostCfg.apiKeyConfig;
+    if (!ghostKey || (!ghostKey.key?.trim() && !ghostCfg.isLocal)) {
+      alert(language === 'ru' ? 'Сначала настройте подключение к ИИ в настройках' : 'Please configure AI connection in settings first');
       return;
     }
+    const controller = new AbortController();
+    wandAbortRef.current = controller;
+    setWandPreview('');
     setIsWandGenerating(true);
     try {
-      const history = buildContextHistory(messages);
       const userPersona = session?.personaId
         ? allCharacters.find((c) => c.id === session.personaId) || null
         : null;
+      const wandUserName = (userPersona?.name || settings?.userName || '').trim() || undefined;
+      const history = buildContextHistory(messages, wandUserName);
+      const otherSpeakers = type === 'group'
+        ? allCharacters
+            .filter((c) => group?.characterIds.includes(c.id) && c.id !== userPersona?.id)
+            .map((c) => c.name)
+        : (character ? [character.name] : []);
+      const langProbe = history || userWandPrompt || character?.description || '';
+      const wandLang: 'en' | 'ru' = /[а-яА-ЯёЁ]/.test(langProbe) ? 'ru' : (/[a-zA-Z]/.test(langProbe) ? 'en' : language);
 
       const suggested = await suggestUserReply(
-        activeApiKey,
-        settings?.textModel || 'deepseek/deepseek-chat',
+        ghostKey as any,
+        ghostCfg.textModel,
         userPersona,
         userWandPrompt,
-        history
+        history,
+        {
+          userName: wandUserName,
+          otherSpeakers,
+          language: wandLang,
+          onPartial: (text) => setWandPreview(text),
+          signal: controller.signal,
+        }
       );
-
-      if (!suggested || !suggested.trim()) {
+      setWandPreview(suggested.trim());
+      if (!suggested.trim() && !controller.signal.aborted) {
         alert(language === 'ru' ? 'Модель вернула пустой ответ. Попробуйте еще раз.' : 'Model returned empty suggestion. Please try again.');
-        return;
-      }
-
-      setInputText(suggested.trim());
-      setShowUserWandModal(false);
-      setUserWandPrompt('');
-      if (textareaRef.current) {
-        requestAnimationFrame(() => {
-          if (textareaRef.current) {
-            textareaRef.current.style.height = 'auto';
-            textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 192)}px`;
-          }
-        });
       }
     } catch (err: any) {
       alert((language === 'ru' ? 'Ошибка подсказки реплики: ' : 'Ghostwriter failed: ') + err.message);
     } finally {
+      wandAbortRef.current = null;
       setIsWandGenerating(false);
     }
+  };
+
+  const applyWandPreview = () => {
+    if (!wandPreview.trim()) return;
+    setInputText(wandPreview.trim());
+    setShowUserWandModal(false);
+    setUserWandPrompt('');
+    setWandPreview('');
+    if (textareaRef.current) {
+      requestAnimationFrame(() => {
+        if (textareaRef.current) {
+          textareaRef.current.style.height = 'auto';
+          textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 192)}px`;
+        }
+      });
+    }
+  };
+
+  const closeWandModal = () => {
+    wandAbortRef.current?.abort();
+    setShowUserWandModal(false);
+    setWandPreview('');
   };
 
   // Slash commands handler
@@ -1066,16 +1155,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
         );
         return;
       }
-      if (!activeApiKey) {
-        alert(language === 'ru' ? 'Требуется API ключ для генерации сводки.' : 'API key required for summary.');
+      if (!effectiveApiKey || (!effectiveApiKey.key.trim() && !isLocal)) {
+        alert(language === 'ru' ? 'Требуется подключение к ИИ для генерации сводки.' : 'AI connection required for summary.');
         return;
       }
       setSummaryModalText(language === 'ru' ? 'Генерация сводки сцены...' : 'Generating scene recap...');
       try {
         const history = buildContextHistory(messages);
+        const summaryCfg = getComponentAiConfig(settings, activeApiKey, 'summary');
         const recap = await summarizeScene(
-          activeApiKey,
-          settings?.textModel || 'deepseek/deepseek-chat',
+          summaryCfg.apiKeyConfig as any,
+          summaryCfg.textModel,
           history,
           language
         );
@@ -1089,9 +1179,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
     } else if (cmd === '/action') {
       setInputText('*action* ');
     } else if (cmd === '/reset') {
-      if (window.confirm(language === 'ru' ? 'Очистить все сообщения в этой сессии?' : 'Clear messages in this chat session?')) {
+      if (window.confirm(language === 'ru' ? 'Очистить сообщения и не зафиксированные воспоминания в этой сессии?' : 'Clear messages and unpinned memories in this chat session?')) {
         if (session) {
           await db.messages.where('chatId').equals(session.id).delete();
+          const unpinned = await db.memoryNodes.where('chatId').equals(session.id).filter((n) => !n.isPinned).toArray();
+          for (const u of unpinned) {
+            await db.memoryEdges.where('source').equals(u.id).delete();
+            await db.memoryEdges.where('target').equals(u.id).delete();
+            await db.memoryNodes.delete(u.id);
+          }
+          await db.chats.update(session.id, {
+            rollingSummary: undefined,
+            lastSummarizedMsgId: undefined,
+            relationships: {},
+            updatedAt: Date.now(),
+          });
         }
       }
       setInputText('');
@@ -1132,7 +1234,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       <div
         className="absolute inset-0 pointer-events-none z-0"
         style={{
-          backgroundColor: `rgba(7, 9, 14, ${currentTheme.backgroundTint})`,
+          backgroundColor: `rgba(var(--app-bg-rgb, 7, 9, 14), ${currentTheme.backgroundTint})`,
         }}
       />
 
@@ -1213,9 +1315,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
             const isThoughtExpanded = !!expandedThoughts[msg.id];
 
             const botChar = !isUser ? allCharacters.find((c) => c.id === msg.senderId) || (type === 'character' ? character : undefined) : undefined;
-            const botAvatar = !isUser
-              ? (botChar?.avatar || msg.senderAvatar || '')
-              : undefined;
+            // The avatar never changes with emotion: the emotion is shown as a sprite under the text
+            const botAvatar = !isUser ? (botChar?.avatar || msg.senderAvatar || '') : undefined;
 
             return (
               <div
@@ -1750,46 +1851,74 @@ export const ChatView: React.FC<ChatViewProps> = ({
       {/* User Ghostwriter Wand Modal */}
       {showUserWandModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-3">
+          <div className="w-full max-w-md bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Wand2 className="w-4 h-4 text-violet-400" />
                 <h3 className="font-semibold text-sm text-white">{t.ghostwriterTitle}</h3>
               </div>
-              <button
-                onClick={() => setShowUserWandModal(false)}
-                className="text-slate-400 hover:text-white"
-              >
+              <button onClick={closeWandModal} className="text-slate-400 hover:text-white">
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             <textarea
-              rows={3}
+              rows={2}
               value={userWandPrompt}
               onChange={(e) => setUserWandPrompt(e.target.value)}
               placeholder={t.ghostwriterPromptPlaceholder}
-              className="w-full px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white resize-none"
+              disabled={isWandGenerating}
+              className="w-full px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white resize-none disabled:opacity-60"
               autoFocus
             />
 
+            {(isWandGenerating || wandPreview) && (
+              <div className="max-h-56 overflow-y-auto px-3 py-2 bg-silk-800/60 border border-silk-700 rounded-xl text-sm text-slate-100 whitespace-pre-wrap leading-relaxed">
+                {wandPreview || (
+                  <span className="text-slate-500 text-xs">{language === 'ru' ? 'Ожидание первого слова...' : 'Waiting for the first words...'}</span>
+                )}
+                {isWandGenerating && <span className="inline-block w-1.5 h-4 ml-0.5 align-middle bg-violet-400 animate-pulse" />}
+              </div>
+            )}
+
             <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setShowUserWandModal(false)}
-                type="button"
-                className="px-3 py-1.5 text-xs text-slate-400 hover:text-white"
-              >
-                {t.cancel}
-              </button>
-              <button
-                onClick={handleExecuteUserWand}
-                disabled={isWandGenerating}
-                type="button"
-                className="flex items-center gap-1.5 px-4 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-md"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>{isWandGenerating ? (language === 'ru' ? 'Формулирую...' : 'Formulating...') : t.applyToInput}</span>
-              </button>
+              {isWandGenerating ? (
+                <button
+                  onClick={() => wandAbortRef.current?.abort()}
+                  type="button"
+                  className="flex items-center gap-1.5 px-4 py-1.5 bg-silk-700 hover:bg-silk-600 text-white rounded-xl text-xs font-semibold"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  <span>{language === 'ru' ? 'Стоп' : 'Stop'}</span>
+                </button>
+              ) : (
+                <>
+                  <button
+                    onClick={closeWandModal}
+                    type="button"
+                    className="px-3 py-1.5 text-xs text-slate-400 hover:text-white"
+                  >
+                    {t.cancel}
+                  </button>
+                  {wandPreview && (
+                    <button
+                      onClick={handleExecuteUserWand}
+                      type="button"
+                      className="px-3 py-1.5 text-xs text-slate-200 border border-silk-700 hover:border-violet-500 rounded-xl"
+                    >
+                      {language === 'ru' ? 'Ещё вариант' : 'Another version'}
+                    </button>
+                  )}
+                  <button
+                    onClick={wandPreview ? applyWandPreview : handleExecuteUserWand}
+                    type="button"
+                    className="flex items-center gap-1.5 px-4 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-md"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>{wandPreview ? t.applyToInput : (language === 'ru' ? 'Сформулировать' : 'Generate')}</span>
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

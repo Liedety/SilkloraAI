@@ -28,7 +28,7 @@ export const FloatingSaveButton: React.FC<FloatingSaveButtonProps> = ({
       style={{
         background: saved
           ? 'linear-gradient(135deg, #059669 0%, #10b981 100%)'
-          : `linear-gradient(135deg, ${accentColor} 0%, #312e81 100%)`,
+          : `linear-gradient(135deg, ${accentColor} 0%, rgba(var(--app-surface-rgb, 49, 46, 129), 0.95) 100%)`,
         boxShadow: `0 10px 25px -5px ${accentColor}80`,
       }}
     >
