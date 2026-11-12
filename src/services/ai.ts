@@ -1,5 +1,7 @@
 import type { AiBackend, AiComponent, ApiKeyConfig, AppSettings, Character, CharacterEmotion, Group, Language } from '../types';
 
+export const INFER_EMOTION_FROM_TEXT = false;
+
 export const AI_COMPONENTS: AiComponent[] = ['chat', 'ghostwriter', 'memory', 'summary', 'characterGen', 'groupGen', 'vision'];
 
 export interface ChatCompletionMessage {
@@ -201,6 +203,8 @@ export interface StreamOptions {
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;
+  /** Extra stop strings, e.g. "\nPersonaName:" so the model cannot start writing for the user. */
+  extraStops?: string[];
   onToken: (token: string) => void;
   onComplete?: (fullText: string) => void;
   onError: (err: Error) => void;
@@ -265,6 +269,7 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
         max_tokens: maxTokens,
         stream: true,
         stop: [
+          ...(options.extraStops || []),
           'USER:',
           'User:',
           '\nUSER:',
@@ -694,8 +699,9 @@ export function extractEmotionAndCleanResponse(
       .trim();
   }
 
-  // 4. Fallback: if character has emotions configured, detect mood from actions, speech, and thoughts
-  if (!finalEmotion && characterEmotions && characterEmotions.length > 0) {
+  // 4. Keyword inference from prose is off: the avatar changes only on an explicit <emotion> tag.
+  // (It used to change the avatar whenever the narration mentioned a smile, tears, etc.)
+  if (INFER_EMOTION_FROM_TEXT && !finalEmotion && characterEmotions && characterEmotions.length > 0) {
     const textToAnalyze = (visibleText + ' ' + finalThought).toLowerCase();
     const emotionPatterns: Array<{ name: string; regex: RegExp }> = [
       { name: 'happy', regex: /(?:улыб|сме|радост|счаст|весел|хохот|хихик|smile|laugh|happy|grin|giggle|cheerful|joy)/i },
@@ -1150,4 +1156,30 @@ Respond in English.`;
   });
 
   return out.trim();
+}
+
+/**
+ * Stop strings that end the reply when the model starts writing another speaker's line,
+ * e.g. "Mira:" or "\nAlex:" for the user's persona. Names must be at least two characters.
+ */
+export function speakerStopStrings(names: string[]): string[] {
+  const stops: string[] = [];
+  for (const raw of names) {
+    const name = (raw || '').trim();
+    if (name.length < 2) continue;
+    stops.push(`\n${name}:`, `\n${name} :`);
+  }
+  return Array.from(new Set(stops));
+}
+
+/** Removes a leading "Name:" or "[Name]:" that the model copied from the chat history. */
+export function stripLeadingSpeakerName(text: string, names: string[]): string {
+  let out = text;
+  for (const raw of names) {
+    const name = (raw || '').trim();
+    if (name.length < 2) continue;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`^\\s*\\[?${escaped}\\]?\\s*:\\s*`, 'i'), '');
+  }
+  return out;
 }

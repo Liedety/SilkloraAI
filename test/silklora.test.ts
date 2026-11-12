@@ -8,6 +8,7 @@ import {
 } from '../src/services/ai.ts';
 import { buildSystemPrompt, DEFAULT_CORE_SYSTEM_PROMPT } from '../src/services/promptBuilder.ts';
 import { translations } from '../src/i18n/index.ts';
+import { speakerStopStrings, stripLeadingSpeakerName } from '../src/services/ai.ts';
 import { estimateTokens, planWindow, planSummaryBatch, summaryLimits, sceneNoteLines, SUMMARY_BATCH } from '../src/services/contextBudget.ts';
 import { normalizeLabel, calculateNodeScore, findDuplicateNodes, selectNodesToPrune, isSignificantTurn } from '../src/services/memoryGraph.ts';
 import { getLocalizedTextStyle, DEFAULT_STYLES, DEFAULT_THEME, APP_THEMES } from '../src/db/index.ts';
@@ -831,34 +832,32 @@ test('extractEmotionAndCleanResponse: extracts emotion tags from start, inside t
   assert.strictEqual(res4.text, '*Тепло улыбнулся* Спасибо тебе большое!');
 });
 
-test('extractEmotionAndCleanResponse: detects matching character emotion from narrative action cues when tags are omitted', () => {
+test('extractEmotionAndCleanResponse: prose never changes the emotion; only an explicit tag does', () => {
   const emotions = [
     { id: '1', name: 'neutral', label: 'Нейтральный', avatar: 'data:img1' },
     { id: '2', name: 'happy', label: 'Радость', avatar: 'data:img2' },
     { id: '3', name: 'sad', label: 'Грусть', avatar: 'data:img3' },
-    { id: '4', name: 'blushing', label: 'Смущение', avatar: 'data:img4' },
   ];
-
-  // Laughing / smiling -> happy
-  const happyMsg = '*Широко улыбнулась и звонко рассмеялась* Ты всегда умеешь поднять настроение!';
-  const resHappy = extractEmotionAndCleanResponse(happyMsg, emotions);
-  assert.strictEqual(resHappy.emotion, 'happy', 'Should identify happy emotion from smile/laughter');
-
-  // Weeping / tears -> sad
-  const sadMsg = '*Сдерживая слезы, тихо всхлипнула* Я не хотела, чтобы все так вышло...';
-  const resSad = extractEmotionAndCleanResponse(sadMsg, emotions);
-  assert.strictEqual(resSad.emotion, 'sad', 'Should identify sad emotion from tears/weeping');
-
-  // Blush / shy -> blushing
-  const blushMsg = '*Густо покраснела и смущенно отвела взгляд* Перестань, мне неловко...';
-  const resBlush = extractEmotionAndCleanResponse(blushMsg, emotions);
-  assert.strictEqual(resBlush.emotion, 'blushing', 'Should identify blushing emotion from flustered reaction');
-
-  // Calm / neutral action -> neutral
-  const neutralMsg = '*Спокойно подошел к столу и перелистнул страницу документов* Вот отчет.';
-  const resNeutral = extractEmotionAndCleanResponse(neutralMsg, emotions);
-  assert.strictEqual(resNeutral.emotion, 'neutral', 'Should fallback to neutral for stoic/flat narrative');
+  const smile = '*Широко улыбнулась и звонко рассмеялась* Ты всегда умеешь поднять настроение!';
+  assert.strictEqual(extractEmotionAndCleanResponse(smile, emotions).emotion, undefined);
+  const tagged = '<emotion>happy</emotion>*Широко улыбнулась* Ты всегда умеешь поднять настроение!';
+  assert.strictEqual(extractEmotionAndCleanResponse(tagged, emotions).emotion, 'happy');
 });
+
+test('speakerStopStrings: stops on "Name:" lines only and ignores short names', () => {
+  const stops = speakerStopStrings(['Алекс', 'Мира', 'X']);
+  assert.ok(stops.includes('\nАлекс:'));
+  assert.ok(stops.includes('\nМира:'));
+  assert.ok(!stops.some((x) => x.includes('X')));
+  assert.ok(!stops.some((x) => x.includes('*')), 'action lines must not be cut');
+});
+
+test('stripLeadingSpeakerName: removes a copied name prefix, keeps the rest', () => {
+  assert.strictEqual(stripLeadingSpeakerName('Мира: *улыбается* Привет.', ['Мира', 'Алекс']), '*улыбается* Привет.');
+  assert.strictEqual(stripLeadingSpeakerName('[Алекс]: Ок.', ['Мира', 'Алекс']), 'Ок.');
+  assert.strictEqual(stripLeadingSpeakerName('*Мира кивает* Да.', ['Мира']), '*Мира кивает* Да.');
+});
+
 
 test('buildSystemPrompt: guides emotion expression, provides non-neutral example, and includes recency reminder', () => {
   const speaker: Character = {

@@ -43,6 +43,8 @@ import {
   extractEmotionAndCleanResponse,
   getEffectiveAiConfig,
   getComponentAiConfig,
+  speakerStopStrings,
+  stripLeadingSpeakerName,
 } from '../services/ai';
 import { buildSystemPrompt, buildSceneNote } from '../services/promptBuilder';
 import {
@@ -730,9 +732,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const hasImages = apiMessages.some((m: any) => Array.isArray(m.content) && m.content.some((p: any) => p.type === 'image_url'));
       const turnConfig = hasImages ? getComponentAiConfig(settings, activeApiKey, 'vision') : null;
 
+      const otherNames = [
+        speaker.name,
+        userPersona?.name || '',
+        ...allCharacters.filter((c) => c.id !== speaker.id && group?.characterIds.includes(c.id)).map((c) => c.name),
+      ];
+      const speakerNames = [speaker.name, userPersona?.name || ''];
+
       await streamChatCompletion({
         apiKeyConfig: (turnConfig ? turnConfig.apiKeyConfig : effectiveApiKey) as ApiKeyConfig,
         model: turnConfig ? turnConfig.textModel : effectiveModel,
+        // Also stop if the model starts quoting the hidden scene note
+        extraStops: [...speakerStopStrings(otherNames), '[Scene note', '[Заметка сцены'],
         messages: apiMessages,
         temperature: isLocal ? 0.7 : 0.85,
         maxTokens: 1024,
@@ -740,11 +751,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onToken: (tok) => {
           fullGenerated += tok;
           let currentThought = '';
-          let display = fullGenerated;
+          let display = stripLeadingSpeakerName(fullGenerated, speakerNames);
 
-          // Check for emotion tag early across full stream (even before/inside/after thought tag)
-          const emotionMatch = fullGenerated.match(/<emotion>([^<]+)<\/emotion>/i)
-            || fullGenerated.match(/(?:\[|<|\()(?:эмоция|emotion):\s*([^\]>\)]+)(?:\]|>|\))/i);
+          // Only an explicit <emotion> tag changes the avatar; prose never does
+          const emotionMatch = fullGenerated.match(/<emotion>([^<]+)<\/emotion>/i);
           if (emotionMatch) {
             setStreamingEmotion(emotionMatch[1].trim().toLowerCase());
           }
@@ -767,9 +777,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
           setStreamingThought(currentThought);
           setStreamingText(cleanArtifacts(display));
         },
-        onComplete: async (completed) => {
+        onComplete: async (rawCompleted) => {
           setIsGenerating(false);
           abortControllerRef.current = null;
+          const completed = stripLeadingSpeakerName(rawCompleted, speakerNames);
 
           try {
             if (!completed || !completed.trim()) {
