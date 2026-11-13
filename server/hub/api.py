@@ -1,6 +1,7 @@
 """HTTP layer: OpenAI-compatible endpoints for the phone app and management endpoints for the dashboard."""
 
 import asyncio
+import inspect
 import json
 import os
 import platform
@@ -26,6 +27,7 @@ from .hardware import analyze_hardware, build_profile
 from .log import logger
 from .network import local_adapters
 from .paths import DATA_DIR, MODELS_DIR, WEB_DIR
+from .sanitize import StreamSanitizer, extract_reasoning_and_content
 
 DEFAULT_STOP_TOKENS = [
     "USER:", "User:", "ASSISTANT:", "Assistant:",
@@ -33,7 +35,10 @@ DEFAULT_STOP_TOKENS = [
     "\nASSISTANT:", "\nAssistant:",
     "\nПользователь:", "\nпользователь:", "\n\nПользователь:",
     "\nИгрок:", "\nигрок:", "\nВы:",
-    "<用户>", "<AI>", "<end_of_turn>", "<|eot_id|>",
+    "<用户>", "<AI>", "<end_of_turn>", "<start_of_turn>",
+    "<|eot_id|>", "<|im_end|>", "<|im_start|>",
+    "<|turn>user", "<|turn>system", "<turn|>",
+    "\n[Заметка сцены", "\n[Scene note", "\n[Контекст хода",
 ]
 
 CLIENT_ACTIVE_SEC = 90
@@ -197,15 +202,34 @@ def create_app() -> FastAPI:
 
         params: Dict[str, Any] = {
             "messages": fitted,
-            "temperature": float(body.get("temperature", 0.7)),
-            "top_p": float(body.get("top_p", 0.9)),
+            "temperature": float(body.get("temperature", 0.78)),
+            "top_p": float(body.get("top_p", 0.92)),
             "repeat_penalty": float(body.get("repeat_penalty", body.get("repetition_penalty", 1.12))),
             "max_tokens": max_tokens,
             "stop": stops,
         }
-        for key in ("top_k", "min_p", "presence_penalty", "frequency_penalty", "seed"):
-            if body.get(key) is not None:
-                params[key] = body[key]
+        optional_samplers = {
+            "top_k": int(body.get("top_k", 50)),
+            "min_p": float(body.get("min_p", 0.06)),
+            "presence_penalty": float(body.get("presence_penalty", 0.18)),
+            "frequency_penalty": float(body.get("frequency_penalty", 0.22)),
+            "repeat_last_n": int(body.get("repeat_last_n", 512)),
+        }
+        if body.get("seed") is not None:
+            optional_samplers["seed"] = body["seed"]
+
+        try:
+            sig = inspect.signature(llama.create_chat_completion)
+            accepts_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            )
+            for key, val in optional_samplers.items():
+                if accepts_kwargs or key in sig.parameters:
+                    params[key] = val
+        except (TypeError, ValueError, AttributeError):
+            for key in ("top_k", "min_p", "presence_penalty", "frequency_penalty", "seed"):
+                if key in optional_samplers:
+                    params[key] = optional_samplers[key]
 
         headers = {
             "X-Silklora-Context": f"n_ctx={n_ctx}; prompt={report['prompt_tokens']}; dropped={report['dropped']}"
@@ -216,16 +240,61 @@ def create_app() -> FastAPI:
         if stream:
             job = GenerationJob(llama, params, engine.inference_lock, asyncio.get_running_loop())
             job.start()
+            sanitizer = StreamSanitizer()
 
             async def event_stream():
                 try:
                     while True:
                         kind, payload = await job.events.get()
                         if kind == "chunk":
+                            choice0 = (payload.get("choices") or [{}])[0] if isinstance(payload, dict) else {}
+                            delta = choice0.get("delta") if isinstance(choice0, dict) else None
+                            if isinstance(delta, dict) and (
+                                isinstance(delta.get("content"), str) or bool(choice0.get("finish_reason"))
+                            ):
+                                content_delta = ""
+                                reasoning_delta = ""
+                                raw_piece = delta.get("content")
+                                if isinstance(raw_piece, str) and raw_piece:
+                                    content_delta, reasoning_delta = sanitizer.feed(raw_piece)
+                                existing_reasoning = delta.get("reasoning_content")
+                                combined_reasoning = (
+                                    (existing_reasoning or "") + reasoning_delta
+                                    if (existing_reasoning or reasoning_delta)
+                                    else ""
+                                )
+                                if choice0.get("finish_reason"):
+                                    tail_c, tail_r = sanitizer.finish()
+                                    content_delta += tail_c
+                                    if tail_r:
+                                        combined_reasoning += tail_r
+                                if not content_delta and not combined_reasoning and not choice0.get("finish_reason"):
+                                    continue
+                                new_delta = dict(delta)
+                                if content_delta:
+                                    new_delta["content"] = content_delta
+                                else:
+                                    new_delta.pop("content", None)
+                                if combined_reasoning:
+                                    new_delta["reasoning_content"] = combined_reasoning
+                                choice0["delta"] = new_delta
                             yield f"data: {json.dumps(payload)}\n\n"
                         elif kind == "error":
                             yield f"data: {json.dumps({'error': {'message': payload}})}\n\n"
                         else:
+                            tail_c, tail_r = sanitizer.finish()
+                            if tail_c or tail_r:
+                                tail_delta: Dict[str, Any] = {}
+                                if tail_c:
+                                    tail_delta["content"] = tail_c
+                                if tail_r:
+                                    tail_delta["reasoning_content"] = tail_r
+                                flush_chunk = {
+                                    "id": "chatcmpl-flush",
+                                    "object": "chat.completion.chunk",
+                                    "choices": [{"index": 0, "delta": tail_delta, "finish_reason": None}],
+                                }
+                                yield f"data: {json.dumps(flush_chunk)}\n\n"
                             yield "data: [DONE]\n\n"
                             break
                 finally:
@@ -235,7 +304,19 @@ def create_app() -> FastAPI:
 
         def run_blocking():
             with engine.inference_lock:
-                return llama.create_chat_completion(stream=False, **params)
+                result = llama.create_chat_completion(stream=False, **params)
+                if isinstance(result, dict):
+                    for ch in result.get("choices") or []:
+                        msg = ch.get("message")
+                        if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                            clean_text, parsed_reasoning = extract_reasoning_and_content(msg["content"])
+                            msg["content"] = clean_text
+                            if parsed_reasoning:
+                                existing = (msg.get("reasoning_content") or "").strip()
+                                msg["reasoning_content"] = (
+                                    f"{existing}\n\n{parsed_reasoning}".strip() if existing else parsed_reasoning
+                                )
+                return result
 
         try:
             result = await asyncio.to_thread(run_blocking)

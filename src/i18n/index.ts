@@ -345,6 +345,34 @@ export const translations = {
     loading: 'Loading...',
     none: 'None',
     linkLoreHeader: 'Link Companion or Group Lore',
+
+    // Character V2 Card & Extended Fields
+    charScenario: 'Scenario & Starting Situation',
+    charScenarioPlaceholder: 'Current setting, location, time, and dynamic between character and user...',
+    charExampleDialogue: 'Example Dialogue (<START>)',
+    charExampleDialoguePlaceholder: '<START>\n{{user}}: How are you doing?\n{{char}}: *Leans against the wall.* Better now that you showed up.',
+    importCharacterCard: 'Import Card',
+    exportCharacterCard: 'Export JSON',
+    importCardSuccess: 'Character card imported!',
+    importCardError: 'Failed to read character card: ',
+
+    // Generation & RP Samplers
+    generationSamplersTitle: 'RP Generation & Samplers',
+    generationSamplersDesc: 'Fine-tune creativity, repetition suppression, and reply length for local and cloud models.',
+    generationPresetLabel: 'Preset',
+    presetRoleplay: 'Roleplay',
+    presetBalanced: 'Balanced',
+    presetCreative: 'Creative',
+    presetPrecise: 'Precise',
+    presetCustom: 'Custom',
+    samplerTemp: 'Temperature',
+    samplerMinP: 'Min-P (Local)',
+    samplerTopP: 'Top-P',
+    samplerRepeatPenalty: 'Repeat Penalty',
+    samplerFrequencyPenalty: 'Frequency Penalty',
+    samplerPresencePenalty: 'Presence Penalty',
+    samplerMaxTokens: 'Max Reply Tokens',
+    resetSamplers: 'Reset to Roleplay Preset',
   },
 
   ru: {
@@ -691,5 +719,33 @@ export const translations = {
     loading: 'Загрузка...',
     none: 'Нет',
     linkLoreHeader: 'Привязать лор персонажа или группы',
+
+    // Character V2 Card & Extended Fields
+    charScenario: 'Сценарий и исходная ситуация',
+    charScenarioPlaceholder: 'Где происходит встреча, текущая обстановка, контекст отношений персонажа и игрока...',
+    charExampleDialogue: 'Примеры диалогов (<START>)',
+    charExampleDialoguePlaceholder: '<START>\n{{user}}: Как обстановка?\n{{char}}: *Прислоняется к стене.* Пока тихо, но надолго не расслабляйся.',
+    importCharacterCard: 'Импорт карточки',
+    exportCharacterCard: 'Экспорт JSON',
+    importCardSuccess: 'Карточка персонажа импортирована!',
+    importCardError: 'Ошибка чтения карточки: ',
+
+    // Generation & RP Samplers
+    generationSamplersTitle: 'Параметры генерации и сэмплеры',
+    generationSamplersDesc: 'Настройка живости ответов, подавления повторов и длины реплики для локальных и облачных моделей.',
+    generationPresetLabel: 'Пресет',
+    presetRoleplay: 'Ролевая',
+    presetBalanced: 'Баланс',
+    presetCreative: 'Креатив',
+    presetPrecise: 'Точный',
+    presetCustom: 'Свой',
+    samplerTemp: 'Температура',
+    samplerMinP: 'Min-P (Локальный)',
+    samplerTopP: 'Top-P',
+    samplerRepeatPenalty: 'Штраф повтора (Repeat)',
+    samplerFrequencyPenalty: 'Штраф частоты (Frequency)',
+    samplerPresencePenalty: 'Штраф новизны (Presence)',
+    samplerMaxTokens: 'Макс. токенов ответа',
+    resetSamplers: 'Сбросить на Ролевой',
   },
 };

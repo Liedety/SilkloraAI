@@ -46,15 +46,18 @@ import {
   enforceParagraphLimit,
   getEffectiveAiConfig,
   getComponentAiConfig,
+  resolveSamplerConfig,
   speakerStopStrings,
   resolveEmotion,
   stripLeadingSpeakerName,
+  stripEchoedUserPrefix,
 } from '../services/ai';
 import {
   buildSystemPrompt,
   buildSceneNote,
   buildTurnGuidanceBlock,
   parseLengthOverride,
+  substitutePromptMacros,
 } from '../services/promptBuilder';
 import {
   estimateTokens,
@@ -89,6 +92,13 @@ function cleanHistoryText(text: string): string {
     .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
     .replace(/<thought>[\s\S]*$/gi, '');
   return stripEmotionTags(withoutThoughts, undefined, { stripLeadingUnknownAngleTag: true }).trim();
+}
+
+function truncateOnWordBoundary(text: string, maxLen = 140): string {
+  if (!text || text.length <= maxLen) return text;
+  const slice = text.slice(0, maxLen);
+  const lastSpace = slice.lastIndexOf(' ');
+  return (lastSpace > maxLen * 0.5 ? slice.slice(0, lastSpace) : slice).trim() + '...';
 }
 
 export const ChatView: React.FC<ChatViewProps> = ({
@@ -128,7 +138,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
     try {
       const count = await db.messages.where('chatId').equals(chatId).count();
       if (count > 0) return;
-      const parsedGreeting = extractEmotionAndCleanResponse(character.greeting, character.emotions, character.name);
+      const macroUserName = settings?.userName?.trim() || (language === 'ru' ? 'Игрок' : 'User');
+      const expandedGreeting = substitutePromptMacros(character.greeting, character.name, macroUserName);
+      const parsedGreeting = extractEmotionAndCleanResponse(expandedGreeting, character.emotions, character.name);
       const greetingMsg: ChatMessage = {
         id: 'msg-' + Math.random().toString(36).substring(2, 10),
         chatId,
@@ -138,7 +150,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         emotion: parsedGreeting.emotion,
         variants: [
           {
-            text: parsedGreeting.text || character.greeting,
+            text: parsedGreeting.text || expandedGreeting,
             emotion: parsedGreeting.emotion,
             thought: parsedGreeting.thought,
             timestamp: Date.now(),
@@ -224,6 +236,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [streamingEmotion, setStreamingEmotion] = useState<string | null>(null);
   const [streamingSender, setStreamingSender] = useState<Character | null>(null);
   const compressionRunningRef = useRef(false);
+  const isSubmittingRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -568,7 +581,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           .map((m) => {
             const cleaned = cleanHistoryText(m.variants[m.activeVariantIndex]?.text || '');
             const displaySender = m.senderId === 'user' && resolvedUserName ? resolvedUserName : m.senderName;
-            return `${displaySender}: ${cleaned.length > 80 ? cleaned.slice(0, 80) + '...' : cleaned}`;
+            return `${displaySender}: ${truncateOnWordBoundary(cleaned, 140)}`;
           })
           .join('\n');
         const header = dialogueLang === 'ru' ? 'Недавние события диалога:\n' : 'Recent dialogue events:\n';
@@ -594,17 +607,40 @@ export const ChatView: React.FC<ChatViewProps> = ({
       // Build message array for API
       const apiMessages: any[] = [{ role: 'system', content: systemPrompt }];
 
+      // Re-attach valid <emotion> tags to the last 2 assistant replies of this speaker when sprites are enabled,
+      // so small local models have crisp in-context examples without breaking format.
+      const speakerHasEmotions = Boolean(speaker.emotions && speaker.emotions.length > 0);
+      const myAssistantIndices: number[] = [];
+      if (speakerHasEmotions) {
+        contextMsgs.forEach((m, i) => {
+          const isMeMsg = type === 'group' ? m.senderId === speaker.id : m.senderId !== 'user';
+          if (isMeMsg && m.variants[m.activeVariantIndex]?.text?.trim()) {
+            myAssistantIndices.push(i);
+          }
+        });
+      }
+      const recentEmotionKeepSet = new Set(myAssistantIndices.slice(-2));
+
       // Process raw dialogue turns with clear speaker attribution
       const rawTurns: Array<{ role: 'user' | 'assistant'; text: string; image?: string }> = [];
-      for (const msg of contextMsgs) {
+      let lastUserRawText = '';
+      contextMsgs.forEach((msg, idx) => {
         const activeVariant = msg.variants[msg.activeVariantIndex];
-        if (!activeVariant || !activeVariant.text?.trim()) continue;
+        if (!activeVariant || !activeVariant.text?.trim()) return;
 
         const isMe = type === 'group' ? msg.senderId === speaker.id : msg.senderId !== 'user';
         const role: 'user' | 'assistant' = isMe ? 'assistant' : 'user';
 
-        // Strip any hidden <thought> tags and leaked emotion tags from history so past turns do not inflate prompt tokens or trigger ballooning responses
         let textContent = cleanHistoryText(activeVariant.text);
+        if (!isMe && msg.senderId === 'user') {
+          lastUserRawText = textContent;
+        }
+        if (isMe && recentEmotionKeepSet.has(idx) && activeVariant.emotion) {
+          const validEmo = resolveEmotion(activeVariant.emotion, speaker.emotions, speaker.name);
+          if (validEmo) {
+            textContent = `<emotion>${validEmo}</emotion> ${textContent}`;
+          }
+        }
         if (type === 'group' && !isMe) {
           const displaySender = msg.senderId === 'user' && resolvedUserName ? resolvedUserName : msg.senderName;
           textContent = `[${displaySender}]: ${textContent}`;
@@ -615,7 +651,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           text: textContent,
           image: msg.image && msg.senderId === 'user' ? msg.image : undefined,
         });
-      }
+      });
 
       // Merge adjacent turns of the same role
       const alternatingTurns: any[] = [];
@@ -672,20 +708,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
         });
       }
 
-      // Ensure conversation ends with a user turn (e.g. /continue or chained group turn) so volatile tail stays on user turn
+      // Ensure conversation ends with a user turn (e.g. /continue or chained group turn)
       if (alternatingTurns[alternatingTurns.length - 1]?.role === 'assistant' && (sceneNote || turnGuidanceBlock)) {
         alternatingTurns.push({
           role: 'user',
-          content: dialogueLang === 'ru' ? `[Ход ${speaker.name}. Продолжай.]` : `[${speaker.name}'s turn. Continue.]`,
+          content: dialogueLang === 'ru'
+            ? `[Продолжи ответ ${speaker.name} естественно с текущего момента сцены, не повторяя прошлые фразы.]`
+            : `[Continue ${speaker.name}'s turn naturally from the current moment without repeating earlier lines.]`,
         });
       }
 
       apiMessages.push(...alternatingTurns);
 
-      // Volatile tail (scene note + turn guidance) attaches cleanly to the end of the last user message
+      // Volatile tail (scene note + turn guidance) sits immediately BEFORE the final user utterance
+      // so static system[0] stays cacheable AND the model responds directly to the user's words last.
       const tailBlocks: string[] = [];
       if (sceneNote) {
-        const noteTitle = dialogueLang === 'ru' ? 'Заметка сцены (не цитируй и не упоминай)' : 'Scene note (do not quote or mention)';
+        const noteTitle = dialogueLang === 'ru' ? 'Контекст сцены (не цитируй)' : 'Scene context (do not quote)';
         tailBlocks.push(`[${noteTitle}:\n${sceneNote}]`);
       }
       if (turnGuidanceBlock) {
@@ -696,9 +735,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
         const tailText = tailBlocks.join('\n\n');
         const last = apiMessages[apiMessages.length - 1];
         if (last && last.role === 'user' && typeof last.content === 'string') {
-          last.content = `${last.content}\n\n${tailText}`;
+          last.content = `${tailText}\n\n${last.content}`;
         } else if (last && last.role === 'user' && Array.isArray(last.content)) {
-          last.content.push({ type: 'text', text: tailText });
+          last.content = [{ type: 'text', text: tailText }, ...last.content];
         } else {
           apiMessages[0] = { role: 'system', content: `${systemPrompt}\n\n${tailText}` };
         }
@@ -709,6 +748,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       // Photos in the context go to the vision backend; plain text stays on the chat backend
       const hasImages = apiMessages.some((m: any) => Array.isArray(m.content) && m.content.some((p: any) => p.type === 'image_url'));
       const turnConfig = hasImages ? getComponentAiConfig(settings, activeApiKey, 'vision') : null;
+      const samplers = resolveSamplerConfig(freshSettings || settings, isLocal);
 
       // Only the speaker's own name is stripped from the start; the stop list must not contain it,
       // otherwise a reply that begins with "Name:" is cut to nothing.
@@ -723,10 +763,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
         apiKeyConfig: (turnConfig ? turnConfig.apiKeyConfig : effectiveApiKey) as ApiKeyConfig,
         model: turnConfig ? turnConfig.textModel : effectiveModel,
         // Also stop if the model starts quoting the hidden scene note or turn guidance header
-        extraStops: [...speakerStopStrings(otherSpeakers), '[Scene note', '[Заметка сцены', '[УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ', '[USER TURN DIRECTIVE'],
+        extraStops: [...speakerStopStrings(otherSpeakers), '[Scene note', '[Scene context', '[Заметка сцены', '[Контекст сцены', '[УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ', '[USER TURN DIRECTIVE'],
         messages: apiMessages,
-        temperature: isLocal ? 0.7 : 0.85,
-        maxTokens: 1024,
+        temperature: samplers.temperature,
+        topP: samplers.topP,
+        minP: samplers.minP,
+        topK: samplers.topK,
+        repeatPenalty: samplers.repeatPenalty,
+        repeatLastN: samplers.repeatLastN,
+        frequencyPenalty: samplers.frequencyPenalty,
+        presencePenalty: samplers.presencePenalty,
+        maxTokens: samplers.maxTokens,
+        includeReasoning: activeChat.thoughtsEnabled === true,
         signal: abortController.signal,
         onToken: (tok) => {
           fullGenerated += tok;
@@ -748,10 +796,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
               return;
             }
 
-            const { text: finalText, thought: finalThought, emotion: finalEmotion } =
+            const { text: extractedText, thought: finalThought, emotion: finalEmotion } =
               extractEmotionAndCleanResponse(completed, speaker.emotions, speaker.name);
+            const deEchoed = stripEchoedUserPrefix(
+              extractedText || cleanArtifacts(completed, speaker.emotions),
+              lastUserRawText
+            );
             const boundedText = enforceParagraphLimit(
-              finalText || cleanArtifacts(completed, speaker.emotions),
+              deEchoed,
               effectiveLengthRule?.maxParagraphs,
               effectiveLengthRule?.mode === 'shorter'
             );
@@ -901,7 +953,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   // Send User Message
   const handleSendMessage = async () => {
-    if ((!inputText.trim() && !attachedImage) || isGenerating || !session) return;
+    if ((!inputText.trim() && !attachedImage) || isGenerating || isSubmittingRef.current || !session) return;
 
     // Intercept slash commands typed into the input
     const trimmedInput = inputText.trim();
@@ -913,47 +965,52 @@ export const ChatView: React.FC<ChatViewProps> = ({
       }
     }
 
-    const userPersona = session.personaId
-      ? allCharacters.find((c) => c.id === session.personaId) || null
-      : null;
+    isSubmittingRef.current = true;
+    try {
+      const userPersona = session.personaId
+        ? allCharacters.find((c) => c.id === session.personaId) || null
+        : null;
 
-    const userMsg: ChatMessage = {
-      id: 'msg-' + Math.random().toString(36).substring(2, 10),
-      chatId: session.id,
-      senderId: 'user',
-      senderName: userPersona ? userPersona.name : (settings?.userName?.trim() || (language === 'ru' ? 'Вы' : 'You')),
-      senderAvatar: userPersona ? userPersona.avatar : undefined,
-      variants: [
-        {
-          text: inputText.trim(),
-          timestamp: Date.now(),
-        },
-      ],
-      activeVariantIndex: 0,
-      image: attachedImage || undefined,
-      createdAt: Date.now(),
-    };
+      const userMsg: ChatMessage = {
+        id: 'msg-' + Math.random().toString(36).substring(2, 10),
+        chatId: session.id,
+        senderId: 'user',
+        senderName: userPersona ? userPersona.name : (settings?.userName?.trim() || (language === 'ru' ? 'Вы' : 'You')),
+        senderAvatar: userPersona ? userPersona.avatar : undefined,
+        variants: [
+          {
+            text: inputText.trim(),
+            timestamp: Date.now(),
+          },
+        ],
+        activeVariantIndex: 0,
+        image: attachedImage || undefined,
+        createdAt: Date.now(),
+      };
 
-    await db.messages.put(userMsg);
-    await db.chats.update(session.id, { updatedAt: Date.now() });
+      await db.messages.put(userMsg);
+      await db.chats.update(session.id, { updatedAt: Date.now() });
 
-    setInputText('');
-    setAttachedImage(null);
-    setShowSlashMenu(false);
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-    }
+      setInputText('');
+      setAttachedImage(null);
+      setShowSlashMenu(false);
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+      }
 
-    setShowScrollBottom(false);
-    isSmoothScrollingToBottomRef.current = false;
-    requestAnimationFrame(() => {
-      scrollToBottom(false);
-    });
+      setShowScrollBottom(false);
+      isSmoothScrollingToBottomRef.current = false;
+      requestAnimationFrame(() => {
+        scrollToBottom(false);
+      });
 
-    // Trigger bot reply: only in 1-on-1 chat!
-    // In group chats, characters ONLY respond when invoked explicitly by the user!
-    if (type === 'character') {
-      runBotGeneration();
+      // Trigger bot reply: only in 1-on-1 chat!
+      // In group chats, characters ONLY respond when invoked explicitly by the user!
+      if (type === 'character') {
+        runBotGeneration();
+      }
+    } finally {
+      isSubmittingRef.current = false;
     }
   };
 

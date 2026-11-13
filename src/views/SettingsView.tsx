@@ -33,12 +33,23 @@ import type {
   ApiKeyConfig,
   ApiProvider,
   AppSettings,
+  GenerationPreset,
   Language,
   TextStylePreset,
   ThemeConfig,
 } from '../types';
 import { translations } from '../i18n';
-import { fetchAvailableModels, fetchVisionModels, pingLocalServer, normalizeLocalServerUrl, AI_COMPONENTS, getComponentBackend } from '../services/ai';
+import {
+  fetchAvailableModels,
+  fetchVisionModels,
+  pingLocalServer,
+  normalizeLocalServerUrl,
+  AI_COMPONENTS,
+  getComponentBackend,
+  RP_SAMPLER_PRESETS,
+  resolveSamplerConfig,
+  type RpSamplerPreset,
+} from '../services/ai';
 import { DEFAULT_CORE_SYSTEM_PROMPT } from '../services/promptBuilder';
 import { ChatPreviewCard } from '../components/ChatPreviewCard';
 import { QrScannerModal } from '../components/QrScannerModal';
@@ -897,6 +908,201 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         {settingsTab === 'models' && (<>
         {renderRouting()}
+
+        {/* RP Generation & Samplers Card */}
+        {(() => {
+          const activePreset: GenerationPreset = settings?.generationPreset || 'roleplay';
+          const effectiveSamplers = resolveSamplerConfig(settings, settings?.aiEngineMode === 'local');
+          const applyPreset = async (preset: RpSamplerPreset) => {
+            const p = RP_SAMPLER_PRESETS[preset];
+            await db.settings.update('default', {
+              generationPreset: preset,
+              temperature: p.temperature,
+              topP: p.topP,
+              minP: p.minP,
+              repeatPenalty: p.repeatPenalty,
+              frequencyPenalty: p.frequencyPenalty,
+              presencePenalty: p.presencePenalty,
+              maxResponseTokens: p.maxTokens,
+            });
+          };
+          const updateSampler = async (patch: Partial<AppSettings>) => {
+            await db.settings.update('default', {
+              generationPreset: 'custom',
+              temperature: effectiveSamplers.temperature,
+              topP: effectiveSamplers.topP,
+              minP: effectiveSamplers.minP,
+              repeatPenalty: effectiveSamplers.repeatPenalty,
+              frequencyPenalty: effectiveSamplers.frequencyPenalty,
+              presencePenalty: effectiveSamplers.presencePenalty,
+              maxResponseTokens: effectiveSamplers.maxTokens,
+              ...patch,
+            });
+          };
+          const presetButtons: Array<{ id: RpSamplerPreset; label: string }> = [
+            { id: 'roleplay', label: t.presetRoleplay },
+            { id: 'balanced', label: t.presetBalanced },
+            { id: 'creative', label: t.presetCreative },
+            { id: 'precise', label: t.presetPrecise },
+          ];
+          return (
+            <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+                  <Sliders className="w-4 h-4 text-violet-400" />
+                  <span>{t.generationSamplersTitle}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => applyPreset('roleplay')}
+                  className="text-[11px] text-violet-400 hover:text-violet-300"
+                >
+                  {t.resetSamplers}
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-snug">{t.generationSamplersDesc}</p>
+
+              <div className="flex flex-wrap gap-1.5">
+                {presetButtons.map((p) => {
+                  const isActive = activePreset === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => applyPreset(p.id)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-all ${
+                        isActive
+                          ? 'bg-violet-600 text-white border-violet-500 shadow-sm'
+                          : 'bg-silk-800 text-slate-300 border-silk-700 hover:text-white'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  );
+                })}
+                {activePreset === 'custom' && (
+                  <span className="px-3 py-1.5 rounded-xl text-xs font-medium bg-indigo-950/60 text-indigo-300 border border-indigo-700/50">
+                    {t.presetCustom}
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                <label className="block space-y-1">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-300">{t.samplerTemp}</span>
+                    <span className="font-mono text-violet-400">{effectiveSamplers.temperature.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.1"
+                    max="1.4"
+                    step="0.02"
+                    value={effectiveSamplers.temperature}
+                    onChange={(e) => updateSampler({ temperature: parseFloat(e.target.value) })}
+                    className="w-full accent-violet-500"
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-300">{t.samplerMinP}</span>
+                    <span className="font-mono text-violet-400">{effectiveSamplers.minP.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="0.3"
+                    step="0.01"
+                    value={effectiveSamplers.minP}
+                    onChange={(e) => updateSampler({ minP: parseFloat(e.target.value) })}
+                    className="w-full accent-violet-500"
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-300">{t.samplerTopP}</span>
+                    <span className="font-mono text-violet-400">{effectiveSamplers.topP.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="1.0"
+                    step="0.02"
+                    value={effectiveSamplers.topP}
+                    onChange={(e) => updateSampler({ topP: parseFloat(e.target.value) })}
+                    className="w-full accent-violet-500"
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-300">{t.samplerRepeatPenalty}</span>
+                    <span className="font-mono text-violet-400">{effectiveSamplers.repeatPenalty.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1.0"
+                    max="1.35"
+                    step="0.01"
+                    value={effectiveSamplers.repeatPenalty}
+                    onChange={(e) => updateSampler({ repeatPenalty: parseFloat(e.target.value) })}
+                    className="w-full accent-violet-500"
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-300">{t.samplerFrequencyPenalty}</span>
+                    <span className="font-mono text-violet-400">{effectiveSamplers.frequencyPenalty.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1.0"
+                    step="0.02"
+                    value={effectiveSamplers.frequencyPenalty}
+                    onChange={(e) => updateSampler({ frequencyPenalty: parseFloat(e.target.value) })}
+                    className="w-full accent-violet-500"
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-300">{t.samplerPresencePenalty}</span>
+                    <span className="font-mono text-violet-400">{effectiveSamplers.presencePenalty.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1.0"
+                    step="0.02"
+                    value={effectiveSamplers.presencePenalty}
+                    onChange={(e) => updateSampler({ presencePenalty: parseFloat(e.target.value) })}
+                    className="w-full accent-violet-500"
+                  />
+                </label>
+
+                <label className="block space-y-1 sm:col-span-2">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-300">{t.samplerMaxTokens}</span>
+                    <span className="font-mono text-violet-400">{effectiveSamplers.maxTokens}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="200"
+                    max="2048"
+                    step="50"
+                    value={effectiveSamplers.maxTokens}
+                    onChange={(e) => updateSampler({ maxResponseTokens: parseInt(e.target.value, 10) })}
+                    className="w-full accent-violet-500"
+                  />
+                </label>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* 3. Text & RP Model Selector */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">

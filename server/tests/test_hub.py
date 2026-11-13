@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hub import context, gguf, planner, store  # noqa: E402
+from hub import context, gguf, planner, sanitize, store  # noqa: E402
 from hub.hardware import GIB, build_profile  # noqa: E402
 
 
@@ -245,6 +245,46 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(build_profile(make_hw(vram_gb=12))["tier"], "high")
         self.assertEqual(build_profile(make_hw(vram_gb=8))["tier"], "mid")
         self.assertEqual(build_profile(make_hw(vram_gb=0))["tier"], "cpu")
+
+
+class SanitizeTests(unittest.TestCase):
+    def test_extracts_gemma4_channel_thought_and_turn_tokens(self):
+        raw = "<|turn>model\n<|channel>thought\nLet me plan the scene.\n<channel|><emotion>smirk</emotion> *She lights a cigarette.* Ready?<turn|>"
+        content, reasoning = sanitize.extract_reasoning_and_content(raw)
+        self.assertEqual(content, "<emotion>smirk</emotion> *She lights a cigarette.* Ready?")
+        self.assertEqual(reasoning, "Let me plan the scene.")
+
+    def test_extracts_think_tags_and_strips_leaked_scene_note(self):
+        raw = "<think>Check inventory</think>\n*Hands over the keycard.*\n\n[Заметка сцены (не цитируй):\nФакт 1]"
+        content, reasoning = sanitize.extract_reasoning_and_content(raw)
+        self.assertEqual(content, "*Hands over the keycard.*")
+        self.assertEqual(reasoning, "Check inventory")
+
+    def test_stream_sanitizer_buffers_split_control_tokens_without_damaging_emotion(self):
+        s = sanitize.StreamSanitizer()
+        chunks = [
+            "<|tu", "rn>m", "odel\n",
+            "<|chan", "nel>thought\n", "Internal ", "plan", "<chan", "nel|>",
+            "<emo", "tion>smirk</emotion> *Nods.*",
+            "<|im_end|>",
+        ]
+        out_c, out_r = [], []
+        for ch in chunks:
+            c, r = s.feed(ch)
+            out_c.append(c)
+            out_r.append(r)
+        tc, tr = s.finish()
+        out_c.append(tc)
+        out_r.append(tr)
+        self.assertEqual("".join(out_c), "<emotion>smirk</emotion> *Nods.*")
+        self.assertEqual("".join(out_r).strip(), "Internal plan")
+
+    def test_stream_sanitizer_stops_on_leaked_scene_note(self):
+        s = sanitize.StreamSanitizer()
+        c1, _ = s.feed("Hello!\n[Замет")
+        c2, _ = s.feed("ка сцены:\nSecret]")
+        tc, _ = s.finish()
+        self.assertEqual(c1 + c2 + tc, "Hello!\n")
 
 
 if __name__ == "__main__":

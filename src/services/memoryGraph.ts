@@ -13,6 +13,18 @@ export function normalizeLabel(s: string): string {
     .trim();
 }
 
+/** Identify legacy heuristic fallback nodes that store raw verbatim dialogue quotes. */
+export function isRawDialogueFallbackNode(node: Pick<MemoryNode, 'label' | 'detail'>): boolean {
+  const detail = node.detail || '';
+  return (
+    detail.startsWith('User said:') ||
+    detail.startsWith('Пользователь:') ||
+    detail.includes(' | Персонаж: ') ||
+    detail.includes(' | Character responded: ') ||
+    (node.label || '').endsWith('...')
+  );
+}
+
 /**
  * Calculates priority score for a memory node.
  * Higher score = more important, less likely to be pruned.
@@ -56,14 +68,7 @@ export function calculateNodeScore(
   }
 
   // Penalty for raw fallback dialogue quotes
-  let detailPenalty = 0;
-  if (
-    node.detail.startsWith('User said:') ||
-    node.detail.startsWith('Пользователь:') ||
-    node.label.endsWith('...')
-  ) {
-    detailPenalty = 20;
-  }
+  const detailPenalty = isRawDialogueFallbackNode(node) ? 20 : 0;
 
   return typeScore + degreeBonus + recencyBonus - detailPenalty;
 }
@@ -577,13 +582,15 @@ No markdown wrappers, raw JSON only.`;
 
   const newAffinity = Math.max(-100, Math.min(100, currentAffinity + delta));
 
-  // Significance filter: only store important turns into memory
-  if (!isSignificantTurn(userText, botText, delta)) {
+  // Heuristic fallback without AI: avoid storing verbatim "User: ... | Bot: ..." snippets
+  // that cause local models to replay old requests. Record only clear relationship shifts.
+  if (!isSignificantTurn(userText, botText, delta) || Math.abs(delta) < 2) {
     return { newAffinity, newNodes: [] };
   }
 
-  // Check if label already exists
-  const candidateLabel = userText.slice(0, 24) + '...';
+  const candidateLabel = isDialogueRu
+    ? (delta > 0 ? 'Рост доверия' : 'Обострение конфликта')
+    : (delta > 0 ? 'Growing trust' : 'Rising tension');
   const norm = normalizeLabel(candidateLabel);
   const existingInChat = await db.memoryNodes.where('chatId').equals(chatId).sortBy('createdAt');
   const duplicate = existingInChat.find((n) => normalizeLabel(n.label) === norm);
@@ -602,10 +609,10 @@ No markdown wrappers, raw JSON only.`;
       chatId,
       messageId,
       label: candidateLabel,
-      type: delta !== 0 ? 'relationship' : 'event',
+      type: 'relationship',
       detail: isDialogueRu
-        ? `Пользователь: "${userText.slice(0, 80)}" | Персонаж: "${botText.slice(0, 80)}"`
-        : `User said: "${userText.slice(0, 80)}" | Character responded: "${botText.slice(0, 80)}"`,
+        ? (delta > 0 ? 'Персонажи стали ближе в ходе сцены.' : 'Между участниками возникло серьезное напряжение.')
+        : (delta > 0 ? 'Bond and trust deepened during the scene.' : 'Serious friction emerged between them.'),
       createdAt: Date.now(),
     };
     await db.memoryNodes.put(node);

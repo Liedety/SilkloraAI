@@ -196,12 +196,109 @@ export function getComponentAiConfig(
   };
 }
 
+export type RpSamplerPreset = 'roleplay' | 'balanced' | 'creative' | 'precise';
+
+export interface SamplerConfig {
+  temperature: number;
+  topP: number;
+  minP: number;
+  topK: number;
+  repeatPenalty: number;
+  repeatLastN: number;
+  frequencyPenalty: number;
+  presencePenalty: number;
+  maxTokens: number;
+}
+
+export const RP_SAMPLER_PRESETS: Record<RpSamplerPreset, SamplerConfig> = {
+  roleplay: {
+    temperature: 0.78,
+    topP: 0.92,
+    minP: 0.06,
+    topK: 50,
+    repeatPenalty: 1.12,
+    repeatLastN: 512,
+    frequencyPenalty: 0.25,
+    presencePenalty: 0.22,
+    maxTokens: 700,
+  },
+  balanced: {
+    temperature: 0.72,
+    topP: 0.90,
+    minP: 0.06,
+    topK: 45,
+    repeatPenalty: 1.10,
+    repeatLastN: 512,
+    frequencyPenalty: 0.20,
+    presencePenalty: 0.18,
+    maxTokens: 700,
+  },
+  creative: {
+    temperature: 0.90,
+    topP: 0.95,
+    minP: 0.05,
+    topK: 64,
+    repeatPenalty: 1.10,
+    repeatLastN: 512,
+    frequencyPenalty: 0.28,
+    presencePenalty: 0.25,
+    maxTokens: 850,
+  },
+  precise: {
+    temperature: 0.58,
+    topP: 0.88,
+    minP: 0.08,
+    topK: 40,
+    repeatPenalty: 1.14,
+    repeatLastN: 512,
+    frequencyPenalty: 0.26,
+    presencePenalty: 0.16,
+    maxTokens: 550,
+  },
+};
+
+export function resolveSamplerConfig(settings?: AppSettings, isLocal?: boolean): SamplerConfig {
+  const presetKey = settings?.generationPreset;
+  const baseKey: RpSamplerPreset =
+    presetKey && presetKey !== 'custom' && presetKey in RP_SAMPLER_PRESETS
+      ? presetKey
+      : 'roleplay';
+  const base = RP_SAMPLER_PRESETS[baseKey];
+  const isCustom = presetKey === 'custom';
+  return {
+    temperature: isCustom
+      ? (settings?.temperature ?? base.temperature)
+      : presetKey
+        ? base.temperature
+        : isLocal
+          ? base.temperature
+          : 0.82,
+    topP: isCustom ? (settings?.topP ?? base.topP) : base.topP,
+    minP: isCustom ? (settings?.minP ?? base.minP) : base.minP,
+    topK: base.topK,
+    repeatPenalty: isCustom ? (settings?.repeatPenalty ?? base.repeatPenalty) : base.repeatPenalty,
+    repeatLastN: base.repeatLastN,
+    frequencyPenalty: isCustom ? (settings?.frequencyPenalty ?? base.frequencyPenalty) : base.frequencyPenalty,
+    presencePenalty: isCustom ? (settings?.presencePenalty ?? base.presencePenalty) : base.presencePenalty,
+    maxTokens: settings?.maxResponseTokens ?? base.maxTokens,
+  };
+}
+
 export interface StreamOptions {
   apiKeyConfig: ApiKeyConfig;
   model: string;
   messages: ChatCompletionMessage[];
   temperature?: number;
+  topP?: number;
+  minP?: number;
+  topK?: number;
+  repeatPenalty?: number;
+  repeatLastN?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
   maxTokens?: number;
+  /** When true, forward reasoning_content deltas wrapped in <thought>...</thought>; otherwise drop them. */
+  includeReasoning?: boolean;
   signal?: AbortSignal;
   /** Extra stop strings, e.g. "\nPersonaName:" so the model cannot start writing for the user. */
   extraStops?: string[];
@@ -262,13 +359,8 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
       method: 'POST',
       headers,
       signal,
-      body: JSON.stringify({
-        model: model || 'deepseek/deepseek-chat',
-        messages,
-        temperature,
-        max_tokens: maxTokens,
-        stream: true,
-        stop: [
+      body: JSON.stringify((() => {
+        const allStops = [
           ...(options.extraStops || []),
           'USER:',
           'User:',
@@ -287,10 +379,46 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
           '\nИгрок:',
           '\nYou:',
           '\nPlayer:',
-          '<用户>',
-          '<AI>',
-        ],
-      }),
+          '<|turn>user',
+          '<|turn>system',
+          '<turn|>',
+          '<start_of_turn>',
+          '<end_of_turn>',
+          '<|im_end|>',
+          '<|im_start|>',
+          '<|eot_id|>',
+        ];
+        const normalizedUrl = (apiKeyConfig.baseUrl || '').toLowerCase();
+        const isOfficialOpenAI =
+          apiKeyConfig.provider === 'openai' && (!normalizedUrl || normalizedUrl.includes('api.openai.com'));
+        const isCustomOrLocal =
+          apiKeyConfig.provider === 'custom' ||
+          apiKeyConfig.provider === 'openrouter' ||
+          normalizedUrl.includes('localhost') ||
+          normalizedUrl.includes('127.0.0.1') ||
+          normalizedUrl.includes('192.168.') ||
+          normalizedUrl.includes('10.') ||
+          normalizedUrl.includes('openrouter.ai');
+
+        const payload: Record<string, unknown> = {
+          model: model || 'deepseek/deepseek-chat',
+          messages,
+          temperature,
+          max_tokens: maxTokens,
+          stream: true,
+          stop: isOfficialOpenAI ? allStops.slice(0, 4) : allStops,
+        };
+        if (options.topP !== undefined) payload.top_p = options.topP;
+        if (options.frequencyPenalty !== undefined) payload.frequency_penalty = options.frequencyPenalty;
+        if (options.presencePenalty !== undefined) payload.presence_penalty = options.presencePenalty;
+        if (isCustomOrLocal) {
+          if (options.minP !== undefined) payload.min_p = options.minP;
+          if (options.topK !== undefined) payload.top_k = options.topK;
+          if (options.repeatPenalty !== undefined) payload.repeat_penalty = options.repeatPenalty;
+          if (options.repeatLastN !== undefined) payload.repeat_last_n = options.repeatLastN;
+        }
+        return payload;
+      })()),
     });
 
     if (!res.ok) {
@@ -306,6 +434,8 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
     const decoder = new TextDecoder('utf-8');
     let fullText = '';
     let buffer = '';
+    let reasoningOpen = false;
+    const includeReasoning = Boolean(options.includeReasoning);
 
     while (true) {
       const { done, value } = await reader.read();
@@ -324,16 +454,32 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
         if (trimmed.startsWith('data: ')) {
           try {
             const data = JSON.parse(trimmed.slice(6));
-            const delta = data.choices?.[0]?.delta?.content;
+            const choiceDelta = data.choices?.[0]?.delta;
+            const reasoningChunk = choiceDelta?.reasoning_content ?? choiceDelta?.reasoning;
+            if (typeof reasoningChunk === 'string' && reasoningChunk && includeReasoning) {
+              const out = reasoningOpen ? reasoningChunk : `<thought>${reasoningChunk}`;
+              reasoningOpen = true;
+              fullText += out;
+              onToken(out);
+            }
+            const delta = choiceDelta?.content;
             if (delta) {
-              fullText += delta;
-              onToken(delta);
+              const out = reasoningOpen ? `</thought>\n${delta}` : delta;
+              reasoningOpen = false;
+              fullText += out;
+              onToken(out);
             }
           } catch {
             // ignore partial JSON parse error
           }
         }
       }
+    }
+
+    if (reasoningOpen) {
+      const closeTag = '</thought>';
+      fullText += closeTag;
+      onToken(closeTag);
     }
 
     onComplete?.(fullText);
@@ -600,11 +746,42 @@ export async function fetchVisionModels(
   ];
 }
 
+/** Convert Gemma 4 / Qwen 3 / DeepSeek native reasoning markers into uniform <thought> blocks. */
+export function normalizeNativeThoughtTags(str: string): string {
+  if (!str) return '';
+  return str
+    // Strip leading turn tags so <emotion> or <thought> sits cleanly at start.
+    .replace(/^\s*(?:<\|\s*turn\s*>(?:model|assistant|user|system)?|<\s*start_of_turn\s*>(?:model|assistant|user|system)?|<\|\s*im_start\s*\|>(?:model|assistant|user|system)?)\s*/gi, '')
+    // Complete Gemma 4 channel thought: <|channel>thought ... <channel|>
+    .replace(/<\|\s*channel\s*>\s*thought\b\s*([\s\S]*?)<\s*channel\s*\|>/gi, '<thought>$1</thought>\n')
+    // Unclosed Gemma 4 channel thought (streaming or truncated)
+    .replace(/<\|\s*channel\s*>\s*thought\b\s*([\s\S]*)$/gi, '<thought>$1')
+    // <|thought> ... <thought|> and [|thought|] ... [/|thought|]
+    .replace(/<\|\s*thought\s*>\s*([\s\S]*?)<\s*thought\s*\|>/gi, '<thought>$1</thought>\n')
+    .replace(/<\|\s*thought\s*>\s*([\s\S]*)$/gi, '<thought>$1')
+    .replace(/\[\|\s*thought\s*\|\]\s*([\s\S]*?)\[\/\|\s*thought\s*\|\]/gi, '<thought>$1</thought>\n')
+    // DeepSeek / Qwen <think> ... </think>
+    .replace(/<think>([\s\S]*?)<\/think>/gi, '<thought>$1</thought>\n')
+    .replace(/<think>([\s\S]*)$/gi, '<thought>$1');
+}
+
 export function cleanArtifacts(str: string, characterEmotions?: CharacterEmotion[]): string {
   if (!str) return '';
   let out = str
     // Strip tokenizer tokens like <|begin_of_sentence|>, < | begin__of__sentence | >, <|im_end|>, etc.
     .replace(/<\s*\|\s*[^>]+\s*\|\s*>/gi, '')
+    // Strip Gemma 4, ChatML, Llama 3, and Mistral half-piped or named turn/control markers.
+    .replace(/<\|\s*(?:turn|channel|thought|im_start|im_end|eot_id|endoftext|start_header_id|end_header_id|bos|eos)\s*>?(?:model|assistant|user|system|thought)?/gi, '')
+    .replace(/<\s*(?:turn|channel|thought|im_end|eot_id|endoftext)\s*\|>/gi, '')
+    .replace(/\[\|\s*thought\s*\|\]|\[\s*\/\|\s*thought\s*\|\]/gi, '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<\/?think>/gi, '')
+    .replace(/<\s*(?:start_of_turn|end_of_turn)\s*>(?:user|model|system)?/gi, '')
+    .replace(/<\/?s>/gi, '')
+    .replace(/\uFFFD|[\u200B-\u200D\uFEFF]/g, '')
+    // Strip echoed internal scene notes, prompt headers, or turn directives if the model repeats them
+    .replace(/\n*\[\s*(?:Заметка сцены|Scene note|Контекст хода|Указание к ответу|УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ|USER TURN DIRECTIVE)[\s\S]*$/gi, '')
+    .replace(/\n*###\s*(?:ТВОЯ РОЛЬ|ФУНДАМЕНТАЛЬНЫЕ|СТИЛЬ|КОНТРОЛЬ|ОБЯЗАТЕЛЬНЫЙ|CRITICAL|YOUR CURRENT ROLE|CORE PRINCIPLES)[\s\S]*$/gi, '')
     // Strip simulated turns starting with <user>, User:, Вы:, Игрок:, Пользователь:
     .replace(/\n\s*<user>[\s\S]*$/gi, '')
     .replace(/\n\s*User:[\s\S]*$/gi, '')
@@ -833,11 +1010,12 @@ export function extractEmotionAndCleanResponse(
     return { text: '' };
   }
 
-  let finalEmotion = extractEmotionFromText(completed, characterEmotions, speakerName);
+  const normalized = normalizeNativeThoughtTags(completed);
+  let finalEmotion = extractEmotionFromText(normalized, characterEmotions, speakerName);
 
   // Extract thoughts: <thought>...</thought>
   let finalThought = '';
-  let visibleText = stripEmotionTags(completed, characterEmotions, { stripLeadingUnknownAngleTag: true });
+  let visibleText = stripEmotionTags(normalized, characterEmotions, { stripLeadingUnknownAngleTag: true });
 
   const thoughtMatch = visibleText.match(/<thought>([\s\S]*?)<\/thought>/i);
   if (thoughtMatch) {
@@ -920,10 +1098,11 @@ export function parseStreamingBotResponse(
   extraStripNames: string[] = []
 ): ParsedBotResponse {
   if (!raw) return { text: '' };
-  const emotion = extractEmotionFromText(raw, characterEmotions, speakerName);
+  const normalized = normalizeNativeThoughtTags(raw);
+  const emotion = extractEmotionFromText(normalized, characterEmotions, speakerName);
   const stripNames = [speakerName || '', ...extraStripNames].filter(Boolean);
 
-  let work = stripLeadingSpeakerName(raw, stripNames);
+  let work = stripLeadingSpeakerName(normalized, stripNames);
   work = stripEmotionTags(work, characterEmotions, { stripLeadingUnknownAngleTag: true });
 
   let thought = '';
@@ -938,8 +1117,8 @@ export function parseStreamingBotResponse(
 
   work = stripEmotionTags(work, characterEmotions, { stripLeadingUnknownAngleTag: true });
 
-  // Prevent flickering partial "<emotion", "<smirk", "<" at start of stream before ">" arrives
-  if (/^\s*<[^>\n]{0,55}$/.test(work)) {
+  // Prevent flickering partial "<emotion", "<|channel", "<|turn", "<think", "<" before complete delimiter arrives
+  if (/^\s*<[^>\n]{0,55}$/.test(work) || /^\s*<\|\s*(?:channel|turn|thought)[^>]*$/i.test(work)) {
     return { text: '', thought: thought || undefined, emotion };
   }
 
@@ -961,10 +1140,10 @@ export async function generatePersonaWithAI(
   photoRef?: string,
   contextLore?: string,
   language: Language = 'en'
-): Promise<{ name: string; description: string; greeting: string }> {
+): Promise<{ name: string; description: string; greeting: string; scenario?: string; exampleDialogue?: string }> {
   const isRu = language === 'ru';
   const languageInstruction = isRu
-    ? `ВАЖНО: Язык генерации — РУССКИЙ. Все поля ("name", "description", "greeting") ОБЯЗАТЕЛЬНО должны быть написаны на чистом, выразительном русском языке. Никаких английских слов.`
+    ? `ВАЖНО: Язык генерации — РУССКИЙ. Все поля ("name", "description", "scenario", "exampleDialogue", "greeting") ОБЯЗАТЕЛЬНО должны быть написаны на чистом, выразительном русском языке. Никаких английских слов.`
     : `Language: English.`;
 
   const systemPrompt = `You are an elite creative director for deep, unrestricted roleplay characters.
@@ -975,6 +1154,8 @@ Return STRICT JSON only matching this exact format:
 {
   "name": "Character Name",
   "description": "Exhaustive description covering: personality traits, dark secrets, speech patterns, appearance, background lore, vulnerabilities, habits.",
+  "scenario": "Starting situation, current location, atmosphere, and relationship premise between {{char}} and {{user}}.",
+  "exampleDialogue": "<START>\\n{{user}}: Sample prompt\\n{{char}}: *Concise physical action.* Characteristic reply capturing tone and speech style.",
   "greeting": "An atmospheric opening message establishing the first scene, with actions enclosed in *asterisks* and spoken dialogue in plain text."
 }
 CRITICAL RULES:
@@ -1026,6 +1207,8 @@ CRITICAL RULES:
         name: String(parsed.name).trim(),
         description: cleanArtifacts(String(parsed.description)),
         greeting: cleanArtifacts(String(parsed.greeting || '')),
+        scenario: parsed.scenario ? cleanArtifacts(String(parsed.scenario)) : undefined,
+        exampleDialogue: parsed.exampleDialogue ? cleanArtifacts(String(parsed.exampleDialogue)) : undefined,
       };
     }
   } catch {
@@ -1273,8 +1456,8 @@ export function buildGhostwriterMessages(params: {
 СТРОГИЕ ПРАВИЛА:
 1. Пиши ИСКЛЮЧИТЕЛЬНО от лица персонажа игрока (${speakerLabel}): действия и мимику в *звездочках*, прямую речь обычным текстом без кавычек-ёлочек и лишних пояснений.
 2. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать реплики, действия, реакции, чувства или мысли за ${othersText || 'других персонажей сцены'}. Остановись сразу после хода ${speakerLabel}.
-3. НИКОГДА не начинай ответ с имени или двоеточия${forbiddenNames} и не используй теги <emotion>, <> или <thought>.
-4. Выведи ТОЛЬКО саму реакцию ${speakerLabel}, готовый текст для отправки в чат (1–2 абзаца).`;
+3. НИКОГДА не начинай ответ с имени или двоеточия${forbiddenNames} и не добавляй никаких служебных или XML-тегов.
+4. Выведи ТОЛЬКО саму реакцию ${speakerLabel}, готовый текст для отправки в чат (1–2 абзаца), без повторения предыдущих фраз.`;
 
     const userMsg = `Недавний диалог в сцене:\n${normalizedHistory}\n\nЗадача: напиши ТОЛЬКО следующий ход от лица «${speakerLabel}».${uniqueOthers.length > 0 ? ` Не описывай ходы и слова ${othersText}.` : ''}\nПожелание: ${effectivePrompt}\nНачни сразу с *действия* или фразы без имени в начале.`;
 
@@ -1293,8 +1476,8 @@ export function buildGhostwriterMessages(params: {
 STRICT RULES:
 1. Write STRICTLY from ${speakerLabel}'s perspective: physical actions inside *asterisks*, spoken dialogue as plain text without outer quotation marks.
 2. NEVER write dialogue, actions, thoughts, or reactions on behalf of ${othersText || 'other characters'}. Stop immediately after ${speakerLabel}'s turn.
-3. NEVER start the response with a character name or colon ("${speakerLabel}:", "You:"${uniqueOthers.length > 0 ? `, "${uniqueOthers[0]}:"` : ''}) and NEVER output <emotion>, <>, or <thought> tags.
-4. Output ONLY ${speakerLabel}'s ready-to-send message (1–2 concise paragraphs) with no meta explanation.`;
+3. NEVER start the response with a character name or colon ("${speakerLabel}:", "You:"${uniqueOthers.length > 0 ? `, "${uniqueOthers[0]}:"` : ''}) and NEVER output any XML, emotion, or thought tags.
+4. Output ONLY ${speakerLabel}'s ready-to-send message (1–2 concise paragraphs) without repeating earlier turns or adding meta notes.`;
 
   const userMsg = `Recent Scene History:\n${normalizedHistory}\n\nTask: Write ONLY ${speakerLabel}'s next turn.${uniqueOthers.length > 0 ? ` Do NOT narrate or speak for ${othersText}.` : ''}\nUser's Intent: ${effectivePrompt}\nBegin directly with *action* or dialogue with no leading name prefix.`;
 
@@ -1307,7 +1490,7 @@ export function cleanGhostwriterOutput(
   otherSpeakers: string[] = []
 ): string {
   if (!raw) return '';
-  let out = raw
+  let out = normalizeNativeThoughtTags(raw)
     .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
     .replace(/^\s*<thought>[\s\S]*$/i, '');
 
@@ -1350,6 +1533,7 @@ export async function suggestUserReply(
   });
 
   const extraStops = speakerStopStrings([speakerLabel, ...otherSpeakers, 'Вы', 'Игрок', 'You', 'Player']);
+  const gwSamplers = RP_SAMPLER_PRESETS.roleplay;
 
   let out = '';
   try {
@@ -1361,7 +1545,14 @@ export async function suggestUserReply(
         { role: 'user', content: userMsg },
       ],
       extraStops,
-      temperature: 0.85,
+      temperature: 0.82,
+      topP: gwSamplers.topP,
+      minP: gwSamplers.minP,
+      topK: gwSamplers.topK,
+      repeatPenalty: gwSamplers.repeatPenalty,
+      repeatLastN: gwSamplers.repeatLastN,
+      frequencyPenalty: gwSamplers.frequencyPenalty,
+      presencePenalty: gwSamplers.presencePenalty,
       signal: options.signal,
       onToken: (t) => {
         out += t;
@@ -1511,6 +1702,32 @@ export function speakerStopStrings(names: string[]): string[] {
 }
 
 /** Removes a leading "Name:" or "[Name]:" (even wrapped in quotes/bold) that the model copied from history. */
+/**
+ * If a small local model literally begins its reply by parroting the previous user turn
+ * (or first full line/sentence of it), strip that echoed duplicate while keeping the real reply.
+ */
+export function stripEchoedUserPrefix(reply: string, lastUserText?: string): string {
+  const trimmedReply = (reply || '').trim();
+  const trimmedUser = (lastUserText || '').trim();
+  if (!trimmedReply || trimmedUser.length < 12) return trimmedReply;
+
+  if (trimmedReply.toLowerCase().startsWith(trimmedUser.toLowerCase())) {
+    const remainder = trimmedReply.slice(trimmedUser.length).replace(/^[\s\-–—:]+/, '').trim();
+    if (remainder.length >= 6) return remainder;
+  }
+
+  const firstUserLine = trimmedUser.split(/\r?\n/)[0].trim();
+  if (
+    firstUserLine.length >= 16 &&
+    trimmedReply.toLowerCase().startsWith(firstUserLine.toLowerCase())
+  ) {
+    const remainder = trimmedReply.slice(firstUserLine.length).replace(/^[\s\-–—:]+/, '').trim();
+    if (remainder.length >= 6) return remainder;
+  }
+
+  return trimmedReply;
+}
+
 export function stripLeadingSpeakerName(text: string, names: string[]): string {
   let out = text;
   for (let pass = 0; pass < 2; pass++) {

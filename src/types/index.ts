@@ -23,6 +23,8 @@ export interface Character {
   id: string;
   name: string;
   description: string;
+  scenario?: string;
+  exampleDialogue?: string;
   avatar: string;
   avatarOffset?: ImageCropOffset;
   chatBackground?: string;
@@ -168,6 +170,8 @@ export type AiComponent =
 
 export type AiBackend = 'cloud' | 'local';
 
+export type GenerationPreset = 'roleplay' | 'balanced' | 'creative' | 'precise' | 'custom';
+
 export interface AppSettings {
   id: string; // singleton 'default'
   language: Language;
@@ -186,4 +190,12 @@ export interface AppSettings {
   localHubUrl?: string;
   /** Marks one-time default migrations that were already applied to this install. */
   themeMigration?: string;
+  generationPreset?: GenerationPreset;
+  temperature?: number;
+  topP?: number;
+  minP?: number;
+  repeatPenalty?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+  maxResponseTokens?: number;
 }
