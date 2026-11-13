@@ -121,13 +121,13 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
-      <div className="relative w-full max-w-sm overflow-hidden bg-silk-900 border border-silk-800 rounded-3xl shadow-2xl flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 animate-fade-in">
+      <div className="relative w-full max-w-sm overflow-hidden bg-silk-900 border border-silk-700 rounded-2xl flex flex-col">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3.5 border-b border-silk-800/80 bg-silk-850/60">
+        <div className="flex items-center justify-between px-4 py-3.5 border-b border-silk-800 bg-silk-850">
           <div className="flex items-center gap-2">
-            <Scan className="w-4 h-4 text-violet-400" />
-            <h3 className="text-xs font-bold text-white tracking-wide uppercase">{title}</h3>
+            <Scan className="w-4 h-4 text-slate-300" />
+            <h3 className="text-xs font-bold text-slate-100 tracking-wide uppercase">{title}</h3>
           </div>
           <button
             type="button"
@@ -157,15 +157,15 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
 
               {/* Scan Overlay Frame */}
               <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                <div className="relative w-48 h-48 border-2 border-violet-500/70 rounded-2xl shadow-[0_0_20px_rgba(139,92,246,0.3)]">
+                <div className="relative w-48 h-48 border border-slate-500/60 rounded-xl">
                   {/* Corner Markers */}
-                  <div className="absolute -top-1 -left-1 w-4 h-4 border-t-2 border-l-2 border-violet-400 rounded-tl" />
-                  <div className="absolute -top-1 -right-1 w-4 h-4 border-t-2 border-r-2 border-violet-400 rounded-tr" />
-                  <div className="absolute -bottom-1 -left-1 w-4 h-4 border-b-2 border-l-2 border-violet-400 rounded-bl" />
-                  <div className="absolute -bottom-1 -right-1 w-4 h-4 border-b-2 border-r-2 border-violet-400 rounded-br" />
+                  <div className="absolute -top-0.5 -left-0.5 w-4 h-4 border-t-2 border-l-2 border-slate-200 rounded-tl" />
+                  <div className="absolute -top-0.5 -right-0.5 w-4 h-4 border-t-2 border-r-2 border-slate-200 rounded-tr" />
+                  <div className="absolute -bottom-0.5 -left-0.5 w-4 h-4 border-b-2 border-l-2 border-slate-200 rounded-bl" />
+                  <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 border-b-2 border-r-2 border-slate-200 rounded-br" />
 
-                  {/* Horizontal Scan Laser Line */}
-                  <div className="absolute inset-x-2 top-1/2 -translate-y-1/2 h-0.5 bg-gradient-to-r from-transparent via-violet-400 to-transparent animate-pulse" />
+                  {/* Horizontal Guide Hairline */}
+                  <div className="absolute inset-x-4 top-1/2 -translate-y-1/2 h-px bg-slate-300/60" />
                 </div>
               </div>
             </>

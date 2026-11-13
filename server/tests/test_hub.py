@@ -286,6 +286,20 @@ class SanitizeTests(unittest.TestCase):
         tc, _ = s.finish()
         self.assertEqual(c1 + c2 + tc, "Hello!\n")
 
+    def test_strips_simulated_multi_turn_delimiters_and_empty_brackets(self):
+        raw = "<> *She laughs softly.* That is not true.\n>fuser\nHey wait!\n[Собеседник: Алекс]\n[Реплика собеседника:] Stop."
+        content, _ = sanitize.extract_reasoning_and_content(raw)
+        self.assertEqual(content, "*She laughs softly.* That is not true.")
+
+        s = sanitize.StreamSanitizer()
+        out = []
+        for ch in ("*Waves.*", "\n[Собесед", "ник: Max]\nHello"):
+            c, _ = s.feed(ch)
+            out.append(c)
+        tail_c, _ = s.finish()
+        out.append(tail_c)
+        self.assertEqual("".join(out).strip(), "*Waves.*")
+
 
 if __name__ == "__main__":
     unittest.main()

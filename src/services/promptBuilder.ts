@@ -17,6 +17,27 @@ export function substitutePromptMacros(text: string, charName: string, userName:
     .replace(/\{\{user\}\}/gi, userName);
 }
 
+/**
+ * Infers grammatical gender from a character/persona description when unambiguous,
+ * so small local models anchor first- and second-person verb/pronoun inflections accurately.
+ */
+export function inferGrammaticalGender(description?: string): 'female' | 'male' | null {
+  const s = (description || '').trim();
+  if (!s) return null;
+
+  const femaleCues = s.match(
+    /(?:^|[^\p{L}])(?:она|её|ей|женский\s+пол|она\/её|she\/her|she|her|hers|female|woman|girl|lady|девушка|женщина|героиня|леди|королева|принцесса|ведьма|волшебница|наемница|воительница|фехтовальщица|брюнетка|блондинка|рыжеволосая|рыжая|мать|сестра|дочь|подруга|жена|студентка|невеста|пилотесса)(?=$|[^\p{L}])/giu
+  )?.length || 0;
+
+  const maleCues = s.match(
+    /(?:^|[^\p{L}])(?:он|его|ему|мужской\s+пол|он\/его|he\/him|he|him|his|male|man|boy|gentleman|мужчина|парень|юноша|герой|король|принц|воин|наемник|рыцарь|отец|брат|сын|друг|муж|студент|брюнет|блондин|пилот|жених)(?=$|[^\p{L}])/giu
+  )?.length || 0;
+
+  if (femaleCues > 0 && femaleCues > maleCues) return 'female';
+  if (maleCues > 0 && maleCues > femaleCues) return 'male';
+  return null;
+}
+
 export interface PromptBuildParams {
   character?: Character;
   group?: Group;
@@ -185,38 +206,38 @@ function adaptStyleInstructionForLengthOverride(instruction: string, language: '
 export const DEFAULT_CORE_SYSTEM_PROMPT = `You are a skilled roleplay actor portraying your assigned character in an immersive, interactive story.
 
 ### CORE PRINCIPLES:
-1. Stay in Character: NEVER break character, acknowledge being an AI, apologize, or emit meta notes or turn tags ("User:", "Bot:", "Assistant:", "<|turn>", "<channel|>").
+1. Stay in Character & Clean Output: NEVER break character, acknowledge being an AI, apologize, generate character stat sheets, or place speaker-name labels or brackets before your lines. Begin directly with roleplay *action* or spoken dialogue.
 2. Complete Creative Freedom: Depict genuine emotion, conflict, romance, darkness, grit, or intimacy faithfully per the scene without censorship or preaching.
-3. Strict Character Sovereignty:
-   - Write dialogue, actions, thoughts, and perceptions ONLY for your assigned character ({{char}}).
-   - NEVER act, speak, feel, think, or decide for {{user}} or other characters (no 2nd-person "you nod/feel", no 3rd-person "*{{user}} grins*"). Stop right after {{char}}'s turn.
+3. Strict Character & Pronoun Sovereignty:
+   - Write dialogue, actions, thoughts, and perceptions ONLY for your assigned character ({{char}}), strictly matching {{char}}'s gender, pronouns, traits, and lore from their description.
+   - NEVER act, speak, feel, think, or decide for {{user}} or other characters (no 2nd-person "you nod/feel", no 3rd-person "*{{user}} grins*"), and never swap pronouns with {{user}}. Stop right after {{char}}'s turn.
 4. Scene Continuity & Anti-Repetition:
-   - Respond directly to {{user}}'s latest action/line; NEVER replay earlier requests or repeat your own past phrases and gestures.
+   - Respond directly to {{user}}'s latest action/line; NEVER echo {{user}}'s message back, mimic structural headings, or repeat your own past phrases and gestures.
    - Stay inside the current unfinished beat: do NOT jump ahead to future outcomes before an ongoing action resolves, and track who holds objects and where everyone stands.
 5. Formatting & Language (DYNAMIC LANGUAGE MIRRORING & STRICT LANGUAGE PURITY):
    - Wrap physical actions, expressions, and scene cues in *asterisks*; write spoken speech in plain text.
    - Always mirror the conversation language exclusively with natural native fluency; NEVER mix foreign words or parenthetical translations.
 6. PROPORTIONAL LENGTH & CONCISE PACING:
    - Default to strictly 1 to 3 paragraphs max unless explicitly directed otherwise by user chat rules or turn wishes (which always take top priority).
-   - Complete every sentence cleanly without filler or retelling what {{user}} just did.
+   - Complete every sentence cleanly and stop once {{char}}'s turn finishes — never simulate future turns.
 `;
 
 export const DEFAULT_CORE_SYSTEM_PROMPT_RU = `Ты — актер и автор ролевой игры, воплощающий своего персонажа в живой интерактивной истории.
 
 ФУНДАМЕНТАЛЬНЫЕ ПРАВИЛА РОЛЕВОЙ ИГРЫ:
-1. Всегда в роли: никогда не выходи из образа, не извиняйся, не пиши ремарок ИИ и служебных тегов ("User:", "Пользователь:", "Вы:", "Бот:", "<|turn>").
+1. Всегда в роли и без технического мусора: никогда не выходи из образа, не извиняйся, не составляй анкеты с характеристиками и не пиши имя персонажа или технические пометки перед репликой. Сразу начинай ответ с действия в *звездочках* или живой речи.
 2. Свобода повествования: естественно описывай любые эмоции, драму, конфликты, романтику, грубость или интимность по контексту сцены без цензуры и морализаторства.
-3. СТРОГИЙ СУВЕРЕНИТЕТ ПЕРСОНАЖА:
-   - Описывай слова, действия, мысли и чувства ТОЛЬКО своего персонажа ({{char}}).
-   - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО говорить, действовать, мыслить или принимать решения за пользователя ({{user}}) — ни во 2-м лице («ты отходишь», «ты чувствуешь»), ни в 3-м («*{{user}} ухмыляется*»). Сразу останавливай ход после реплики и действия {{char}}.
+3. СТРОГИЙ СУВЕРЕНИТЕТ ПЕРСОНАЖА И РОДА/МЕСТОИМЕНИЙ:
+   - Описывай слова, действия, мысли и чувства ТОЛЬКО своего персонажа ({{char}}), строго соблюдая его пол, род глаголов, местоимения и факты из описания.
+   - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО говорить, действовать, мыслить или принимать решения за пользователя ({{user}}) и путать его пол — не пиши за {{user}} ни во 2-м лице («ты отходишь», «ты чувствуешь»), ни в 3-м («*{{user}} ухмыляется*»). Сразу остановись после одной реплики и действия {{char}}.
 4. Непрерывность сцены и запрет повторов:
-   - Отвечай именно на последнее сообщение {{user}}; НЕ повторяй прошлые ответы и не перефразируй свои предыдущие жесты и фразы.
+   - Отвечай именно на последнее сообщение {{user}}; НЕ пересказывай и НЕ копируй действия собеседника, НЕ выводи служебные заголовки и НЕ повторяй прошлые фразы.
    - Оставайся в текущем незавершенном моменте: не забегай вперед и не считай действие завершенным, пока партнер его не совершил; помни, где кто стоит и у кого в руках предметы.
 5. Оформление и чистота языка:
    - Действия, жесты и детали обстановки пиши в *звездочках*, прямую речь — обычным текстом без лишних пояснений и английских вставок.
 6. Завершенность предложений и объем:
    - Стандартный объем: 1–3 емких абзаца (пожелания пользователя к объему в правилах чата или в конце диалога имеют абсолютный приоритет).
-   - Каждое предложение и мысль ДОЛЖНЫ быть логически закончены.
+   - Написав ход своего персонажа, НЕМЕДЛЕННО завершай ответ и НЕ пиши продолжение диалога за других участников.
 `;
 
 export function buildSystemPrompt(params: PromptBuildParams): string {
@@ -297,11 +318,18 @@ ${emoTag}<thought>He is pushing too hard. If I give in now, he'll think I'm weak
     const charDesc = resolvePlaceholders(currentSpeaker.description || '');
     const charScenario = resolvePlaceholders(currentSpeaker.scenario?.trim() || '');
     const charExamples = resolvePlaceholders(currentSpeaker.exampleDialogue?.trim() || '');
+    const charGender = inferGrammaticalGender(charDesc);
 
     if (ru) {
       prompt += `\n### ТВОЯ РОЛЬ: ${currentSpeaker.name.toUpperCase()}\n`;
-      prompt += `Имя: ${currentSpeaker.name}\n`;
-      prompt += `Характер, лор и внешность:\n${charDesc}\n`;
+      if (charGender === 'female') {
+        prompt += `Ты отыгрываешь персонажа по имени ${currentSpeaker.name} — это женщина, поэтому пиши о себе в женском роде.\n`;
+      } else if (charGender === 'male') {
+        prompt += `Ты отыгрываешь персонажа по имени ${currentSpeaker.name} — это мужчина, поэтому пиши о себе в мужском роде.\n`;
+      } else {
+        prompt += `Ты отыгрываешь персонажа по имени ${currentSpeaker.name}.\n`;
+      }
+      prompt += `Характер, внешность и история ${currentSpeaker.name}:\n${charDesc}\n`;
 
       if (charScenario) {
         prompt += `\nИсходная ситуация и сценарий:\n${charScenario}\n`;
@@ -315,7 +343,13 @@ ${emoTag}<thought>He is pushing too hard. If I give in now, he'll think I'm weak
       }
     } else {
       prompt += `\n### YOUR CURRENT ROLE: ${currentSpeaker.name.toUpperCase()}\n`;
-      prompt += `Name: ${currentSpeaker.name}\n`;
+      if (charGender === 'female') {
+        prompt += `You portray ${currentSpeaker.name}, a woman (use she/her pronouns when referring to yourself in 3rd person).\n`;
+      } else if (charGender === 'male') {
+        prompt += `You portray ${currentSpeaker.name}, a man (use he/him pronouns when referring to yourself in 3rd person).\n`;
+      } else {
+        prompt += `You portray ${currentSpeaker.name}.\n`;
+      }
       prompt += `Personality, Lore & Appearance:\n${charDesc}\n`;
 
       if (charScenario) {
@@ -389,14 +423,27 @@ ${emoTag}<thought>He is pushing too hard. If I give in now, he'll think I'm weak
   // User Persona
   if (userPersona) {
     const personaDesc = resolvePlaceholders(userPersona.description || '');
+    const userGender = inferGrammaticalGender(personaDesc);
     if (ru) {
-      prompt += `\n### СОБЕСЕДНИК (ПЕРСОНА ИГРОКА):\n`;
-      prompt += `Собеседника зовут **${userPersona.name}**.\n`;
-      prompt += `Описание персоны ${userPersona.name}:\n${personaDesc}\n`;
+      prompt += `\n### УЧАСТНИК ДИАЛОГА (ТВОЙ СОБЕСЕДНИК):\n`;
+      if (userGender === 'female') {
+        prompt += `Твоего собеседника зовут **${userPersona.name}** — она женщина, обращайся к ней в женском роде.\n`;
+      } else if (userGender === 'male') {
+        prompt += `Твоего собеседника зовут **${userPersona.name}** — он мужчина, обращайся к нему в мужском роде.\n`;
+      } else {
+        prompt += `Твоего собеседника зовут **${userPersona.name}**.\n`;
+      }
+      prompt += `Описание ${userPersona.name}:\n${personaDesc}\n`;
       prompt += `Обращайся к собеседнику как ${userPersona.name} (склоняя имя естественно, если нужно). ЗАПРЕЩЕНО описывать действия, слова, чувства или мысли ${userPersona.name}.\n`;
     } else {
       prompt += `\n### USER'S IDENTITY / PERSONA:\n`;
-      prompt += `The user is roleplaying as **${userPersona.name}**.\n`;
+      if (userGender === 'female') {
+        prompt += `The user is roleplaying as **${userPersona.name}**, a woman (she/her).\n`;
+      } else if (userGender === 'male') {
+        prompt += `The user is roleplaying as **${userPersona.name}**, a man (he/him).\n`;
+      } else {
+        prompt += `The user is roleplaying as **${userPersona.name}**.\n`;
+      }
       prompt += `User Persona Details:\n${personaDesc}\n`;
       prompt += `Address the user as ${userPersona.name}. NEVER write actions, feelings, thoughts, or replies for ${userPersona.name}.\n`;
     }
@@ -525,7 +572,7 @@ Instruction: ${anchorStyleInstruction}
     prompt += `\n### ${ru ? 'УКАЗАНИЕ ПО ОБЪЕМУ НА ЭТОТ ХОД' : 'THIS-TURN LENGTH OVERRIDE'}:\n${turnLengthOverride}\n`;
   }
 
-  // Single positive Emotion section at prompt end (ZERO negative Pink-Elephant "<>" examples!)
+  // Single positive Emotion section at prompt end (ZERO negative Pink-Elephant examples or "[]" wrappers!)
   if (currentSpeaker?.emotions && currentSpeaker.emotions.length > 0) {
     const emotionNames = currentSpeaker.emotions.map((e) => e.name).join(', ');
     const exampleEmo =
@@ -533,11 +580,11 @@ Instruction: ${anchorStyleInstruction}
       currentSpeaker.emotions[0].name;
     if (ru) {
       prompt += `\n### ЭМОЦИЯ ПЕРСОНАЖА:
-У ${speakerName} есть спрайты эмоций: [${emotionNames}].
-В самом начале ответа поставь один тег формата <emotion>название</emotion> (например: <emotion>${exampleEmo}</emotion>). Выбирай живую эмоцию по смыслу сцены, избегая "neutral", если персонаж улыбается, злится, смущен, шутит или напряжен.\n`;
+Доступные эмоции ${speakerName}: ${emotionNames}.
+В самом начале ответа поставь ОДИН тег <emotion>название</emotion> (например: <emotion>${exampleEmo}</emotion>) и не повторяй его внутри текста. Выбирай живую эмоцию по смыслу сцены, избегая "neutral", если персонаж улыбается, злится, смущен, шутит или напряжен.\n`;
     } else {
       prompt += `\n### EMOTION SPRITE TAG:
-Available emotion sprites for ${speakerName}: [${emotionNames}].
+Available emotion sprites for ${speakerName}: ${emotionNames}.
 Start your reply once with an exact tag formatted as <emotion>emotion_name</emotion>, for example: <emotion>${exampleEmo}</emotion>. Match the real mood of the moment and avoid defaulting to "neutral" when another emotion fits better.\n`;
     }
   }
@@ -566,18 +613,16 @@ export function buildTurnGuidanceBlock(guidance: string, language: 'en' | 'ru' =
 
   if (ru) {
     return [
-      '[УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ НА ЭТОТ ХОД (АБСОЛЮТНЫЙ ПРИОРИТЕТ — ОБЯЗАТЕЛЬНО ВЫПОЛНИ, ПЕРЕКРЫВАЕТ СТИЛЬ И БАЗОВЫЙ ОБЪЕМ):',
+      'УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ НА ЭТОТ ХОД (АБСОЛЮТНЫЙ ПРИОРИТЕТ — ОБЯЗАТЕЛЬНО ВЫПОЛНИ, ПЕРЕКРЫВАЕТ СТИЛЬ И БАЗОВЫЙ ОБЪЕМ):',
       trimmed,
       ...(lengthDirective ? [lengthDirective] : []),
-      ']',
     ].join('\n');
   }
 
   return [
-    '[USER TURN DIRECTIVE (HIGHEST PRIORITY — STRICTLY OBEY, OVERRIDES DEFAULT STYLE & LENGTH):',
+    'USER TURN DIRECTIVE (HIGHEST PRIORITY — STRICTLY OBEY, OVERRIDES DEFAULT STYLE & LENGTH):',
     trimmed,
     ...(lengthDirective ? [lengthDirective] : []),
-    ']',
   ].join('\n');
 }
 
@@ -591,15 +636,34 @@ export function buildTurnGuidanceBlock(guidance: string, language: 'en' | 'ru' =
 export function buildSceneNote(params: {
   speakerName: string;
   userName: string;
+  speakerGender?: 'female' | 'male' | null;
+  userGender?: 'female' | 'male' | null;
   language?: 'en' | 'ru';
   relationshipScore?: number;
   memoryNodes?: MemoryNode[];
   emotionNames?: string[];
   guidance?: string;
 }): string {
-  const { speakerName, userName, language = 'en', relationshipScore = 0, memoryNodes = [], emotionNames, guidance } = params;
+  const { speakerName, userName, speakerGender, userGender, language = 'en', relationshipScore = 0, memoryNodes = [], emotionNames, guidance } = params;
   const ru = language === 'ru';
   const lines: string[] = [];
+  if (speakerGender || userGender) {
+    const sg = speakerGender === 'female'
+      ? (ru ? ' пишет о себе в женском роде' : ' uses she/her')
+      : speakerGender === 'male'
+        ? (ru ? ' пишет о себе в мужском роде' : ' uses he/him')
+        : '';
+    const ug = userGender === 'female'
+      ? (ru ? 'в женском роде' : 'with she/her pronouns')
+      : userGender === 'male'
+        ? (ru ? 'в мужском роде' : 'with he/him pronouns')
+        : (ru ? 'естественно' : 'naturally');
+    lines.push(
+      ru
+        ? `Отвечает ${speakerName}${sg}; к ${userName} обращайся ${ug}.`
+        : `${speakerName}${sg} speaks now; address ${userName} ${ug}.`
+    );
+  }
   lines.push(
     ru
       ? `${speakerName} и ${userName}: отношения ${relationshipScore} из 100 (${affinityLabel(relationshipScore, language)})`
@@ -614,8 +678,8 @@ export function buildSceneNote(params: {
     });
     lines.push(ru ? 'Известные факты сцены:' : 'Established facts:');
     for (const node of sorted.slice(0, 6)) {
-      const pinTag = node.isPinned ? (ru ? ' [ВАЖНО]' : ' [CORE]') : '';
-      lines.push(`- ${node.label}: ${node.detail}${pinTag}`);
+      const pinPrefix = node.isPinned ? (ru ? 'Важно — ' : 'Core — ') : '';
+      lines.push(`- ${pinPrefix}${node.label}: ${node.detail}`);
     }
   }
   if (emotionNames && emotionNames.length > 0) {
@@ -623,7 +687,7 @@ export function buildSceneNote(params: {
     const firstValid = emotionNames.find((e) => e.toLowerCase() !== 'neutral') || emotionNames[0];
     lines.push(
       ru
-        ? `Формат эмоции ${speakerName}: <emotion>название</emotion> (например <emotion>${firstValid}</emotion>) из: ${list}.`
+        ? `Формат эмоции ${speakerName}: один раз <emotion>название</emotion> (например <emotion>${firstValid}</emotion>) из: ${list}.`
         : `Emotion tag for ${speakerName}: <emotion>emotion_name</emotion> (e.g. <emotion>${firstValid}</emotion>) from: ${list}.`
     );
   }

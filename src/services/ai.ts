@@ -220,7 +220,7 @@ export const RP_SAMPLER_PRESETS: Record<RpSamplerPreset, SamplerConfig> = {
     repeatLastN: 512,
     frequencyPenalty: 0.25,
     presencePenalty: 0.22,
-    maxTokens: 700,
+    maxTokens: 480,
   },
   balanced: {
     temperature: 0.72,
@@ -231,7 +231,7 @@ export const RP_SAMPLER_PRESETS: Record<RpSamplerPreset, SamplerConfig> = {
     repeatLastN: 512,
     frequencyPenalty: 0.20,
     presencePenalty: 0.18,
-    maxTokens: 700,
+    maxTokens: 480,
   },
   creative: {
     temperature: 0.90,
@@ -242,7 +242,7 @@ export const RP_SAMPLER_PRESETS: Record<RpSamplerPreset, SamplerConfig> = {
     repeatLastN: 512,
     frequencyPenalty: 0.28,
     presencePenalty: 0.25,
-    maxTokens: 850,
+    maxTokens: 680,
   },
   precise: {
     temperature: 0.58,
@@ -253,7 +253,7 @@ export const RP_SAMPLER_PRESETS: Record<RpSamplerPreset, SamplerConfig> = {
     repeatLastN: 512,
     frequencyPenalty: 0.26,
     presencePenalty: 0.16,
-    maxTokens: 550,
+    maxTokens: 400,
   },
 };
 
@@ -325,8 +325,55 @@ function getProviderBaseUrl(config: ApiKeyConfig): string {
   }
 }
 
+/**
+ * Detects when a local model forgets its EOS token and starts simulating a follow-up turn
+ * (>user, >fuser, >assistant, [Собеседник: ...], echoed context dividers, or repeated emotion loops).
+ */
+export function findSimulatedTurnBoundary(text: string): number {
+  if (!text) return -1;
+  const thoughtStrip = text.replace(/<thought>[\s\S]*?<\/thought>/gi, '');
+  if (thoughtStrip.trim().length < 45) return -1;
+
+  const patterns = [
+    /(?:^|\s)>+\s*(?:f?user|assistant|model|human|bot)\b/i,
+    /\n\s*(?:f?user|assistant)\s*(?=\r?\n)/i,
+    /\n\s*---\s*\n\s*(?:f?user|assistant|user|model|\*\*)/i,
+    /\n\s*\[\s*(?:Собеседник|Реплика\s+собеседника|Пользователь|User|Assistant)\s*[:\]]/i,
+    /\n\s*---\s*\n\s*(?:Контекст\s+сцены|Текущий\s+контекст|Контекст\s+текущей\s+сцены|Scene\s+context|Current\s+scene|УКАЗАНИЕ\s+ПОЛЬЗОВАТЕЛЯ|USER\s+TURN\s+DIRECTIVE)/i,
+    /\n\s*>+\s*\*\*(?:Имя|Пол|Год рождения|Возраст|Класс|Характеристики|Умения|Способности|Аппаратура|Name|Gender|Age|Class)\s*[:*]/i,
+    /\n\s*(?:Пользователь|Игрок|Вы|User|Assistant|Player|You)\s*:\s*\S/,
+    /(?:^|\s)>+\s*[\p{Lu}][\p{Ll}\p{L}-]{1,24}(?:\s*\([^)]+\))?\s*:/u,
+  ];
+
+  let earliest = -1;
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m && m.index !== undefined && m.index >= 40) {
+      if (earliest === -1 || m.index < earliest) {
+        earliest = m.index;
+      }
+    }
+  }
+
+  // Also abort multi-turn loops that emit 3+ separate <emotion> tags across paragraphs
+  const emoMatches = Array.from(text.matchAll(/\n\s*<\s*(?:emotion|эмоция)\b/gi));
+  if (emoMatches.length >= 2 && emoMatches[1].index !== undefined && emoMatches[1].index >= 80) {
+    if (earliest === -1 || emoMatches[1].index < earliest) {
+      earliest = emoMatches[1].index;
+    }
+  }
+
+  return earliest;
+}
+
 export async function streamChatCompletion(options: StreamOptions): Promise<void> {
   const { apiKeyConfig, model, messages, temperature = 0.85, maxTokens = 2048, signal, onToken, onComplete, onError } = options;
+
+  const internalController = new AbortController();
+  let stoppedForRunaway = false;
+  let fullText = '';
+  const forwardAbort = () => internalController.abort();
+  signal?.addEventListener('abort', forwardAbort);
 
   try {
     if (apiKeyConfig.provider === 'gemini') {
@@ -358,7 +405,7 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
     const res = await fetch(url, {
       method: 'POST',
       headers,
-      signal,
+      signal: internalController.signal,
       body: JSON.stringify((() => {
         const allStops = [
           ...(options.extraStops || []),
@@ -366,14 +413,22 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
           'User:',
           '\nUSER:',
           '\nUser:',
-          '\n\nUSER:',
-          '\n\nUser:',
+          '\n>user',
+          '\n>fuser',
+          '\n>assistant',
+          '\n>model',
+          '\nuser\n',
+          '\nfuser\n',
+          '\nassistant\n',
           'ASSISTANT:',
           'Assistant:',
           '\nASSISTANT:',
           '\nAssistant:',
           '\n<user>',
           '\n<human>',
+          '\n[Собеседник:',
+          '\n[Реплика',
+          '\n[Пользователь:',
           '\nПользователь:',
           '\nВы:',
           '\nИгрок:',
@@ -432,7 +487,6 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder('utf-8');
-    let fullText = '';
     let buffer = '';
     let reasoningOpen = false;
     const includeReasoning = Boolean(options.includeReasoning);
@@ -467,6 +521,13 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
               const out = reasoningOpen ? `</thought>\n${delta}` : delta;
               reasoningOpen = false;
               fullText += out;
+              const boundary = findSimulatedTurnBoundary(fullText);
+              if (boundary !== -1) {
+                fullText = fullText.slice(0, boundary).trimEnd();
+                stoppedForRunaway = true;
+                internalController.abort();
+                break;
+              }
               onToken(out);
             }
           } catch {
@@ -474,6 +535,7 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
           }
         }
       }
+      if (stoppedForRunaway) break;
     }
 
     if (reasoningOpen) {
@@ -485,7 +547,13 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
     onComplete?.(fullText);
   } catch (err: unknown) {
     if (signal?.aborted) return;
+    if (stoppedForRunaway) {
+      onComplete?.(fullText);
+      return;
+    }
     onError(err instanceof Error ? err : new Error(String(err)));
+  } finally {
+    signal?.removeEventListener('abort', forwardAbort);
   }
 }
 
@@ -779,25 +847,42 @@ export function cleanArtifacts(str: string, characterEmotions?: CharacterEmotion
     .replace(/<\s*(?:start_of_turn|end_of_turn)\s*>(?:user|model|system)?/gi, '')
     .replace(/<\/?s>/gi, '')
     .replace(/\uFFFD|[\u200B-\u200D\uFEFF]/g, '')
-    // Strip echoed internal scene notes, prompt headers, or turn directives if the model repeats them
-    .replace(/\n*\[\s*(?:Заметка сцены|Scene note|Контекст хода|Указание к ответу|УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ|USER TURN DIRECTIVE)[\s\S]*$/gi, '')
+    // Strip echoed internal scene notes, prompt headers, or simulated follow-up turns
+    .replace(/\n*\[\s*(?:Заметка сцены|Scene note|Контекст хода|Контекст сцены|Указание к ответу|УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ|USER TURN DIRECTIVE)[\s\S]*$/gi, '')
+    .replace(/\n*---\s*\n\s*(?:Контекст сцены|Текущий контекст сцены|Scene context|Current scene context|УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ|USER TURN DIRECTIVE)[\s\S]*$/gi, '')
     .replace(/\n*###\s*(?:ТВОЯ РОЛЬ|ФУНДАМЕНТАЛЬНЫЕ|СТИЛЬ|КОНТРОЛЬ|ОБЯЗАТЕЛЬНЫЙ|CRITICAL|YOUR CURRENT ROLE|CORE PRINCIPLES)[\s\S]*$/gi, '')
-    // Strip simulated turns starting with <user>, User:, Вы:, Игрок:, Пользователь:
+    // Strip simulated turns starting with >user, >fuser, >assistant, bare user/assistant line, [Собеседник:], or dumped character sheets
+    .replace(/(?:\n|(?<=\S)\s+)>+\s*(?:f?user|assistant|model|human|bot)\b[\s\S]*$/gi, '')
+    .replace(/\n\s*>+\s*\*\*(?:Имя|Пол|Год рождения|Возраст|Класс|Характеристики|Умения|Способности|Аппаратура|Name|Gender|Age|Class)\s*[:*][\s\S]*$/gi, '')
+    .replace(/\n\s*(?:f?user|assistant)\s*(?:\r?\n|$)[\s\S]*$/gi, '')
+    .replace(/\n\s*\[\s*(?:Собеседник|Реплика\s+собеседника|Пользователь|User|Assistant)\s*[:\]][\s\S]*$/gi, '')
     .replace(/\n\s*<user>[\s\S]*$/gi, '')
     .replace(/\n\s*User:[\s\S]*$/gi, '')
     .replace(/\n\s*(?:Пользователь|Вы|Игрок):[\s\S]*$/g, '')
-    // Strip leading turn prefixes like <user>, <bot>, <assistant>, User:, Bot:, Assistant:, Вы:, Игрок:
+    .replace(/(?:\n|(?<=\S)\s+)>+\s*[\p{Lu}][\p{Ll}\p{L}-]{1,24}(?:\s*\([^)]+\))?\s*:[\s\S]*$/u, '')
+    // Strip leading turn/technical bracket prefixes like >**Name:**, >user, <user>, [Ответ], []
+    .replace(/^\s*(?:>+\s*)?(?:\*\*)?\[\s*(?:Собеседник|Реплика|Ответ|Сцена|Диалог|Action|Dialogue|OOC|System|Assistant|User|Bot)\s*(?::[^\]]*)?\]\s*(?:\*\*)?\s*/gi, '')
     .replace(/^\s*<user>[:\s]*/i, '')
     .replace(/^\s*<bot>[:\s]*/i, '')
     .replace(/^\s*<assistant>[:\s]*/i, '')
+    .replace(/^\s*>+\s*(?:f?user|assistant|model|bot)[:\s]*/i, '')
     .replace(/^\s*User:[:\s]*/i, '')
     .replace(/^\s*Bot:[:\s]*/i, '')
     .replace(/^\s*Assistant:[:\s]*/i, '')
-    .replace(/^\s*(?:Пользователь|Вы|Игрок|You|Player)\s*:\s*/i, '');
+    .replace(/^\s*(?:>+\s*)?(?:\*\*)?(?:Пользователь|Вы|Игрок|You|Player)(?:\*\*)?\s*:\s*/i, '');
 
   out = stripEmotionTags(out, characterEmotions, { stripLeadingUnknownAngleTag: true });
 
   return out
+    // Strip empty/malformed brackets, decorative markdown rules, stray invented XML tags (<joke>, </joke>), and leading '>' quotes
+    .replace(/\[\s*\]/g, '')
+    .replace(/<\s*\/?\s*>/g, '')
+    .replace(/(?:^|\n)\s*---+\s*(?:\n|$)/g, '\n')
+    .replace(/<\/?([a-zA-Z][a-zA-Z0-9_-]{1,24})\s*>/g, (full, tag) =>
+      HTML_OR_SYSTEM_TAGS.has(tag.toLowerCase()) || HTML_OR_SYSTEM_TAGS.has('/' + tag.toLowerCase()) ? full : ''
+    )
+    .replace(/^\s*>+\s*/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
     // Clean accidental bilingual translation parentheticals (e.g. "слово (word)")
     .replace(/([а-яА-ЯёЁ]{2,30})\s*\([a-zA-Z\s]{2,30}\)/g, '$1')
     .replace(/([a-zA-Z]{2,30})\s*\(([а-яА-ЯёЁ\s]{2,30})\)/g, '$2')
@@ -933,10 +1018,12 @@ export function stripEmotionTags(
   if (!text) return '';
   const wordSet = buildEmotionWordSet(characterEmotions);
   let out = text
-    .replace(/<(?:emotion|эмоция)(?:\s*[:=][^>\n]*)?>[\s\S]*?<\/(?:emotion|эмоция)>/gi, '')
-    .replace(/<\/?(?:emotion|эмоция)(?:\s*[:=][^>\n]*)?>/gi, '')
-    .replace(/(?:\[|<|\()(?:эмоция|emotion)\s*[:=]\s*[^\]>\)\n]+(?:\]|>|\))/gi, '')
-    .replace(/<\s*\/?\s*>/g, '')
+    .replace(/<\s*(?:emotion|эмоция)(?:\s*[:=][^>\n]*)?>[\s\S]*?<\/\s*(?:emotion|эмоция)\s*>/gi, '')
+    // Handle malformed split closing tags such as "< emotion>angry</emotio\nn>"
+    .replace(/<\s*(?:emotion|эмоция)(?:\s*[:=][^>\n]*)?>[^<>\n]{1,36}<\/\s*(?:emot|эмоц)[a-zа-яё\s]*>?/gi, '')
+    .replace(/<\s*\/?\s*(?:emotion|эмоция)(?:\s*[:=][^>\n]*)?\s*>/gi, '')
+    .replace(/(?:\[|<|\()\s*(?:эмоция|emotion)\s*[:=]\s*[^\]>\)\n]+(?:\]|>|\))/gi, '')
+    .replace(/<\s*\/?\s*>|\[\s*\]/g, '')
     .replace(/\[([^\[\]\n]{1,48})\]/g, (full, inner) => (isKnownOrConfiguredEmotionTag(inner, wordSet) ? '' : full))
     .replace(/<(\/?[^<>\n]{1,48})>/g, (full, inner) =>
       !isStandardHtmlOrSystemTag(inner) && !inner.includes('|') && isKnownOrConfiguredEmotionTag(inner, wordSet) ? '' : full
@@ -960,8 +1047,8 @@ function extractEmotionFromText(
   characterEmotions?: CharacterEmotion[],
   speakerName?: string
 ): string | undefined {
-  // 1. Standard <emotion>...</emotion> or <эмоция>...</эмоция> (including <emotion=happy>)
-  const emTagMatch = completed.match(/<(?:emotion|эмоция)(?:\s*=\s*([^>\n]+))?>([\s\S]*?)<\/(?:emotion|эмоция)>/i);
+  // 1. Standard or space/newline-glitched < emotion>...</emotion> or <эмоция>...</эмоция>
+  const emTagMatch = completed.match(/<\s*(?:emotion|эмоция)(?:\s*=\s*([^>\n]+))?\s*>([\s\S]*?)<\/\s*(?:emot|эмоц)[a-zа-яё\s]*>/i);
   if (emTagMatch) {
     const val = (emTagMatch[2] || '').trim() || (emTagMatch[1] || '').trim();
     const resolved = resolveEmotion(val, characterEmotions, speakerName);
@@ -1696,7 +1783,14 @@ export function speakerStopStrings(names: string[]): string[] {
   for (const raw of names) {
     const name = (raw || '').trim();
     if (name.length < 3) continue;
-    stops.push(`\n${name}:`, `\n${name} :`, `\n[${name}]:`);
+    stops.push(
+      `\n${name}:`,
+      `\n${name} :`,
+      `\n[${name}]:`,
+      `\n>${name}:`,
+      ` >${name}:`,
+      `>${name}:`
+    );
   }
   return Array.from(new Set(stops));
 }
@@ -1735,7 +1829,16 @@ export function stripLeadingSpeakerName(text: string, names: string[]): string {
       const name = (raw || '').trim();
       if (name.length < 2) continue;
       const escaped = escapeRegex(name);
-      out = out.replace(new RegExp(`^\\s*(?:\\*\\*)?\\[?${escaped}\\]?(?:\\*\\*)?\\s*:\\s*`, 'i'), '');
+      // 1. Markdown bold/underline name header: >**Лира:** or >**Лира**:
+      out = out.replace(
+        new RegExp(`^\\s*(?:>+\\s*)?(?:\\*\\*|__)\\s*\\[?(?:(?:Ответ|Реплика|Собеседник)\\s+)?${escaped}(?:\\s*\\([^)]{1,24}\\))?\\]?(?:\\s*:)?\\s*(?:\\*\\*|__)(?:\\s*:)?\\s*`, 'i'),
+        ''
+      );
+      // 2. Plain or quoted name prefix requiring a colon: >Лира: or Лира (она): or [Лира]:
+      out = out.replace(
+        new RegExp(`^\\s*(?:>+\\s*)?\\[?(?:(?:Ответ|Реплика|Собеседник)\\s+)?${escaped}(?:\\s*\\([^)]{1,24}\\))?\\]?\\s*:\\s*`, 'i'),
+        ''
+      );
     }
   }
   return out;

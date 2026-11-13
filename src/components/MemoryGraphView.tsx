@@ -20,40 +20,35 @@ interface SimNode extends MemoryNode {
 
 const TYPE_CONFIG: Record<
   string,
-  { bg: string; border: string; glow: string; labelEn: string; labelRu: string }
+  { bg: string; border: string; labelEn: string; labelRu: string }
 > = {
   event: {
-    bg: '#d97706',
-    border: '#f59e0b',
-    glow: 'rgba(245, 158, 11, 0.4)',
+    bg: '#8a5d2e',
+    border: '#c29058',
     labelEn: 'Event',
     labelRu: 'Событие',
   },
   relationship: {
-    bg: '#e11d48',
-    border: '#fb7185',
-    glow: 'rgba(244, 63, 94, 0.4)',
+    bg: '#863748',
+    border: '#c27080',
     labelEn: 'Bond',
     labelRu: 'Связь',
   },
   fact: {
-    bg: '#0284c7',
-    border: '#38bdf8',
-    glow: 'rgba(56, 189, 248, 0.4)',
+    bg: '#2c5b82',
+    border: '#6c9ac2',
     labelEn: 'Fact',
     labelRu: 'Факт',
   },
   location: {
-    bg: '#059669',
-    border: '#34d399',
-    glow: 'rgba(16, 185, 129, 0.4)',
+    bg: '#2b674c',
+    border: '#6aa88c',
     labelEn: 'Location',
     labelRu: 'Локация',
   },
   secret: {
-    bg: '#7e22ce',
-    border: '#c084fc',
-    glow: 'rgba(168, 85, 247, 0.4)',
+    bg: '#5b4b75',
+    border: '#9888b5',
     labelEn: 'Secret',
     labelRu: 'Секрет',
   },
@@ -320,18 +315,12 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
       for (const node of simNodes) {
         const conf = TYPE_CONFIG[node.type] || TYPE_CONFIG.fact;
 
-        // Outer glow
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, node.radius + 6, 0, Math.PI * 2);
-        ctx.fillStyle = conf.glow;
-        ctx.fill();
-
-        // Node circle
+        // Node circle (clean matte fill + 1.5px stroke, no radial neon halo)
         ctx.beginPath();
         ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
         ctx.fillStyle = conf.bg;
         ctx.fill();
-        ctx.lineWidth = 2.5;
+        ctx.lineWidth = 1.75;
         ctx.strokeStyle = conf.border;
         ctx.stroke();
 
@@ -490,10 +479,10 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
       {viewMode === 'graph' ? (
         <div
           ref={containerRef}
-          className="relative w-full h-[360px] bg-silk-950 rounded-2xl overflow-hidden border border-silk-800 shadow-inner select-none flex flex-col"
+          className="relative w-full h-[360px] bg-silk-950 rounded-2xl overflow-hidden border border-silk-800 select-none flex flex-col"
         >
           {/* Floating View Controls */}
-          <div className="absolute top-3 right-3 z-10 flex items-center gap-1 bg-silk-900/90 backdrop-blur-md p-1.5 rounded-xl border border-silk-700/60 shadow-lg">
+          <div className="absolute top-3 right-3 z-10 flex items-center gap-1 bg-silk-900/95 p-1.5 rounded-xl border border-silk-700">
             <button
               onClick={() => setZoom((z) => Math.min(2.5, z * 1.2))}
               type="button"
@@ -527,7 +516,7 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
           </div>
 
           {/* Localized Legend */}
-          <div className="absolute bottom-3 left-3 z-10 max-w-[80%] flex flex-wrap gap-2 text-[10px] text-slate-300 bg-silk-900/90 backdrop-blur-md px-3 py-1.5 rounded-xl border border-silk-700/70 shadow-lg">
+          <div className="absolute bottom-3 left-3 z-10 max-w-[80%] flex flex-wrap gap-2 text-[10px] text-slate-300 bg-silk-900/95 px-3 py-1.5 rounded-xl border border-silk-700">
             {Object.entries(TYPE_CONFIG).map(([type, conf]) => (
               <span key={type} className="flex items-center gap-1.5 font-medium">
                 <span
@@ -551,7 +540,7 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
 
           {/* Node Detail Sheet */}
           {selectedNode && (
-            <div className="absolute inset-x-3 bottom-14 z-20 bg-silk-900/95 backdrop-blur-md border border-violet-500/40 rounded-2xl p-3.5 shadow-2xl animate-fade-in text-xs space-y-2">
+            <div className="absolute inset-x-3 bottom-14 z-20 bg-silk-900 border border-silk-700 rounded-2xl p-3.5 animate-fade-in text-xs space-y-2">
               <div className="flex items-start justify-between gap-2">
                 <div className="flex items-center gap-2 min-w-0">
                   <span

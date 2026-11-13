@@ -3,24 +3,24 @@
 @tailwind utilities;
 
 :root {
-  --theme-accent: #8b5cf6;
-  --theme-accent-rgb: 139, 92, 246;
-  --theme-accent-hover: #7c3aed;
-  --theme-accent-hover-rgb: 124, 58, 237;
-  --theme-accent-light: #a78bfa;
-  --theme-accent-light-rgb: 167, 139, 250;
-  --theme-action: #fb7185;
-  --theme-action-rgb: 251, 113, 133;
-  --app-bg: #0a0814;
-  --app-bg-rgb: 10, 8, 20;
-  --app-surface: #141126;
-  --app-surface-rgb: 20, 17, 38;
-  --app-surface-elevated: #1e1938;
-  --app-surface-elevated-rgb: 30, 25, 56;
-  --app-border: #2a234e;
-  --app-border-rgb: 42, 35, 78;
-  --app-border-subtle: #3a316a;
-  --app-border-subtle-rgb: 58, 49, 106;
+  --theme-accent: #52525b;
+  --theme-accent-rgb: 82, 82, 91;
+  --theme-accent-hover: #3f3f46;
+  --theme-accent-hover-rgb: 63, 63, 70;
+  --theme-accent-light: #a1a1aa;
+  --theme-accent-light-rgb: 161, 161, 170;
+  --theme-action: #a1a1aa;
+  --theme-action-rgb: 161, 161, 170;
+  --app-bg: #09090b;
+  --app-bg-rgb: 9, 9, 11;
+  --app-surface: #111114;
+  --app-surface-rgb: 17, 17, 20;
+  --app-surface-elevated: #18181c;
+  --app-surface-elevated-rgb: 24, 24, 28;
+  --app-border: #24242a;
+  --app-border-rgb: 36, 36, 42;
+  --app-border-subtle: #32323a;
+  --app-border-subtle-rgb: 50, 50, 58;
 }
 
 @layer utilities {
@@ -38,31 +38,41 @@
     scrollbar-width: none;
   }
   .theme-accent-bg {
-    background-color: var(--theme-accent, #8b5cf6);
+    background-color: var(--theme-accent, #52525b);
   }
   .theme-accent-text {
-    color: var(--theme-accent, #8b5cf6);
+    color: var(--theme-accent-light, #a1a1aa);
   }
   .theme-accent-border {
-    border-color: var(--theme-accent, #8b5cf6);
+    border-color: var(--theme-accent, #52525b);
   }
   .app-bg {
-    background-color: var(--app-bg, #0a0814);
+    background-color: var(--app-bg, #09090b);
   }
   .app-surface {
-    background-color: var(--app-surface, #141126);
+    background-color: var(--app-surface, #111114);
   }
 }
 
 html, body {
   margin: 0;
   padding: 0;
-  background-color: var(--app-bg, #0a0814);
-  color: #f8fafc;
+  background-color: var(--app-bg, #09090b);
+  color: #f4f4f5;
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
   user-select: none;
   touch-action: manipulation;
+}
+
+:root[data-ui-font='pixel'] h1,
+:root[data-ui-font='pixel'] h2,
+:root[data-ui-font='pixel'] h3,
+:root[data-ui-font='pixel'] nav,
+:root[data-ui-font='pixel'] button,
+:root[data-ui-font='pixel'] .font-pixel {
+  font-family: 'Pixelify Sans', ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.015em;
 }
 
 /* Custom scrollbars */
@@ -72,16 +82,16 @@ html, body {
 }
 
 ::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.5);
+  background: rgba(24, 24, 27, 0.45);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(var(--theme-accent-rgb, 139, 92, 246), 0.35);
+  background: rgba(var(--theme-accent-rgb, 82, 82, 91), 0.5);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(var(--theme-accent-rgb, 139, 92, 246), 0.7);
+  background: rgba(var(--theme-accent-rgb, 82, 82, 91), 0.75);
 }
 
 @keyframes fadeIn {

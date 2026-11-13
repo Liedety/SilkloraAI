@@ -58,6 +58,7 @@ import {
   buildTurnGuidanceBlock,
   parseLengthOverride,
   substitutePromptMacros,
+  inferGrammaticalGender,
 } from '../services/promptBuilder';
 import {
   estimateTokens,
@@ -278,6 +279,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
       ? 'Georgia, Cambria, "Times New Roman", serif'
       : currentTheme.fontFamily === 'mono'
       ? 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
+      : currentTheme.fontFamily === 'pixel'
+      ? '"Pixelify Sans", ui-sans-serif, system-ui, sans-serif'
       : 'inherit';
 
   const lineHeightStyle =
@@ -593,6 +596,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
         buildSceneNote({
           speakerName: speaker.name,
           userName: resolvedUserName || (dialogueLang === 'ru' ? 'собеседник' : 'the other person'),
+          speakerGender: inferGrammaticalGender(speaker.description),
+          userGender: inferGrammaticalGender(userPersona?.description),
           language: dialogueLang,
           relationshipScore: affinity,
           memoryNodes,
@@ -691,12 +696,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
         }
       }
 
-      // Ensure start turn
+      // Ensure start turn without bracketed meta wrappers that small local models mimic at Turn 0
       if (alternatingTurns.length > 0 && alternatingTurns[0].role === 'assistant') {
         alternatingTurns.unshift({
           role: 'user',
           content: type === 'group'
-            ? (dialogueLang === 'ru' ? '[Сцена начинается]' : '[Scene begins]')
+            ? (dialogueLang === 'ru' ? 'Начало сцены.' : 'Scene begins.')
             : (dialogueLang === 'ru' ? 'Привет.' : 'Hello.'),
         });
       }
@@ -704,7 +709,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       if (alternatingTurns.length === 0) {
         alternatingTurns.push({
           role: 'user',
-          content: dialogueLang === 'ru' ? '[Сцена начинается. Начни разговор.]' : '[Scene begins. Start conversation.]',
+          content: dialogueLang === 'ru' ? 'Начало сцены. Опиши первый шаг персонажа.' : 'Scene begins. Open naturally in character.',
         });
       }
 
@@ -713,19 +718,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
         alternatingTurns.push({
           role: 'user',
           content: dialogueLang === 'ru'
-            ? `[Продолжи ответ ${speaker.name} естественно с текущего момента сцены, не повторяя прошлые фразы.]`
-            : `[Continue ${speaker.name}'s turn naturally from the current moment without repeating earlier lines.]`,
+            ? `Продолжи ответ ${speaker.name} естественно с текущего момента сцены, не повторяя прошлые фразы.`
+            : `Continue ${speaker.name}'s turn naturally from the current moment without repeating earlier lines.`,
         });
       }
 
       apiMessages.push(...alternatingTurns);
 
-      // Volatile tail (scene note + turn guidance) sits immediately BEFORE the final user utterance
-      // so static system[0] stays cacheable AND the model responds directly to the user's words last.
+      // Volatile tail (scene note + turn guidance) sits inside system[0] on Turn 0 (empty history)
+      // so the first user turn stays pure prose with no technical dividers for small models to mimic.
+      // On multi-turn chats it precedes the final user utterance so system[0] stays KV-cacheable.
       const tailBlocks: string[] = [];
       if (sceneNote) {
-        const noteTitle = dialogueLang === 'ru' ? 'Контекст сцены (не цитируй)' : 'Scene context (do not quote)';
-        tailBlocks.push(`[${noteTitle}:\n${sceneNote}]`);
+        const noteTitle = dialogueLang === 'ru' ? 'Контекст текущей сцены (не цитируй):' : 'Current scene context (do not quote):';
+        tailBlocks.push(`${noteTitle}\n${sceneNote}`);
       }
       if (turnGuidanceBlock) {
         tailBlocks.push(turnGuidanceBlock);
@@ -733,10 +739,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       if (tailBlocks.length > 0) {
         const tailText = tailBlocks.join('\n\n');
+        const isFirstTurnOnly = alternatingTurns.length <= 1;
         const last = apiMessages[apiMessages.length - 1];
-        if (last && last.role === 'user' && typeof last.content === 'string') {
+        if (!isFirstTurnOnly && last && last.role === 'user' && typeof last.content === 'string') {
           last.content = `${tailText}\n\n${last.content}`;
-        } else if (last && last.role === 'user' && Array.isArray(last.content)) {
+        } else if (!isFirstTurnOnly && last && last.role === 'user' && Array.isArray(last.content)) {
           last.content = [{ type: 'text', text: tailText }, ...last.content];
         } else {
           apiMessages[0] = { role: 'system', content: `${systemPrompt}\n\n${tailText}` };
@@ -762,8 +769,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
       await streamChatCompletion({
         apiKeyConfig: (turnConfig ? turnConfig.apiKeyConfig : effectiveApiKey) as ApiKeyConfig,
         model: turnConfig ? turnConfig.textModel : effectiveModel,
-        // Also stop if the model starts quoting the hidden scene note or turn guidance header
-        extraStops: [...speakerStopStrings(otherSpeakers), '[Scene note', '[Scene context', '[Заметка сцены', '[Контекст сцены', '[УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ', '[USER TURN DIRECTIVE'],
+        // Also stop if the model starts quoting the hidden scene note, turn directive, or fake multi-turn headers
+        extraStops: [
+          ...speakerStopStrings(otherSpeakers),
+          '\n>user',
+          '\n>fuser',
+          '\n>assistant',
+          '>**Имя:',
+          '>**Name:',
+          '\n[Собеседник:',
+          '\n[Реплика',
+          'Контекст текущей сцены',
+          'Текущий контекст сцены',
+          'Current scene context',
+          '[Scene note',
+          '[Scene context',
+          '[Заметка сцены',
+          '[Контекст сцены',
+          '[УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ',
+          'УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ НА ЭТОТ ХОД',
+          'USER TURN DIRECTIVE',
+        ],
         messages: apiMessages,
         temperature: samplers.temperature,
         topP: samplers.topP,
@@ -1401,7 +1427,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
                 {/* Message Bubble Container */}
                 <div
-                  className={`relative p-3.5 shadow-xl transition-all ${
+                  className={`relative p-3.5 border border-silk-800/70 transition-colors ${
                     isUser ? 'text-slate-100' : 'text-slate-200'
                   }`}
                   style={{
@@ -1422,7 +1448,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
                   {/* Inner Monologue / Thoughts Box */}
                   {!isUser && activeVariant.thought && (
-                    <div className="mb-2 p-2 rounded-xl bg-silk-950/70 border border-violet-500/30 text-xs">
+                    <div className="mb-2 p-2 rounded-xl bg-silk-950/80 border border-silk-700 text-xs">
                       <button
                         type="button"
                         onClick={() =>
@@ -1499,7 +1525,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     if (!sprite || !sprite.avatar) return null;
                     return (
                       <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center">
-                        <div className="relative rounded-2xl overflow-hidden border border-violet-500/30 bg-black/40 shadow-lg transition-transform hover:scale-105">
+                        <div className="relative rounded-xl overflow-hidden border border-silk-700 bg-black/40">
                           <img
                             src={sprite.avatar}
                             alt=""
@@ -1611,7 +1637,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                             </button>
 
                             {emotionPickerMsgId === msg.id && (
-                              <div className="absolute left-0 bottom-full mb-2 z-30 p-2 bg-silk-900 border border-silk-700 rounded-xl shadow-2xl flex items-center gap-2 animate-fade-in max-w-xs overflow-x-auto no-scrollbar">
+                              <div className="absolute left-0 bottom-full mb-2 z-30 p-2 bg-silk-900 border border-silk-700 rounded-xl flex items-center gap-2 animate-fade-in max-w-xs overflow-x-auto no-scrollbar">
                                 <button
                                   type="button"
                                   onClick={async () => {
@@ -1694,7 +1720,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 </div>
               )}
               <div
-                className="p-3.5 shadow-xl text-slate-200"
+                className="p-3.5 border border-silk-800/70 text-slate-200"
                 style={{
                   backgroundColor: currentTheme.bubbleBotBg,
                   borderRadius: `${currentTheme.bubbleRadius}px`,
@@ -1705,9 +1731,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 }}
               >
                 {streamingThought && (
-                  <div className="mb-2 p-2 rounded-xl bg-silk-950/70 border border-violet-500/30 text-xs">
-                    <div className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-violet-400 mb-1">
-                      <Sparkles className="w-3 h-3 animate-spin" />
+                  <div className="mb-2 p-2 rounded-xl bg-silk-950/80 border border-silk-700 text-xs">
+                    <div className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                      <Sparkles className="w-3 h-3" />
                       <span>{t.thinkingBlock}</span>
                     </div>
                     <p className="text-slate-300 italic text-[11px] leading-relaxed">
@@ -1718,7 +1744,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
                 <div className="whitespace-pre-wrap break-words" style={{ lineHeight: lineHeightStyle }}>
                   {formatMessageText(streamingText || '...')}
-                  <span className="inline-block w-1.5 h-4 ml-0.5 bg-violet-400 animate-pulse align-middle" />
+                  <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-slate-300 align-middle" />
                 </div>
 
                 {/* Streaming Emotion Sprite */}
@@ -1727,11 +1753,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   if (!sprite || !sprite.avatar) return null;
                   return (
                     <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center">
-                      <div className="relative rounded-2xl overflow-hidden border border-violet-500/30 bg-black/40 shadow-lg">
+                      <div className="relative rounded-xl overflow-hidden border border-silk-700 bg-black/40">
                         <img
                           src={sprite.avatar}
                           alt=""
-                          className="max-h-48 max-w-[200px] w-auto h-auto object-contain rounded-xl block animate-pulse"
+                          className="max-h-48 max-w-[200px] w-auto h-auto object-contain rounded-xl block"
                         />
                       </div>
                     </div>
@@ -1753,7 +1779,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             setShowScrollBottom(false);
           }}
           type="button"
-          className="absolute right-5 bottom-20 z-30 p-2.5 rounded-full bg-silk-850/95 hover:bg-silk-800 text-violet-400 hover:text-white border border-silk-700/90 shadow-2xl backdrop-blur-md transition-all duration-200 animate-fade-in hover:scale-110 active:scale-95 flex items-center justify-center group"
+          className="absolute right-5 bottom-20 z-30 p-2.5 rounded-full bg-silk-900 hover:bg-silk-800 text-slate-300 hover:text-white border border-silk-700 transition-colors animate-fade-in active:scale-95 flex items-center justify-center group"
           title={t.scrollToBottomLabel}
         >
           <ArrowDown className="w-4 h-4 group-hover:translate-y-0.5 transition-transform" />
@@ -1762,7 +1788,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* Slash Command Autocomplete Menu */}
       {showSlashMenu && (
-        <div className="relative z-20 mx-4 mb-2 bg-silk-900 border border-silk-700 rounded-2xl shadow-2xl overflow-hidden animate-slide-up text-xs">
+        <div className="relative z-20 mx-4 mb-2 bg-silk-900 border border-silk-700 rounded-2xl overflow-hidden animate-slide-up text-xs">
           <div className="p-2.5 font-semibold text-[11px] uppercase tracking-wider text-slate-400 border-b border-silk-800">
             {t.slashCommandHeader}
           </div>
@@ -1907,8 +1933,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* User Ghostwriter Wand Modal */}
       {showUserWandModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="w-full max-w-md bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80">
+          <div className="w-full max-w-md bg-silk-900 border border-silk-700 rounded-2xl p-4 space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Wand2 className="w-4 h-4 text-violet-400" />
@@ -1934,7 +1960,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 {wandPreview || (
                   <span className="text-slate-500 text-xs">{language === 'ru' ? 'Ожидание первого слова...' : 'Waiting for the first words...'}</span>
                 )}
-                {isWandGenerating && <span className="inline-block w-1.5 h-4 ml-0.5 align-middle bg-violet-400 animate-pulse" />}
+                {isWandGenerating && <span className="inline-block w-1.5 h-3.5 ml-0.5 align-middle bg-slate-300" />}
               </div>
             )}
 
@@ -1969,7 +1995,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <button
                     onClick={wandPreview ? applyWandPreview : handleExecuteUserWand}
                     type="button"
-                    className="flex items-center gap-1.5 px-4 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-md"
+                    className="flex items-center gap-1.5 px-4 py-1.5 bg-violet-600 hover:bg-violet-500 border border-white/10 text-white rounded-xl text-xs font-semibold"
                   >
                     <Sparkles className="w-3.5 h-3.5" />
                     <span>{wandPreview ? t.applyToInput : (language === 'ru' ? 'Сформулировать' : 'Generate')}</span>
@@ -1983,8 +2009,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* Guided Bot Regeneration Modal */}
       {guidedRegenTargetMsgId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80">
+          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl p-4 space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Wand2 className="w-4 h-4 text-violet-400" />
@@ -2024,7 +2050,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   setGuidedRegenTargetMsgId(null);
                 }}
                 type="button"
-                className="px-4 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-md"
+                className="px-4 py-1.5 bg-violet-600 hover:bg-violet-500 border border-white/10 text-white rounded-xl text-xs font-semibold"
               >
                 {t.regenerate}
               </button>
@@ -2035,8 +2061,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* Group Next Speaker Selector Modal */}
       {showSpeakerModal && type === 'group' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="w-full max-w-xs bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80">
+          <div className="w-full max-w-xs bg-silk-900 border border-silk-700 rounded-2xl p-4 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-sm text-white">{t.nextSpeakerModalTitle}</h3>
               <button
@@ -2079,8 +2105,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* Scene Summary Modal (/summary) */}
       {summaryModalText && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80">
+          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl p-4 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-sm text-white">{t.summaryModalTitle}</h3>
               <button

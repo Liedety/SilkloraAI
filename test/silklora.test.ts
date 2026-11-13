@@ -12,6 +12,7 @@ import {
   getEffectiveAiConfig,
   resolveSamplerConfig,
   stripEchoedUserPrefix,
+  findSimulatedTurnBoundary,
 } from '../src/services/ai.ts';
 import {
   parseCharacterCardJson,
@@ -25,6 +26,7 @@ import {
   buildLengthOverrideDirective,
   parseLengthOverride,
   DEFAULT_CORE_SYSTEM_PROMPT,
+  inferGrammaticalGender,
 } from '../src/services/promptBuilder.ts';
 import { translations } from '../src/i18n/index.ts';
 import { speakerStopStrings, stripLeadingSpeakerName, resolveEmotion } from '../src/services/ai.ts';
@@ -642,15 +644,21 @@ test('Theme configuration: separates theme design from typography settings', () 
   for (const themeItem of APP_THEMES) {
     assert.ok(themeItem.theme.fontFamily, `Theme ${themeItem.id} must define fontFamily`);
     assert.ok(themeItem.theme.lineHeight, `Theme ${themeItem.id} must define lineHeight`);
-    assert.ok(['sans', 'serif', 'mono'].includes(themeItem.theme.fontFamily));
+    assert.ok(['sans', 'serif', 'mono', 'pixel'].includes(themeItem.theme.fontFamily));
     assert.ok(['normal', 'relaxed', 'loose'].includes(themeItem.theme.lineHeight));
   }
+  assert.strictEqual(APP_THEMES.some((t) => t.id === 'cyberpunk-neon'), false, 'Neon theme must be removed');
+  const oled = APP_THEMES.find((t) => t.id === 'oled-black');
+  assert.ok(oled, 'Dedicated OLED Black theme must exist');
+  assert.strictEqual(oled!.theme.appBgColor, '#000000');
+  assert.strictEqual(oled!.theme.bubbleOpacity, 1.0);
 });
 
 test('App theme selection preserves user custom typography settings', () => {
   const userCustomTheme: ThemeConfig = {
     ...DEFAULT_THEME,
-    fontFamily: 'serif',
+    fontFamily: 'pixel',
+    usePixelUiFont: true,
     fontSize: 18,
     lineHeight: 'loose',
   };
@@ -661,13 +669,15 @@ test('App theme selection preserves user custom typography settings', () => {
   const appliedTheme: ThemeConfig = {
     ...sapphirePreset,
     fontFamily: userCustomTheme.fontFamily,
+    usePixelUiFont: userCustomTheme.usePixelUiFont,
     fontSize: userCustomTheme.fontSize,
     lineHeight: userCustomTheme.lineHeight,
   };
 
   assert.strictEqual(appliedTheme.accentColor, sapphirePreset.accentColor, 'Accent color must update to theme preset');
   assert.strictEqual(appliedTheme.appBgColor, sapphirePreset.appBgColor, 'App background must update to theme preset');
-  assert.strictEqual(appliedTheme.fontFamily, 'serif', 'Font family must be preserved');
+  assert.strictEqual(appliedTheme.fontFamily, 'pixel', 'Pixel font family must be preserved');
+  assert.strictEqual(appliedTheme.usePixelUiFont, true, 'Pixel UI toggle must be preserved');
   assert.strictEqual(appliedTheme.fontSize, 18, 'Font size must be preserved');
   assert.strictEqual(appliedTheme.lineHeight, 'loose', 'Line height must be preserved');
 });
@@ -1535,4 +1545,46 @@ test('characterCard: imports SillyTavern V2 JSON and UTF-8 PNG chara metadata an
   assert.strictEqual(parsedPng.name, 'Алиса Вэнс');
   assert.strictEqual(parsedPng.scenario, 'Дождливый док 14.');
   assert.ok(parsedPng.avatar?.startsWith('data:image/png;base64,'));
+});
+
+test('runaway guard, gender inference, and cleanArtifacts anti-leak rules', () => {
+  // Grammatical gender inference for character/persona cues
+  assert.strictEqual(inferGrammaticalGender('Молодая девушка-фехтовальщица с рапирой.'), 'female');
+  assert.strictEqual(inferGrammaticalGender('Высокий парень-следопыт в плаще.'), 'male');
+  assert.strictEqual(inferGrammaticalGender('Древний страж руин.'), null);
+
+  // Runaway turn boundaries detect >fuser, bare user\n, inline >Name:, and sheet dumps after opening prose
+  assert.strictEqual(findSimulatedTurnBoundary('*Короткий старт.*'), -1);
+  assert.ok(findSimulatedTurnBoundary('*Он вздыхает и смотрит в окно под дождем.*\n>fuser\nПродолжай') > 35);
+  assert.ok(findSimulatedTurnBoundary('*Девушка ставит кружку на стойку таверны.*\nuser\nДавай') > 35);
+  assert.ok(findSimulatedTurnBoundary('*Лира откидывается на спинку стула в углу.* Свободно? >Артем: *кивает*') > 35);
+  assert.ok(findSimulatedTurnBoundary('*Кайра смотрит в темноту за окном молча.*\n>**Имя:** Кайра\n>**Пол:** женский') > 35);
+
+  // cleanArtifacts strips invented XML tags, spaced < emotion>, [], > prefixes, and trailing sheets
+  const messy = '< emotion>smirk</emotion> <joke> *Усмехается и поправляет плащ.* [] Да ладно.\n>**Имя:** Лира\n>**Пол:** женский';
+  const cleaned = cleanArtifacts(messy, [{ id: '1', name: 'smirk', avatar: '' }]);
+  assert.strictEqual(cleaned.includes('<joke>'), false);
+  assert.strictEqual(cleaned.includes('[]'), false);
+  assert.strictEqual(cleaned.includes('>**Имя:**'), false);
+  assert.ok(cleaned.includes('*Усмехается и поправляет плащ.* Да ладно.'));
+
+  // stripLeadingSpeakerName handles bold/quote/gender variants cleanly
+  assert.strictEqual(stripLeadingSpeakerName('>**Лира:** *Кивает.* Привет.', ['Лира']), '*Кивает.* Привет.');
+  assert.strictEqual(stripLeadingSpeakerName('Лира (она): *Улыбается.* Свободно.', ['Лира']), '*Улыбается.* Свободно.');
+
+  // buildSystemPrompt & buildSceneNote embed clean non-parenthetical gender cues without "персона" trap
+  const lira: Character = { id: 'l', name: 'Лира', description: 'Девушка-фехтовальщица.', createdAt: 1, updatedAt: 1 };
+  const artem: Character = { id: 'a', name: 'Артем', description: 'Парень-следопыт.', isPersona: true, createdAt: 1, updatedAt: 1 };
+  const sys = buildSystemPrompt({ character: lira, userPersona: artem, language: 'ru', dynamicTail: true });
+  assert.ok(sys.includes('пиши о себе в женском роде'));
+  assert.ok(sys.includes('обращайся к нему в мужском роде'));
+  assert.strictEqual(sys.includes('(ПЕРСОНА ИГРОКА)'), false);
+  const scene = buildSceneNote({
+    speakerName: 'Лира',
+    userName: 'Артем',
+    speakerGender: 'female',
+    userGender: 'male',
+    language: 'ru',
+  });
+  assert.ok(scene.includes('Отвечает Лира пишет о себе в женском роде; к Артем обращайся в мужском роде.'));
 });

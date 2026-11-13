@@ -149,10 +149,10 @@ export const ChatSettingsModal: React.FC<ChatSettingsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/85 backdrop-blur-md animate-fade-in">
-      <div className="w-full max-w-md h-[90vh] bg-silk-900 border border-silk-700/80 rounded-2xl flex flex-col overflow-hidden shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 animate-fade-in">
+      <div className="w-full max-w-md h-[90vh] bg-silk-900 border border-silk-700 rounded-2xl flex flex-col overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-silk-800 bg-silk-900/90 shrink-0">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-silk-800 bg-silk-900 shrink-0">
           <h2 className="text-sm font-bold text-white tracking-tight">{t.chatSettings}</h2>
           <button
             onClick={() => {
@@ -166,14 +166,14 @@ export const ChatSettingsModal: React.FC<ChatSettingsModalProps> = ({
         </div>
 
         {/* Tab Switcher */}
-        <div className="grid grid-cols-3 border-b border-silk-800 bg-silk-950/60 p-1.5 gap-1 shrink-0">
+        <div className="grid grid-cols-3 border-b border-silk-800 bg-silk-950 p-1.5 gap-1 shrink-0">
           <button
             type="button"
             onClick={() => setActiveTab('memory')}
-            className={`flex items-center justify-center gap-1.5 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+            className={`flex items-center justify-center gap-1.5 py-1.5 rounded-xl text-xs font-semibold transition-colors ${
               activeTab === 'memory'
-                ? 'bg-violet-600 text-white shadow-md'
-                : 'text-slate-400 hover:text-white'
+                ? 'bg-silk-800 border border-silk-600 text-slate-100'
+                : 'text-slate-400 hover:text-white border border-transparent'
             }`}
           >
             <Brain className="w-3.5 h-3.5" />
@@ -183,10 +183,10 @@ export const ChatSettingsModal: React.FC<ChatSettingsModalProps> = ({
           <button
             type="button"
             onClick={() => setActiveTab('roleplay')}
-            className={`flex items-center justify-center gap-1.5 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+            className={`flex items-center justify-center gap-1.5 py-1.5 rounded-xl text-xs font-semibold transition-colors ${
               activeTab === 'roleplay'
-                ? 'bg-violet-600 text-white shadow-md'
-                : 'text-slate-400 hover:text-white'
+                ? 'bg-silk-800 border border-silk-600 text-slate-100'
+                : 'text-slate-400 hover:text-white border border-transparent'
             }`}
           >
             <Sparkles className="w-3.5 h-3.5" />
@@ -196,10 +196,10 @@ export const ChatSettingsModal: React.FC<ChatSettingsModalProps> = ({
           <button
             type="button"
             onClick={() => setActiveTab('history')}
-            className={`flex items-center justify-center gap-1.5 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+            className={`flex items-center justify-center gap-1.5 py-1.5 rounded-xl text-xs font-semibold transition-colors ${
               activeTab === 'history'
-                ? 'bg-violet-600 text-white shadow-md'
-                : 'text-slate-400 hover:text-white'
+                ? 'bg-silk-800 border border-silk-600 text-slate-100'
+                : 'text-slate-400 hover:text-white border border-transparent'
             }`}
           >
             <HistoryIcon className="w-3.5 h-3.5" />

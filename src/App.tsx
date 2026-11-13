@@ -9,48 +9,78 @@ import { GroupsView } from './views/GroupsView';
 import { SettingsView } from './views/SettingsView';
 import { ChatView } from './views/ChatView';
 
-function hexToRgb(hex: string): string {
-  const clean = hex.replace('#', '').trim();
-  let r = 139, g = 92, b = 246;
-  if (clean.length === 3) {
-    r = parseInt(clean[0] + clean[0], 16) || 139;
-    g = parseInt(clean[1] + clean[1], 16) || 92;
-    b = parseInt(clean[2] + clean[2], 16) || 246;
-  } else if (clean.length >= 6) {
-    r = parseInt(clean.substring(0, 2), 16) || 139;
-    g = parseInt(clean.substring(2, 4), 16) || 92;
-    b = parseInt(clean.substring(4, 6), 16) || 246;
+const LAST_CHAT_STORAGE_KEY = 'silklora_last_chat_v1';
+
+interface SavedChatRef {
+  type: 'character' | 'group';
+  targetId: string;
+}
+
+function readStoredLastChat(): SavedChatRef | null {
+  try {
+    const raw = window.localStorage.getItem(LAST_CHAT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      (parsed.type === 'character' || parsed.type === 'group') &&
+      typeof parsed.targetId === 'string' &&
+      parsed.targetId.trim()
+    ) {
+      return { type: parsed.type, targetId: parsed.targetId };
+    }
+  } catch {
+    // ignore storage errors
   }
+  return null;
+}
+
+function parseHexColor(hex: string, fallback: [number, number, number] = [82, 82, 91]): [number, number, number] {
+  const clean = (hex || '').replace('#', '').trim();
+  if (clean.length === 3) {
+    const r = parseInt(clean[0] + clean[0], 16);
+    const g = parseInt(clean[1] + clean[1], 16);
+    const b = parseInt(clean[2] + clean[2], 16);
+    if (!Number.isNaN(r) && !Number.isNaN(g) && !Number.isNaN(b)) return [r, g, b];
+  } else if (clean.length >= 6) {
+    const r = parseInt(clean.substring(0, 2), 16);
+    const g = parseInt(clean.substring(2, 4), 16);
+    const b = parseInt(clean.substring(4, 6), 16);
+    if (!Number.isNaN(r) && !Number.isNaN(g) && !Number.isNaN(b)) return [r, g, b];
+  }
+  return fallback;
+}
+
+function hexToRgb(hex: string): string {
+  const [r, g, b] = parseHexColor(hex);
   return `${r}, ${g}, ${b}`;
 }
 
 function adjustBrightness(hex: string, percent: number): string {
-  const clean = hex.replace('#', '').trim();
-  let r = 139, g = 92, b = 246;
-  if (clean.length === 3) {
-    r = parseInt(clean[0] + clean[0], 16) || 139;
-    g = parseInt(clean[1] + clean[1], 16) || 92;
-    b = parseInt(clean[2] + clean[2], 16) || 246;
-  } else if (clean.length >= 6) {
-    r = parseInt(clean.substring(0, 2), 16) || 139;
-    g = parseInt(clean.substring(2, 4), 16) || 92;
-    b = parseInt(clean.substring(4, 6), 16) || 246;
-  }
+  const [r, g, b] = parseHexColor(hex);
   const factor = 1 + percent / 100;
   const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
-  const add = percent > 0 ? percent * 0.4 : 0;
+  // Ensure pure-black OLED substrates (#000000 / #08080a) still gain visible 1px border steps
+  const add = percent > 0 ? percent * 0.45 : 0;
   const newR = clamp(r * factor + add);
   const newG = clamp(g * factor + add);
   const newB = clamp(b * factor + add);
   return `#${((1 << 24) + (newR << 16) + (newG << 8) + newB).toString(16).slice(1)}`;
 }
 
+function contrastTextColor(hex: string): string {
+  const [r, g, b] = parseHexColor(hex);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance > 0.62 ? '#09090b' : '#f4f4f5';
+}
+
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<TabType>('characters');
-  const [activeChat, setActiveChat] = useState<{
-    type: 'character' | 'group';
-    targetId: string;
-  } | null>(null);
+  const initialLastChat = React.useMemo(() => readStoredLastChat(), []);
+  const [activeTab, setActiveTab] = useState<TabType>(() =>
+    initialLastChat?.type === 'group' ? 'groups' : 'characters'
+  );
+  const [activeChat, setActiveChat] = useState<SavedChatRef | null>(initialLastChat);
+  const didValidateInitialChatRef = React.useRef(false);
 
   // Floating save button state
   const [isDirty, setIsDirty] = useState(false);
@@ -62,26 +92,61 @@ export const App: React.FC = () => {
   const language: Language = settings?.language || 'en';
 
   useEffect(() => {
-    initDatabaseDefaults();
-  }, []);
+    let cancelled = false;
+    (async () => {
+      await initDatabaseDefaults();
+      if (cancelled || didValidateInitialChatRef.current) return;
+      didValidateInitialChatRef.current = true;
+
+      let candidate = initialLastChat;
+      if (!candidate) {
+        const s = await db.settings.get('default');
+        candidate = s?.lastOpenedChat || null;
+      }
+      if (!candidate) return;
+
+      const exists =
+        candidate.type === 'character'
+          ? Boolean(await db.characters.get(candidate.targetId))
+          : Boolean(await db.groups.get(candidate.targetId));
+
+      if (cancelled) return;
+      if (exists) {
+        setActiveChat(candidate);
+        setActiveTab(candidate.type === 'group' ? 'groups' : 'characters');
+      } else {
+        setActiveChat(null);
+        try {
+          window.localStorage.removeItem(LAST_CHAT_STORAGE_KEY);
+        } catch {
+          // ignore
+        }
+        await db.settings.update('default', { lastOpenedChat: null });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [initialLastChat]);
 
   // Dynamically update CSS variables when theme changes
   useEffect(() => {
     if (settings?.theme) {
       const root = document.documentElement;
-      const accent = settings.theme.accentColor || '#8b5cf6';
-      const action = settings.theme.actionColor || '#fb7185';
-      const bg = settings.theme.appBgColor || '#0a0814';
-      const surface = settings.theme.appSurfaceColor || '#141126';
+      const accent = settings.theme.accentColor || '#52525b';
+      const action = settings.theme.actionColor || '#a1a1aa';
+      const bg = settings.theme.appBgColor || '#09090b';
+      const surface = settings.theme.appSurfaceColor || '#111114';
 
       const accentHover = adjustBrightness(accent, 15);
-      const accentLight = adjustBrightness(accent, 40);
-      const surfaceElevated = adjustBrightness(surface, 15);
-      const border = adjustBrightness(surface, 25);
-      const borderSubtle = adjustBrightness(surface, 35);
+      const accentLight = adjustBrightness(accent, 42);
+      const surfaceElevated = adjustBrightness(surface, 14);
+      const border = adjustBrightness(surface, 26);
+      const borderSubtle = adjustBrightness(surface, 38);
 
       root.style.setProperty('--theme-accent', accent);
       root.style.setProperty('--theme-accent-rgb', hexToRgb(accent));
+      root.style.setProperty('--theme-on-accent', contrastTextColor(accent));
       root.style.setProperty('--theme-accent-hover', accentHover);
       root.style.setProperty('--theme-accent-hover-rgb', hexToRgb(accentHover));
       root.style.setProperty('--theme-accent-light', accentLight);
@@ -111,8 +176,11 @@ export const App: React.FC = () => {
           ? 'Georgia, Cambria, "Times New Roman", serif'
           : settings.theme.fontFamily === 'mono'
           ? 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
+          : settings.theme.fontFamily === 'pixel'
+          ? '"Pixelify Sans", ui-sans-serif, system-ui, sans-serif'
           : 'inherit';
       root.style.setProperty('--chat-font-family', fontFamily);
+      root.setAttribute('data-ui-font', settings.theme.usePixelUiFont ? 'pixel' : 'default');
     }
   }, [settings?.theme]);
 
@@ -135,10 +203,16 @@ export const App: React.FC = () => {
     setActiveTab(tab);
   };
 
-  const handleOpenChat = (chat: { type: 'character' | 'group'; targetId: string }) => {
+  const handleOpenChat = (chat: SavedChatRef) => {
     setIsDirty(false);
     setSaveAction(null);
     setActiveChat(chat);
+    try {
+      window.localStorage.setItem(LAST_CHAT_STORAGE_KEY, JSON.stringify(chat));
+    } catch {
+      // ignore storage errors
+    }
+    db.settings.update('default', { lastOpenedChat: chat }).catch(() => {});
   };
 
   const handleBackFromChat = () => {

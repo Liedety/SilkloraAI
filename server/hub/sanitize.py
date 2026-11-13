@@ -36,11 +36,22 @@ _UNCLOSED_REASONING_RES = (
     re.compile(r"<think>\s*([\s\S]*)$", re.IGNORECASE),
 )
 
-# Echoed Silklora prompt-wrapper blocks that should never leak to clients.
+# Echoed Silklora prompt-wrapper blocks or simulated multi-turn boundaries that should never leak.
 _LEAKED_NOTE_RE = re.compile(
-    r"\n*\[\s*(?:Заметка сцены|Scene note|Контекст хода|Указание к ответу|УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ|USER TURN DIRECTIVE)[\s\S]*$",
+    r"\n*\[\s*(?:Заметка сцены|Scene note|Контекст хода|Контекст сцены|Указание к ответу|УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ|USER TURN DIRECTIVE)[\s\S]*$",
     re.IGNORECASE,
 )
+
+_SIMULATED_TURN_RE = re.compile(
+    r"(?:"
+    r"\n\s*>+\s*(?:f?user|assistant|model|human|bot)\b"
+    r"|\n\s*(?:f?user|assistant)\s*(?:\r?\n|$)"
+    r"|\n\s*\[\s*(?:Собеседник|Реплика\s+собеседника|Пользователь|User|Assistant)\s*[:\]]"
+    r")[\s\S]*$",
+    re.IGNORECASE,
+)
+
+_EMPTY_BRACKETS_RE = re.compile(r"(?:<\s*/?\s*>|\[\s*\])")
 
 _OPEN_TOKENS = (
     "<|channel>thought",
@@ -86,22 +97,34 @@ _STOP_LEAK_PREFIXES = (
     "[Заметка сцены",
     "[Scene note",
     "[Контекст хода",
+    "[Контекст сцены",
     "[Указание к ответу",
     "[УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ",
     "[USER TURN DIRECTIVE",
 )
 
+_FAKE_TURN_STREAM_PREFIXES = (
+    "[Собеседник:",
+    "[Реплика",
+    "[Пользователь:",
+    "[Assistant:",
+    "[User:",
+)
+
 _ALL_LOOKAHEAD_PREFIXES = tuple(
-    p.lower() for p in (_OPEN_TOKENS + _CLOSE_TOKENS + _STRIP_TOKENS + _STOP_LEAK_PREFIXES)
+    p.lower()
+    for p in (_OPEN_TOKENS + _CLOSE_TOKENS + _STRIP_TOKENS + _STOP_LEAK_PREFIXES + _FAKE_TURN_STREAM_PREFIXES)
 )
 
 
 def strip_model_artifacts(text: str) -> str:
-    """Remove leaked tokenizer control tokens and echoed prompt notes from text."""
+    """Remove leaked tokenizer control tokens, empty brackets, and simulated turn trailers."""
     if not text:
         return ""
     out = _LEAKED_NOTE_RE.sub("", text)
+    out = _SIMULATED_TURN_RE.sub("", out)
     out = _CONTROL_TOKEN_RE.sub("", out)
+    out = _EMPTY_BRACKETS_RE.sub("", out)
     # Collapse leading blank whitespace introduced when leading turn tags are removed.
     return out.lstrip("\r\n")
 
@@ -216,12 +239,18 @@ class StreamSanitizer:
             content_out.append(clean)
 
     def _try_consume_exact(self, lower: str) -> int:
-        # Stop immediately if model echoes an injected scene-note block.
+        # Stop immediately if model echoes an injected scene-note block or starts a fake next turn.
         for prefix in _STOP_LEAK_PREFIXES:
             if lower.startswith(prefix.lower()):
                 self._stopped_on_leak = True
                 self._buf = ""
                 return 0
+        if self._seen_content:
+            for prefix in _FAKE_TURN_STREAM_PREFIXES:
+                if lower.startswith(prefix.lower()):
+                    self._stopped_on_leak = True
+                    self._buf = ""
+                    return 0
 
         if not self._in_reasoning:
             for tok in _OPEN_TOKENS:

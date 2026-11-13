@@ -528,7 +528,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
             <button
               onClick={handleOpenCreate}
               type="button"
-              className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-indigo-600/30 active:scale-95 transition-all"
+              className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-500 border border-white/10 text-white rounded-xl text-xs font-semibold active:scale-95 transition-colors"
             >
               <Plus className="w-4 h-4" />
               <span>{t.createCharacter}</span>
@@ -541,10 +541,10 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
           <button
             onClick={() => setSelectedFolderId(null)}
             type="button"
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap border transition-colors ${
               selectedFolderId === null
-                ? 'bg-violet-600 text-white shadow-md'
-                : 'bg-silk-800/80 text-slate-400 hover:text-white'
+                ? 'bg-silk-800 border-silk-600 text-slate-100'
+                : 'bg-silk-900 border-silk-800 text-slate-400 hover:text-slate-200'
             }`}
           >
             {t.allFolders}
@@ -553,10 +553,10 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
           <button
             onClick={() => setSelectedFolderId('none')}
             type="button"
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap border transition-colors ${
               selectedFolderId === 'none'
-                ? 'bg-violet-600 text-white shadow-md'
-                : 'bg-silk-800/80 text-slate-400 hover:text-white'
+                ? 'bg-silk-800 border-silk-600 text-slate-100'
+                : 'bg-silk-900 border-silk-800 text-slate-400 hover:text-slate-200'
             }`}
           >
             {t.noFolder}
@@ -565,10 +565,10 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
           {folders.map((f) => (
             <div
               key={f.id}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap border transition-colors ${
                 selectedFolderId === f.id
-                  ? 'bg-violet-600 text-white shadow-md'
-                  : 'bg-silk-800/80 text-slate-400 hover:text-white'
+                  ? 'bg-silk-800 border-silk-600 text-slate-100'
+                  : 'bg-silk-900 border-silk-800 text-slate-400 hover:text-slate-200'
               }`}
             >
               <button
@@ -604,8 +604,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
       {/* Character Cards List */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3 pb-28">
         {filteredCharacters.length === 0 ? (
-          <div className="h-64 flex flex-col items-center justify-center text-center p-6 border border-dashed border-silk-800 rounded-2xl">
-            <Sparkles className="w-8 h-8 text-violet-400/60 mb-2" />
+          <div className="h-64 flex flex-col items-center justify-center text-center p-6 border border-dashed border-silk-800 rounded-2xl bg-silk-900/40">
+            <Sparkles className="w-7 h-7 text-slate-500 mb-2" />
             <h3 className="font-semibold text-slate-300 text-sm">{t.emptyCharactersTitle}</h3>
             <p className="text-xs text-slate-500 mt-1 max-w-xs">{t.emptyCharactersSubtitle}</p>
           </div>
@@ -616,7 +616,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
               <div
                 key={char.id}
                 onClick={() => onOpenChat(char.id)}
-                className="group relative flex items-center gap-3.5 p-3 rounded-2xl bg-silk-900/80 border border-silk-800/80 hover:border-violet-500/50 shadow-md hover:shadow-violet-500/10 transition-all cursor-pointer select-none active:scale-[0.99]"
+                className="group relative flex items-center gap-3.5 p-3 rounded-2xl bg-silk-900 border border-silk-800 hover:border-silk-600 transition-colors cursor-pointer select-none active:scale-[0.99]"
               >
                 {/* Avatar with offset */}
                 <div className="relative w-14 h-14 rounded-2xl overflow-hidden shrink-0 border border-silk-700/60 bg-silk-800">
@@ -675,8 +675,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
 
       {/* Folder Creation Modal */}
       {showFolderModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="w-full max-w-xs bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80">
+          <div className="w-full max-w-xs bg-silk-900 border border-silk-700 rounded-2xl p-4 space-y-4">
             <h3 className="text-sm font-semibold text-white">{t.newFolder}</h3>
             <input
               type="text"
@@ -828,14 +828,14 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
             <button
               onClick={() => setShowGeneratorModal(true)}
               type="button"
-              className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-gradient-to-r from-violet-950/60 via-indigo-950/40 to-silk-900 border border-violet-800/40 shadow-lg text-left group"
+              className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-silk-900 hover:bg-silk-850 border border-silk-700 text-left group transition-colors"
             >
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-xl bg-violet-600/20 text-violet-400">
+                <div className="p-2 rounded-xl bg-silk-800 text-slate-300 border border-silk-700">
                   <Sparkles className="w-5 h-5" />
                 </div>
                 <div>
-                  <h4 className="text-xs font-semibold text-violet-200">{t.generateWithAI}</h4>
+                  <h4 className="text-xs font-semibold text-slate-100">{t.generateWithAI}</h4>
                   <p className="text-[11px] text-slate-400">
                     {language === 'ru'
                       ? 'Автоматическое создание характера, лора и первой реплики с поддержкой @ упоминаний'
@@ -843,7 +843,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                   </p>
                 </div>
               </div>
-              <ChevronRight className="w-4 h-4 text-violet-400 group-hover:translate-x-1 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-slate-400 group-hover:translate-x-0.5 transition-transform" />
             </button>
 
             {/* Manual Fields */}
@@ -1073,8 +1073,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
 
       {/* AI Generator Modal */}
       {showGeneratorModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in">
-          <div className="w-full max-w-sm max-h-[90vh] bg-silk-900 border border-silk-700 rounded-2xl flex flex-col overflow-hidden shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 animate-fade-in">
+          <div className="w-full max-w-sm max-h-[90vh] bg-silk-900 border border-silk-700 rounded-2xl flex flex-col overflow-hidden">
             {/* Header */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-silk-800">
               <div className="flex items-center gap-2">
@@ -1106,7 +1106,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
 
                 {/* @ Mention Autocomplete dropdown */}
                 {showMentionDropdown && (
-                  <div className="absolute left-0 right-0 top-full mt-1 z-20 bg-silk-850 border border-silk-700 rounded-xl shadow-2xl overflow-hidden max-h-36 overflow-y-auto text-xs">
+                  <div className="absolute left-0 right-0 top-full mt-1 z-20 bg-silk-850 border border-silk-700 rounded-xl overflow-hidden max-h-36 overflow-y-auto text-xs">
                     <div className="p-2 text-[10px] uppercase font-semibold text-slate-400 border-b border-silk-800">
                       Link Companion or Group Lore
                     </div>
