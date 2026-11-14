@@ -31,7 +31,16 @@ import {
 import { translations } from '../src/i18n/index.ts';
 import { speakerStopStrings, stripLeadingSpeakerName, resolveEmotion } from '../src/services/ai.ts';
 import { estimateTokens, planWindow, planSummaryBatch, summaryLimits, sceneNoteLines, SUMMARY_BATCH } from '../src/services/contextBudget.ts';
-import { normalizeLabel, calculateNodeScore, findDuplicateNodes, selectNodesToPrune, isSignificantTurn } from '../src/services/memoryGraph.ts';
+import { normalizeLabel, calculateNodeScore, findDuplicateNodes, selectNodesToPrune, isSignificantTurn, extractStateFacts } from '../src/services/memoryGraph.ts';
+import {
+  findRepetitionBoundary,
+  findForeignActorBoundary,
+  findMetaLeakBoundary,
+  stripLeakedMeta,
+  dedupeParagraphs,
+  trimIncompleteTail,
+  finalizeReplyText,
+} from '../src/services/replyGuard.ts';
 import { getLocalizedTextStyle, DEFAULT_STYLES, DEFAULT_THEME, APP_THEMES } from '../src/db/index.ts';
 import type { Character, Group, MemoryNode, MemoryEdge, TextStylePreset, AppSettings, ApiKeyConfig } from '../src/types/index.ts';
 
@@ -1274,7 +1283,7 @@ test('buildSystemPrompt (ru): localizes sections, enforces anti-godmoding, inclu
   assert.ok(!noPersonaPrompt.includes('ABSOLUTE RESPONSE LENGTH & PACING DIRECTIVE'));
   assert.ok(noPersonaPrompt.includes('НЕ БОЛЕЕ чем из 2 абзацев'));
   assert.ok(!noPersonaPrompt.includes('от 1 до 3 абзацев'));
-  const styleIdx = noPersonaPrompt.indexOf('СТИЛЬ ПОВЕСТВОВАНИЯ И ОБЪЕМ');
+  const styleIdx = noPersonaPrompt.indexOf('Стиль повествования:');
   const dirIdx = noPersonaPrompt.indexOf('ПОСТОЯННЫЕ ПРАВИЛА ЭТОГО ЧАТА');
   assert.ok(dirIdx > styleIdx && styleIdx !== -1, 'chatDirectives should come after textStyle to override it');
 
@@ -1587,4 +1596,52 @@ test('runaway guard, gender inference, and cleanArtifacts anti-leak rules', () =
     language: 'ru',
   });
   assert.ok(scene.includes('Отвечает Лира пишет о себе в женском роде; к Артем обращайся в мужском роде.'));
+});
+
+
+test('replyGuard: cuts lines written for the user and for other characters', () => {
+  const reply = '*Лира берет шарф и держит его в руках, рассматривая.*\n— Спасибо за заботу!\n*Артур улыбается в ответ и берет шарф.*';
+  const cut = finalizeReplyText(reply, { foreignNames: ['Артур'] });
+  assert.ok(cut.includes('Спасибо за заботу'));
+  assert.ok(!cut.includes('Артур улыбается'));
+
+  const group = '*Лира наклоняется к карте и проводит пальцем по чертежу.*\n— Это старая тропа.\n\nВиктор: *Виктор хмыкает.*';
+  const cutGroup = finalizeReplyText(group, { foreignNames: ['Виктор', 'Артур'] });
+  assert.ok(!cutGroup.includes('Виктор'));
+
+  // A vocative at the start of an action line is not acting for that person
+  const vocative = '*Лира кивает.* — Хорошо.\n*Артур, — тихо говорит она, — пойдем.*';
+  assert.strictEqual(findForeignActorBoundary(vocative, ['Артур']), -1);
+
+  // Opening lines are never cut away
+  assert.strictEqual(findForeignActorBoundary('Артур: привет', ['Артур'], 30), -1);
+});
+
+test('replyGuard: detects repeated paragraphs, leaked rule headers and incomplete tails', () => {
+  const para = '*Лира берет шарф и аккуратно закрепляет его вокруг своей шеи, проводя рукой по мягкому ворсу.*';
+  const repeated = `${para}\n— Спасибо.\n${para.replace('аккуратно ', '')}`;
+  assert.ok(findRepetitionBoundary(repeated) > 0);
+  assert.ok(!dedupeParagraphs(repeated).includes('закрепляет его вокруг шеи, проводя') || dedupeParagraphs(repeated).split('\n').length === 2);
+  assert.strictEqual(dedupeParagraphs('Первая строка.\nВторая строка совсем другая по смыслу и длине.').split('\n').length, 2);
+
+  const leaked = '*Он кивает и смотрит на огонь.*\n# Отверба:\n- Объем по умолчанию: от 3 до 5 емких абзацев.\n- Посланья могут меняться в ходе сцены.\n— Садись.';
+  assert.ok(findMetaLeakBoundary(leaked) > 0);
+  const stripped = stripLeakedMeta(leaked);
+  assert.ok(!stripped.includes('Отверба') && !stripped.includes('Объем') && !stripped.includes('Посланья'));
+  assert.ok(stripped.includes('— Садись.'));
+
+  const long = '*Она подходит к окну и долго смотрит на дорогу.* — Мне кажется, они уже близко, и нам нужно решить, что делать дальше, пока не стало поздно. Мы можем остаться здесь или уйти ночью через лес, и каждый вариант опасен по-своему. Затем';
+  const trimmed = trimIncompleteTail(long);
+  assert.ok(trimmed.endsWith('по-своему.'));
+  assert.strictEqual(trimIncompleteTail('Коротко.'), 'Коротко.');
+});
+
+test('extractStateFacts: records clothing and items that changed hands', () => {
+  const facts = extractStateFacts([
+    '*Артур протягивает Лире теплый синий шарф.* — Надень его.',
+    '*Лира надевает шарф и поправляет воротник.* — Спасибо.',
+  ]);
+  assert.ok(facts.length >= 1);
+  assert.ok(facts.some((f) => /шарф/i.test(f.detail)));
+  assert.strictEqual(extractStateFacts(['— Привет, как дела?', 'Привет!']).length, 0);
 });

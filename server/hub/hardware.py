@@ -4,8 +4,11 @@ The profile describes what the machine can run (memory budgets, parameter classe
 quantization class). It never names specific models.
 """
 
+import glob
+import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import time
@@ -30,7 +33,27 @@ def _find_nvidia_smi() -> Optional[str]:
         ):
             if os.path.exists(candidate):
                 return candidate
+        driver_store = glob.glob(r"C:\Windows\System32\DriverStore\FileRepository\nv*\nvidia-smi.exe")
+        if driver_store:
+            driver_store.sort(key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
+            return driver_store[0]
+    else:
+        for candidate in ("/usr/bin/nvidia-smi", "/usr/local/nvidia/bin/nvidia-smi", "/opt/bin/nvidia-smi"):
+            if os.path.exists(candidate):
+                return candidate
     return None
+
+
+def _parse_mib(raw: str) -> int:
+    if not raw:
+        return 0
+    match = re.search(r"(\d+(?:\.\d+)?)", raw)
+    if not match:
+        return 0
+    try:
+        return int(float(match.group(1))) * 1024 * 1024
+    except ValueError:
+        return 0
 
 
 def _query_nvidia() -> Optional[Dict[str, Any]]:
@@ -40,6 +63,7 @@ def _query_nvidia() -> Optional[Dict[str, Any]]:
     fields_sets = (
         "name,memory.total,memory.free,compute_cap,driver_version",
         "name,memory.total,memory.free,driver_version",
+        "name,memory.total,driver_version",
     )
     for fields in fields_sets:
         try:
@@ -52,25 +76,84 @@ def _query_nvidia() -> Optional[Dict[str, Any]]:
         except Exception:
             continue
         gpus = []
+        field_list = fields.split(",")
         for line in out.splitlines():
             parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 4:
+            if len(parts) < len(field_list):
                 continue
-            try:
-                gpu = {
-                    "name": parts[0],
-                    "vram_total": int(float(parts[1])) * 1024 * 1024,
-                    "vram_free": int(float(parts[2])) * 1024 * 1024,
-                    "compute_cap": "",
-                    "driver": parts[-1],
-                }
-                if "compute_cap" in fields:
-                    gpu["compute_cap"] = parts[3]
+            row = dict(zip(field_list, parts))
+            name = row.get("name", "")
+            if not name:
+                continue
+            vram_total = _parse_mib(row.get("memory.total", ""))
+            vram_free = _parse_mib(row.get("memory.free", ""))
+            if vram_total <= 0 and "nvidia" in name.lower():
+                vram_total = 4 * GIB
+            if vram_free <= 0 and vram_total > 0:
+                vram_free = int(vram_total * 0.88)
+            comp = row.get("compute_cap", "")
+            if comp and ("n/a" in comp.lower() or "not" in comp.lower()):
+                comp = ""
+            gpu = {
+                "name": name,
+                "vram_total": vram_total,
+                "vram_free": vram_free,
+                "compute_cap": comp,
+                "driver": row.get("driver_version", ""),
+            }
+            if vram_total > 0:
                 gpus.append(gpu)
-            except ValueError:
-                continue
         if gpus:
             return {"gpus": gpus}
+    return None
+
+
+def _detect_windows_wmi_nvidia() -> Optional[Dict[str, Any]]:
+    """Fallback when nvidia-smi is not in PATH or blocked on Windows."""
+    if os.name != "nt":
+        return None
+    cmd = [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM,DriverVersion | ConvertTo-Json -Compress",
+    ]
+    try:
+        out = subprocess.check_output(cmd, universal_newlines=True, timeout=6, stderr=subprocess.DEVNULL).strip()
+        if not out:
+            return None
+        data = json.loads(out)
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("Name") or "").strip()
+            if "nvidia" in name.lower() or "geforce" in name.lower() or "rtx" in name.lower() or "gtx" in name.lower():
+                raw_ram = int(item.get("AdapterRAM") or 0)
+                # Win32_VideoController caps AdapterRAM at 4 GiB (uint32); estimate by model name if capped
+                low = name.lower()
+                if any(x in low for x in ("4090", "3090", "5090")):
+                    vram_total = 24 * GIB
+                elif any(x in low for x in ("4080", "5080", "4070 ti super", "3080 12")):
+                    vram_total = 16 * GIB
+                elif any(x in low for x in ("4070", "3060", "3080", "4060 ti", "6700", "7700")):
+                    vram_total = 12 * GIB
+                elif any(x in low for x in ("4060", "3070", "3060 ti", "2080", "2070", "2060 super", "1080", "1070")):
+                    vram_total = 8 * GIB
+                elif any(x in low for x in ("2060", "1660", "3050 6", "1060")):
+                    vram_total = 6 * GIB
+                else:
+                    vram_total = max(raw_ram, 4 * GIB)
+                return {
+                    "name": name,
+                    "count": 1,
+                    "vram_total": vram_total,
+                    "vram_free": int(vram_total * 0.88),
+                    "compute_cap": "",
+                    "driver": str(item.get("DriverVersion") or ""),
+                }
+    except Exception:
+        pass
     return None
 
 
@@ -78,7 +161,7 @@ def detect_nvidia() -> Optional[Dict[str, Any]]:
     """Return a summary of the NVIDIA GPUs (memory is summed across devices)."""
     data = _query_nvidia()
     if not data:
-        return None
+        return _detect_windows_wmi_nvidia()
     gpus = data["gpus"]
     best = max(gpus, key=lambda g: g["vram_total"])
     return {

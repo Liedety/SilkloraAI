@@ -3,10 +3,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hub import context, gguf, planner, sanitize, store  # noqa: E402
+from hub import context, gguf, hardware, planner, sanitize, store  # noqa: E402
+from hub import engine as engine_mod  # noqa: E402
 from hub.hardware import GIB, build_profile  # noqa: E402
 
 
@@ -299,6 +301,35 @@ class SanitizeTests(unittest.TestCase):
         tail_c, _ = s.finish()
         out.append(tail_c)
         self.assertEqual("".join(out).strip(), "*Waves.*")
+
+
+class HardwareAndEngineWarningTests(unittest.TestCase):
+    def test_parse_mib_handles_units_and_invalid_values(self):
+        self.assertEqual(hardware._parse_mib("8192 MiB"), 8192 * 1024 * 1024)
+        self.assertEqual(hardware._parse_mib("12288"), 12288 * 1024 * 1024)
+        self.assertEqual(hardware._parse_mib(""), 0)
+        self.assertEqual(hardware._parse_mib("N/A"), 0)
+
+    def test_detect_windows_wmi_nvidia_parses_card_and_driver(self):
+        payload = '[{"Name":"Intel(R) UHD Graphics","AdapterRAM":1073741824,"DriverVersion":"31.0"},' \
+                  '{"Name":"NVIDIA GeForce RTX 4060","AdapterRAM":4293918720,"DriverVersion":"32.0.15.6070"}]'
+        with mock.patch.object(hardware.os, "name", "nt"), \
+             mock.patch.object(hardware.subprocess, "check_output", return_value=payload):
+            gpu = hardware._detect_windows_wmi_nvidia()
+        self.assertIsNotNone(gpu)
+        self.assertEqual(gpu["name"], "NVIDIA GeForce RTX 4060")
+        self.assertEqual(gpu["vram_total"], 8 * GIB)
+        self.assertEqual(gpu["driver"], "32.0.15.6070")
+
+    def test_build_plan_emits_engine_cpu_only_warning_when_cuda_present_without_offload(self):
+        mgr = engine_mod.Engine()
+        with mock.patch.object(engine_mod, "inspect_model", return_value=llama_info(4.9)), \
+             mock.patch.object(engine_mod, "analyze_hardware", return_value=make_hw(vram_gb=12, kind="cuda")), \
+             mock.patch.object(engine_mod, "engine_info", return_value={"available": True, "gpu_offload": False}):
+            plan = mgr.build_plan("dummy.gguf", None, {})
+        self.assertEqual(plan["offload"], "none")
+        self.assertEqual(plan["n_gpu_layers"], 0)
+        self.assertIn("engine_cpu_only", plan.get("warnings", []))
 
 
 if __name__ == "__main__":

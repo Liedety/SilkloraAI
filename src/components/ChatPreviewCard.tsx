@@ -27,14 +27,8 @@ export const ChatPreviewCard: React.FC<ChatPreviewCardProps> = ({ theme, languag
     });
   };
 
-  const fontFamilyStyle =
-    theme.fontFamily === 'serif'
-      ? 'Georgia, Cambria, "Times New Roman", serif'
-      : theme.fontFamily === 'mono'
-      ? 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
-      : theme.fontFamily === 'pixel'
-      ? '"Pixelify Sans", ui-sans-serif, system-ui, sans-serif'
-      : 'inherit';
+  // The selected font applies to the whole app, so message text simply inherits it
+  const fontFamilyStyle = 'inherit';
 
   const lineHeightStyle =
     theme.lineHeight === 'loose'

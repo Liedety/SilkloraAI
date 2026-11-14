@@ -8,31 +8,11 @@ import { CharactersView } from './views/CharactersView';
 import { GroupsView } from './views/GroupsView';
 import { SettingsView } from './views/SettingsView';
 import { ChatView } from './views/ChatView';
-
-const LAST_CHAT_STORAGE_KEY = 'silklora_last_chat_v1';
+import { fontStack } from './utils/fonts';
 
 interface SavedChatRef {
   type: 'character' | 'group';
   targetId: string;
-}
-
-function readStoredLastChat(): SavedChatRef | null {
-  try {
-    const raw = window.localStorage.getItem(LAST_CHAT_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (
-      parsed &&
-      (parsed.type === 'character' || parsed.type === 'group') &&
-      typeof parsed.targetId === 'string' &&
-      parsed.targetId.trim()
-    ) {
-      return { type: parsed.type, targetId: parsed.targetId };
-    }
-  } catch {
-    // ignore storage errors
-  }
-  return null;
 }
 
 function parseHexColor(hex: string, fallback: [number, number, number] = [82, 82, 91]): [number, number, number] {
@@ -75,12 +55,9 @@ function contrastTextColor(hex: string): string {
 }
 
 export const App: React.FC = () => {
-  const initialLastChat = React.useMemo(() => readStoredLastChat(), []);
-  const [activeTab, setActiveTab] = useState<TabType>(() =>
-    initialLastChat?.type === 'group' ? 'groups' : 'characters'
-  );
-  const [activeChat, setActiveChat] = useState<SavedChatRef | null>(initialLastChat);
-  const didValidateInitialChatRef = React.useRef(false);
+  // The app always opens on the characters list; each chat reopens its own last session
+  const [activeTab, setActiveTab] = useState<TabType>('characters');
+  const [activeChat, setActiveChat] = useState<SavedChatRef | null>(null);
 
   // Floating save button state
   const [isDirty, setIsDirty] = useState(false);
@@ -92,42 +69,16 @@ export const App: React.FC = () => {
   const language: Language = settings?.language || 'en';
 
   useEffect(() => {
-    let cancelled = false;
     (async () => {
       await initDatabaseDefaults();
-      if (cancelled || didValidateInitialChatRef.current) return;
-      didValidateInitialChatRef.current = true;
-
-      let candidate = initialLastChat;
-      if (!candidate) {
-        const s = await db.settings.get('default');
-        candidate = s?.lastOpenedChat || null;
-      }
-      if (!candidate) return;
-
-      const exists =
-        candidate.type === 'character'
-          ? Boolean(await db.characters.get(candidate.targetId))
-          : Boolean(await db.groups.get(candidate.targetId));
-
-      if (cancelled) return;
-      if (exists) {
-        setActiveChat(candidate);
-        setActiveTab(candidate.type === 'group' ? 'groups' : 'characters');
-      } else {
-        setActiveChat(null);
-        try {
-          window.localStorage.removeItem(LAST_CHAT_STORAGE_KEY);
-        } catch {
-          // ignore
-        }
-        await db.settings.update('default', { lastOpenedChat: null });
+      // Ask the system not to evict local data (settings, chats, theme) under storage pressure
+      try {
+        await navigator.storage?.persist?.();
+      } catch {
+        // not supported
       }
     })();
-    return () => {
-      cancelled = true;
-    };
-  }, [initialLastChat]);
+  }, []);
 
   // Dynamically update CSS variables when theme changes
   useEffect(() => {
@@ -171,16 +122,10 @@ export const App: React.FC = () => {
         metaThemeColor.setAttribute('content', bg);
       }
 
-      const fontFamily =
-        settings.theme.fontFamily === 'serif'
-          ? 'Georgia, Cambria, "Times New Roman", serif'
-          : settings.theme.fontFamily === 'mono'
-          ? 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
-          : settings.theme.fontFamily === 'pixel'
-          ? '"Pixelify Sans", ui-sans-serif, system-ui, sans-serif'
-          : 'inherit';
-      root.style.setProperty('--chat-font-family', fontFamily);
-      root.setAttribute('data-ui-font', settings.theme.usePixelUiFont ? 'pixel' : 'default');
+      const fontChoice = settings.theme.fontFamily || 'sans';
+      root.style.setProperty('--app-font', fontStack(fontChoice));
+      root.style.setProperty('--chat-font-family', 'inherit');
+      root.setAttribute('data-font', fontChoice);
     }
   }, [settings?.theme]);
 
@@ -207,12 +152,6 @@ export const App: React.FC = () => {
     setIsDirty(false);
     setSaveAction(null);
     setActiveChat(chat);
-    try {
-      window.localStorage.setItem(LAST_CHAT_STORAGE_KEY, JSON.stringify(chat));
-    } catch {
-      // ignore storage errors
-    }
-    db.settings.update('default', { lastOpenedChat: chat }).catch(() => {});
   };
 
   const handleBackFromChat = () => {
@@ -235,14 +174,16 @@ export const App: React.FC = () => {
       {/* Active Screen */}
       <main className="flex-1 w-full h-full overflow-hidden">
         {activeChat ? (
-          <ChatView
-            type={activeChat.type}
-            targetId={activeChat.targetId}
-            language={language}
-            onBack={handleBackFromChat}
-          />
+          <div key={`chat-${activeChat.type}-${activeChat.targetId}`} className="w-full h-full animate-chat-in">
+            <ChatView
+              type={activeChat.type}
+              targetId={activeChat.targetId}
+              language={language}
+              onBack={handleBackFromChat}
+            />
+          </div>
         ) : (
-          <>
+          <div key={`tab-${activeTab}`} className="w-full h-full animate-view-in">
             {activeTab === 'characters' && (
               <CharactersView
                 language={language}
@@ -264,7 +205,7 @@ export const App: React.FC = () => {
                 onDirtyChange={handleDirtyChange}
               />
             )}
-          </>
+          </div>
         )}
       </main>
 

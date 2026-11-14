@@ -35,8 +35,8 @@ export default {
         }
       },
       fontFamily: {
-        sans: ['system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
-        pixel: ['"Pixelify Sans"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        sans: ['var(--app-font)', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
+        pixel: ['"DotGothic16"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
       }
     },
   },

@@ -69,6 +69,7 @@ import {
   summaryLimits,
 } from '../services/contextBudget';
 import { extractMemoryAndAffinity } from '../services/memoryGraph';
+import { finalizeReplyText } from '../services/replyGuard';
 import { ChatSettingsModal } from './ChatSettingsModal';
 import { AvatarImage } from '../components/AvatarImage';
 
@@ -167,14 +168,28 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   };
 
-  // Initialize or fetch active session
+  // Initialize or fetch active session: reopen the session the user was last in for this character or group
+  const lastSessionKey = `silklora_last_session_${targetId}`;
+  const sessionInitForRef = useRef<string | null>(null);
+  const targetReady = type === 'character' ? Boolean(character) : Boolean(group);
+
   useEffect(() => {
+    if (!targetReady) return;
+    // Run once per opened chat: later updates of the character or group must not reset the session
+    if (sessionInitForRef.current === `${type}:${targetId}`) return;
+    sessionInitForRef.current = `${type}:${targetId}`;
+
     async function initSession() {
-      const existing = await db.chats
-        .where('targetId')
-        .equals(targetId)
-        .reverse()
-        .first();
+      const sessions = await db.chats.where('targetId').equals(targetId).toArray();
+      let stored: string | null = null;
+      try {
+        stored = window.localStorage.getItem(lastSessionKey);
+      } catch {
+        // ignore storage errors
+      }
+      const remembered = stored ? sessions.find((x) => x.id === stored) : undefined;
+      const newest = [...sessions].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0];
+      const existing = remembered || newest;
 
       if (existing) {
         setCurrentSessionId(existing.id);
@@ -200,10 +215,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
       }
     }
 
-    if (character || group) {
-      initSession();
+    initSession();
+  }, [type, targetId, targetReady]);
+
+  // Remember the open session for this character or group
+  useEffect(() => {
+    if (!currentSessionId) return;
+    try {
+      window.localStorage.setItem(lastSessionKey, currentSessionId);
+    } catch {
+      // ignore storage errors
     }
-  }, [type, targetId, character, group]);
+    // Opening a session makes it the most recent one, which also orders the history list
+    db.chats.update(currentSessionId, { updatedAt: Date.now() }).catch(() => {});
+  }, [currentSessionId, lastSessionKey]);
 
   // Current session query
   const session = useLiveQuery(
@@ -274,14 +299,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const currentTheme = settings?.theme || DEFAULT_THEME;
 
-  const fontFamilyStyle =
-    currentTheme.fontFamily === 'serif'
-      ? 'Georgia, Cambria, "Times New Roman", serif'
-      : currentTheme.fontFamily === 'mono'
-      ? 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
-      : currentTheme.fontFamily === 'pixel'
-      ? '"Pixelify Sans", ui-sans-serif, system-ui, sans-serif'
-      : 'inherit';
+  // The selected font applies to the whole app, so message text simply inherits it
+  const fontFamilyStyle = 'inherit';
 
   const lineHeightStyle =
     currentTheme.lineHeight === 'loose'
@@ -300,12 +319,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const prevScrollHeightRef = useRef<number>(0);
   const prevScrollTopRef = useRef<number>(0);
   const isSmoothScrollingToBottomRef = useRef(false);
+  // True as soon as the reader scrolls up: streaming must never pull the view back down
+  const userScrolledUpRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
 
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
     hasInitialScrolledRef.current = false;
     setShowScrollBottom(false);
     isSmoothScrollingToBottomRef.current = false;
+    userScrolledUpRef.current = false;
+    lastScrollTopRef.current = 0;
   }, [currentSessionId]);
 
   const totalMessagesCount = messages.length;
@@ -315,6 +339,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     : messages;
 
   const scrollToBottom = (smooth = true) => {
+    userScrolledUpRef.current = false;
     if (chatContainerRef.current) {
       if (smooth) {
         isSmoothScrollingToBottomRef.current = true;
@@ -345,11 +370,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   }, [visibleCount]);
 
-  // Keep pinned to bottom during generation / new message ONLY if user hasn't scrolled up
+  // Keep pinned to bottom during generation / new message ONLY if the reader has not scrolled up
   useEffect(() => {
-    if (hasInitialScrolledRef.current && !showScrollBottom && chatContainerRef.current) {
-      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
-    }
+    const el = chatContainerRef.current;
+    if (!el || !hasInitialScrolledRef.current || userScrolledUpRef.current) return;
+    el.scrollTop = el.scrollHeight;
   }, [totalMessagesCount, streamingText]);
 
   const triggerLoadOlderMessages = () => {
@@ -363,23 +388,39 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget;
     const { scrollTop, scrollHeight, clientHeight } = target;
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
 
-    // Check if scrolled away from bottom (> 140px)
-    const isAway = scrollHeight - scrollTop - clientHeight > 140;
+    // Any upward movement hands control to the reader, even a few pixels
+    const movedUp = scrollTop < lastScrollTopRef.current - 2;
+    lastScrollTopRef.current = scrollTop;
+    if (movedUp && !isLoadingOlderRef.current) {
+      userScrolledUpRef.current = true;
+      isSmoothScrollingToBottomRef.current = false;
+    } else if (distanceFromBottom <= 32) {
+      userScrolledUpRef.current = false;
+    }
 
     if (isSmoothScrollingToBottomRef.current) {
-      if (!isAway) {
+      if (distanceFromBottom <= 140) {
         isSmoothScrollingToBottomRef.current = false;
       }
       setShowScrollBottom(false);
       return;
     }
 
-    setShowScrollBottom(isAway);
+    setShowScrollBottom(distanceFromBottom > 140 || (userScrolledUpRef.current && distanceFromBottom > 48));
 
     // Progressive lazy loading when user scrolls near top (< 60px)
     if (scrollTop < 60 && hasMoreMessages && !isLoadingOlderRef.current) {
       triggerLoadOlderMessages();
+    }
+  };
+
+  // A finger or wheel on the message list always cancels automatic following
+  const handleUserScrollIntent = (deltaY?: number) => {
+    isSmoothScrollingToBottomRef.current = false;
+    if (deltaY === undefined || deltaY < 0) {
+      userScrolledUpRef.current = deltaY === undefined ? userScrolledUpRef.current : true;
     }
   };
 
@@ -602,6 +643,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
           relationshipScore: affinity,
           memoryNodes,
           emotionNames: speaker.emotions?.map((e) => e.name),
+          presentNames: type === 'group'
+            ? groupMembers.filter((c) => c.id !== speaker.id && c.id !== userPersona?.id).map((c) => c.name)
+            : undefined,
+          mentionedNames: type === 'group'
+            ? groupMembers
+                .filter((c) => c.id !== speaker.id && c.id !== userPersona?.id)
+                .map((c) => c.name)
+                .filter((n) => lastUserText.toLowerCase().includes(n.toLowerCase().slice(0, Math.max(3, n.length - 2))))
+            : undefined,
         }),
       ]);
       const turnGuidanceBlock = guidancePrompt?.trim()
@@ -769,6 +819,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       await streamChatCompletion({
         apiKeyConfig: (turnConfig ? turnConfig.apiKeyConfig : effectiveApiKey) as ApiKeyConfig,
         model: turnConfig ? turnConfig.textModel : effectiveModel,
+        foreignNames: otherSpeakers,
         // Also stop if the model starts quoting the hidden scene note, turn directive, or fake multi-turn headers
         extraStops: [
           ...speakerStopStrings(otherSpeakers),
@@ -824,9 +875,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
             const { text: extractedText, thought: finalThought, emotion: finalEmotion } =
               extractEmotionAndCleanResponse(completed, speaker.emotions, speaker.name);
-            const deEchoed = stripEchoedUserPrefix(
-              extractedText || cleanArtifacts(completed, speaker.emotions),
-              lastUserRawText
+            const deEchoed = finalizeReplyText(
+              stripEchoedUserPrefix(
+                extractedText || cleanArtifacts(completed, speaker.emotions),
+                lastUserRawText
+              ),
+              { foreignNames: otherSpeakers }
             );
             const boundedText = enforceParagraphLimit(
               deEchoed,
@@ -1026,6 +1080,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       setShowScrollBottom(false);
       isSmoothScrollingToBottomRef.current = false;
+      userScrolledUpRef.current = false;
       requestAnimationFrame(() => {
         scrollToBottom(false);
       });
@@ -1372,6 +1427,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
       <div
         ref={chatContainerRef}
         onScroll={handleScroll}
+        onWheel={(e) => handleUserScrollIntent(e.deltaY)}
+        onTouchStart={() => handleUserScrollIntent()}
         className="relative z-10 flex-1 overflow-y-auto p-4 space-y-4 pb-4"
       >
         {/* Load older messages button */}
@@ -1404,7 +1461,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             return (
               <div
                 key={msg.id}
-                className={`flex ${isUser ? 'justify-end' : 'justify-start'} items-end gap-2.5 group`}
+                className={`flex ${isUser ? 'justify-end' : 'justify-start'} items-end gap-2.5 group ${Date.now() - msg.createdAt < 2500 ? 'animate-message-in' : ''}`}
               >
               {/* Bot Avatar with Emotion Sprite */}
               {!isUser && (

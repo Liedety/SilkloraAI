@@ -1,4 +1,5 @@
 import type { AiBackend, AiComponent, ApiKeyConfig, AppSettings, Character, CharacterEmotion, Group, Language } from '../types';
+import { findRepetitionBoundary, findForeignActorBoundary, findMetaLeakBoundary } from './replyGuard.ts';
 
 export const INFER_EMOTION_FROM_TEXT = false;
 
@@ -302,6 +303,8 @@ export interface StreamOptions {
   signal?: AbortSignal;
   /** Extra stop strings, e.g. "\nPersonaName:" so the model cannot start writing for the user. */
   extraStops?: string[];
+  /** Names of the user and other characters: the stream is cut when the reply starts writing for them. */
+  foreignNames?: string[];
   onToken: (token: string) => void;
   onComplete?: (fullText: string) => void;
   onError: (err: Error) => void;
@@ -329,7 +332,7 @@ function getProviderBaseUrl(config: ApiKeyConfig): string {
  * Detects when a local model forgets its EOS token and starts simulating a follow-up turn
  * (>user, >fuser, >assistant, [Собеседник: ...], echoed context dividers, or repeated emotion loops).
  */
-export function findSimulatedTurnBoundary(text: string): number {
+export function findSimulatedTurnBoundary(text: string, opts: { foreignNames?: string[] } = {}): number {
   if (!text) return -1;
   const thoughtStrip = text.replace(/<thought>[\s\S]*?<\/thought>/gi, '');
   if (thoughtStrip.trim().length < 45) return -1;
@@ -361,6 +364,15 @@ export function findSimulatedTurnBoundary(text: string): number {
     if (earliest === -1 || emoMatches[1].index < earliest) {
       earliest = emoMatches[1].index;
     }
+  }
+
+  const extra = [
+    findRepetitionBoundary(text),
+    findForeignActorBoundary(text, opts.foreignNames || [], 40),
+    findMetaLeakBoundary(text, 40),
+  ];
+  for (const idx of extra) {
+    if (idx >= 40 && (earliest === -1 || idx < earliest)) earliest = idx;
   }
 
   return earliest;
@@ -521,7 +533,7 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
               const out = reasoningOpen ? `</thought>\n${delta}` : delta;
               reasoningOpen = false;
               fullText += out;
-              const boundary = findSimulatedTurnBoundary(fullText);
+              const boundary = findSimulatedTurnBoundary(fullText, { foreignNames: options.foreignNames });
               if (boundary !== -1) {
                 fullText = fullText.slice(0, boundary).trimEnd();
                 stoppedForRunaway = true;

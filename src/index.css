@@ -65,14 +65,26 @@ html, body {
   touch-action: manipulation;
 }
 
-:root[data-ui-font='pixel'] h1,
-:root[data-ui-font='pixel'] h2,
-:root[data-ui-font='pixel'] h3,
-:root[data-ui-font='pixel'] nav,
-:root[data-ui-font='pixel'] button,
-:root[data-ui-font='pixel'] .font-pixel {
-  font-family: 'Pixelify Sans', ui-sans-serif, system-ui, sans-serif;
-  letter-spacing: 0.015em;
+/* One font setting drives the whole app: interface and chat share --app-font */
+:root {
+  --app-font: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+html,
+body,
+button,
+input,
+textarea,
+select {
+  font-family: var(--app-font);
+}
+
+:root[data-font='pixel'] {
+  font-synthesis: none;
+}
+
+:root[data-font='pixel'] body {
+  letter-spacing: 0.01em;
 }
 
 /* Custom scrollbars */
@@ -119,6 +131,88 @@ html, body {
 .animate-fade-in {
   animation: fadeIn 0.15s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
+
+@keyframes viewIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes chatIn {
+  from {
+    opacity: 0;
+    transform: translateX(28px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes popIn {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes messageIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-view-in {
+  animation: viewIn 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-chat-in {
+  animation: chatIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-pop-in {
+  animation: popIn 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-message-in {
+  animation: messageIn 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Smooth color and press feedback for interactive elements */
+button,
+a,
+input,
+select,
+textarea {
+  transition-property: color, background-color, border-color, opacity, transform;
+  transition-duration: 0.16s;
+  transition-timing-function: ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-view-in,
+  .animate-chat-in,
+  .animate-pop-in,
+  .animate-message-in,
+  .animate-fade-in {
+    animation: none !important;
+  }
+}
+
 
 .animate-slide-up {
   animation: slideUp 0.15s cubic-bezier(0.16, 1, 0.3, 1) forwards;

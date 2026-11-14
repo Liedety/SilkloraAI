@@ -94,6 +94,14 @@ class CandidateTests(unittest.TestCase):
     def test_no_compute_capability_means_no_gpu_candidates(self):
         self.assertEqual(bootstrap.windows_cuda_candidates({"name": "x", "compute_cap": "", "driver": "581"}), [])
 
+    def test_compute_cap_number_falls_back_to_gpu_name(self):
+        self.assertEqual(bootstrap.compute_cap_number({"name": "NVIDIA GeForce RTX 5070", "compute_cap": ""}), 120)
+        self.assertEqual(bootstrap.compute_cap_number({"name": "NVIDIA GeForce RTX 4060", "compute_cap": ""}), 89)
+        self.assertEqual(bootstrap.compute_cap_number({"name": "NVIDIA GeForce RTX 3060", "compute_cap": ""}), 86)
+        self.assertEqual(bootstrap.compute_cap_number({"name": "NVIDIA GeForce GTX 1660", "compute_cap": ""}), 75)
+        cands = bootstrap.windows_cuda_candidates({"name": "NVIDIA GeForce RTX 4060", "compute_cap": "", "driver": "581.15"})
+        self.assertTrue(cands)
+
 
 class CrashDetectionTests(unittest.TestCase):
     def test_winerror_text_is_recognized(self):

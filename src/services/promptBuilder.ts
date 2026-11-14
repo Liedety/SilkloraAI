@@ -408,8 +408,9 @@ ${emoTag}<thought>He is pushing too hard. If I give in now, he'll think I'm weak
         prompt += `\n### КРИТИЧЕСКОЕ ПРАВИЛО ГРУППОВОГО ЧАТА:
 - Ты отыгрываешь ТОЛЬКО **${currentSpeaker?.name}**.
 - Другие персонажи сцены (${otherNames}) и ${userName} управляются отдельно!
+- Все они находятся здесь, рядом с тобой: ты видишь и слышишь каждого, можешь обращаться к ним и реагировать на их слова. Если ${userName} называет кого-то из них, значит этот человек сейчас в сцене.
 - ЗАПРЕЩЕНО писать реплики, действия или мысли за ${otherNames} или за ${userName}.
-- НИКОГДА не начинай ответ с имени персонажа или префикса («${currentSpeaker?.name}:», «${userName}:»).\n`;
+- НИКОГДА не начинай ответ с имени персонажа или префикса («${currentSpeaker?.name}:», «${userName}:»). Закончи свой ход и остановись.\n`;
       } else {
         prompt += `\n### CRITICAL GROUP CHAT SPEAKER IDENTITY:
 - You are strictly, solely, and uniquely **${currentSpeaker?.name}**.
@@ -528,9 +529,8 @@ Use this background context to maintain continuity.\n`;
       ? adaptStyleInstructionForLengthOverride(textStyle.instruction, language)
       : textStyle.instruction;
     if (ru) {
-      prompt += `\n### СТИЛЬ ПОВЕСТВОВАНИЯ И ОБЪЕМ:
-Стиль: «${textStyle.name}» — ${anchorStyleInstruction}
-${activeLengthOverride ? `- ${activeLengthOverride}` : '- Объем по умолчанию: от 1 до 3 емких абзацев. Оставляй пространство для хода собеседника.'}\n`;
+      prompt += `\nСтиль повествования: «${textStyle.name}». ${anchorStyleInstruction}
+${activeLengthOverride ? activeLengthOverride : 'Обычно ответ занимает от 1 до 3 емких абзацев, после чего ход переходит к собеседнику.'}\n`;
     } else {
       prompt += `\n### MANDATORY WRITING STYLE & FORMATTING LIMITS:
 Style name: ${textStyle.name}
@@ -540,9 +540,7 @@ Instruction: ${anchorStyleInstruction}
     }
   } else {
     if (ru) {
-      prompt += `\n### КОНТРОЛЬ РОЛИ И ОБЪЕМА:
-- ${activeLengthOverride || 'Стандартный объем: от 1 до 3 емких абзацев (требования пользователя в правилах чата или пожеланиях важнее).'}
-- Запрещена «вода», пересказ слов собеседника и отыгрыш за ${userName}.\n`;
+      prompt += `\n${activeLengthOverride || 'Обычно ответ занимает от 1 до 3 емких абзацев (требования пользователя в правилах чата или пожеланиях важнее).'} Без воды, без пересказа слов собеседника и без отыгрыша за ${userName}.\n`;
     } else {
       prompt += `\n### ABSOLUTE RESPONSE LENGTH & PACING DIRECTIVE:
 - ${activeLengthOverride || 'Keep your response focused, vivid, and proportional: strictly 1 to 3 paragraphs max unless explicitly directed otherwise.'}
@@ -643,10 +641,29 @@ export function buildSceneNote(params: {
   memoryNodes?: MemoryNode[];
   emotionNames?: string[];
   guidance?: string;
+  /** Group chat: everyone who is in the scene right now (other characters, without the speaker and the user). */
+  presentNames?: string[];
+  /** Group chat: names the user mentioned in the last message. */
+  mentionedNames?: string[];
 }): string {
-  const { speakerName, userName, speakerGender, userGender, language = 'en', relationshipScore = 0, memoryNodes = [], emotionNames, guidance } = params;
+  const { speakerName, userName, speakerGender, userGender, language = 'en', relationshipScore = 0, memoryNodes = [], emotionNames, guidance, presentNames = [], mentionedNames = [] } = params;
   const ru = language === 'ru';
   const lines: string[] = [];
+  if (presentNames.length > 0) {
+    const others = presentNames.join(', ');
+    lines.push(
+      ru
+        ? `В сцене сейчас: ${speakerName} (это ты), ${others} и ${userName}. Пиши только за ${speakerName}.`
+        : `In the scene now: ${speakerName} (you), ${others} and ${userName}. Write only for ${speakerName}.`
+    );
+    if (mentionedNames.length > 0) {
+      lines.push(
+        ru
+          ? `${userName} упомянул: ${mentionedNames.join(', ')}. Они рядом и слышат разговор.`
+          : `${userName} mentioned: ${mentionedNames.join(', ')}. They are present and hear the conversation.`
+      );
+    }
+  }
   if (speakerGender || userGender) {
     const sg = speakerGender === 'female'
       ? (ru ? ' пишет о себе в женском роде' : ' uses she/her')
@@ -676,8 +693,8 @@ export function buildSceneNote(params: {
       if (!a.isPinned && b.isPinned) return 1;
       return b.createdAt - a.createdAt;
     });
-    lines.push(ru ? 'Известные факты сцены:' : 'Established facts:');
-    for (const node of sorted.slice(0, 6)) {
+    lines.push(ru ? 'Известные факты сцены (учитывай их):' : 'Established facts (keep them consistent):');
+    for (const node of sorted.slice(0, 8)) {
       const pinPrefix = node.isPinned ? (ru ? 'Важно — ' : 'Core — ') : '';
       lines.push(`- ${pinPrefix}${node.label}: ${node.detail}`);
     }

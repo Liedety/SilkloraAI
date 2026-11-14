@@ -274,6 +274,84 @@ export async function pruneAndConsolidateMemories(
   return { prunedCount, consolidatedCount };
 }
 
+export interface StateFact {
+  label: string;
+  detail: string;
+  kind: 'clothing' | 'item' | 'pose';
+}
+
+const CLOTHING_RE = /(?:над[еи]л[аио]?|надева\p{L}*|оде[лв]\p{L}*|одева\p{L}*|накину\p{L}*|накидыва\p{L}*|натян\p{L}*|обул\p{L}*|переоде\p{L}*|сн[яи]л\p{L}*|снима\p{L}*|завяза\p{L}*|застегну\p{L}*|повяза\p{L}*|укутал\p{L}*|put(?:s|ting)? on|wears?|wore|changed into|takes? off|took off|slipped into|wrapped)/iu;
+const ITEM_RE = /(?:протяну\p{L}*|вручи\p{L}*|подари\p{L}*|отда[лё]\p{L}*|передал\p{L}*|взял\p{L}*|бер[её]т|достал\p{L}*|получил\p{L}*|принес\p{L}*|принёс\p{L}*|handed|hands|gives?|gave|takes?|took|picked up|received|brought)/iu;
+const POSE_RE = /(?:сел[аи]?|садится|встал[аи]?|встаёт|встает|лег[лаи]?|ложится|вошл[аи]?|входит|вышл[аи]?|выходит|подош[её]л\p{L}*|sits? down|sat down|stands? up|stood up|enters?|entered|leaves?|left the)/iu;
+
+function plainSentence(s: string): string {
+  return s.replace(/[*_`>#]+/g, '').replace(/<[^>]{1,40}>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Deterministic scene-state extraction (clothing, items that changed hands, entering/leaving, posture).
+ * Small local models do not extract these facts reliably, so they are captured with plain rules
+ * and later shown in the scene note.
+ */
+export function extractStateFacts(texts: string[], maxFacts = 3): StateFact[] {
+  const facts: StateFact[] = [];
+  const seen = new Set<string>();
+  for (const raw of texts) {
+    if (!raw) continue;
+    const sentences = plainSentence(raw.replace(/\n+/g, '. ')).split(/(?<=[.!?…])\s+/);
+    for (const sentence of sentences) {
+      const clause = sentence.trim();
+      if (clause.length < 12 || clause.length > 220) continue;
+      // Quoted speech without narration is a wish or a question, not an established event
+      if (/^[—-]/.test(clause) && /\?$/.test(clause)) continue;
+      const kind = CLOTHING_RE.test(clause) ? 'clothing' : ITEM_RE.test(clause) ? 'item' : POSE_RE.test(clause) ? 'pose' : null;
+      if (!kind) continue;
+      const words = clause.replace(/[—–-]\s*/g, '').split(' ').filter(Boolean);
+      const label = words.slice(0, 6).join(' ').replace(/[.,!?…:;]+$/, '');
+      const norm = normalizeLabel(label);
+      if (!norm || seen.has(norm)) continue;
+      // Poses are weak facts: keep them only when no stronger fact was found in this pass
+      if (kind === 'pose' && facts.length >= 1) continue;
+      seen.add(norm);
+      facts.push({ label, kind, detail: clause.length > 160 ? clause.slice(0, 157).trimEnd() + '...' : clause });
+      if (facts.length >= maxFacts) return facts;
+    }
+  }
+  return facts;
+}
+
+async function saveStateFacts(chatId: string, messageId: string | undefined, facts: StateFact[]): Promise<void> {
+  if (facts.length === 0) return;
+  const existing = await db.memoryNodes.where('chatId').equals(chatId).toArray();
+  const known = new Set(existing.map((n) => normalizeLabel(n.label)));
+  let prev = [...existing].sort((a, b) => a.createdAt - b.createdAt).pop();
+  for (const fact of facts) {
+    const norm = normalizeLabel(fact.label);
+    if (known.has(norm)) continue;
+    known.add(norm);
+    const node: MemoryNode = {
+      id: 'node-' + Math.random().toString(36).substring(2, 10),
+      chatId,
+      messageId,
+      label: fact.label,
+      type: fact.kind === 'pose' ? 'event' : 'fact',
+      detail: fact.detail,
+      createdAt: Date.now(),
+    };
+    await db.memoryNodes.put(node);
+    if (prev) {
+      await db.memoryEdges.put({
+        id: 'edge-' + Math.random().toString(36).substring(2, 10),
+        chatId,
+        source: prev.id,
+        target: node.id,
+        label: 'relates to',
+      });
+    }
+    prev = node;
+  }
+}
+
 export function isSignificantTurn(userText: string, botText: string, affinityDelta: number = 0): boolean {
   const trimmedUser = userText.trim();
   if (!trimmedUser) return false;
@@ -389,6 +467,13 @@ export async function extractMemoryAndAffinity(
   const userText = lastUserMsg.variants[lastUserMsg.activeVariantIndex]?.text || '';
   const botText = targetBotMsg.variants[targetBotMsg.activeVariantIndex]?.text || '';
   const isDialogueRu = /[а-яА-ЯёЁ]/.test(userText + botText);
+
+  // Concrete scene state (clothes, items, entering/leaving) is always recorded, even in short turns
+  try {
+    await saveStateFacts(chatId, messageId, extractStateFacts([userText, botText]));
+  } catch (err) {
+    console.warn('State fact extraction failed:', err);
+  }
 
   // Fast-path: if this turn is completely trivial small talk with 0 affinity delta,
   // skip memory extraction entirely to avoid polluting memory or wasting tokens.

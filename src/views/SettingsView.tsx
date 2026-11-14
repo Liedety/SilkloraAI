@@ -52,6 +52,7 @@ import {
 } from '../services/ai';
 import { DEFAULT_CORE_SYSTEM_PROMPT } from '../services/promptBuilder';
 import { ChatPreviewCard } from '../components/ChatPreviewCard';
+import { fontStack } from '../utils/fonts';
 import { QrScannerModal } from '../components/QrScannerModal';
 
 interface SettingsViewProps {
@@ -270,37 +271,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // Theme settings local state
   const currentTheme = settings?.theme || DEFAULT_THEME;
 
-  const handleUpdateTheme = async (updates: Partial<ThemeConfig>, markCustomColor = false) => {
-    if (!settings) return;
-    const updatedTheme: ThemeConfig = {
-      ...currentTheme,
-      ...updates,
-      ...(markCustomColor ? { id: 'custom', name: 'Custom' } : {}),
-    };
-    await db.settings.update('default', { theme: updatedTheme });
+  // Theme writes are read-modify-write on the stored settings, so quick consecutive changes
+  // (slider, color, font) never overwrite each other with a stale copy from the screen.
+  const writeTheme = async (build: (stored: ThemeConfig) => ThemeConfig) => {
+    await db.transaction('rw', db.settings, async () => {
+      const row = await db.settings.get('default');
+      if (!row) return;
+      await db.settings.update('default', { theme: build(row.theme || DEFAULT_THEME) });
+    });
   };
 
-  // Select App Theme preset while strictly preserving user's typography & pixel UI choices
+  const handleUpdateTheme = async (updates: Partial<ThemeConfig>, markCustomColor = false) => {
+    await writeTheme((stored) => ({
+      ...stored,
+      ...updates,
+      ...(markCustomColor ? { id: 'custom', name: 'Custom' } : {}),
+    }));
+  };
+
+  // Select App Theme preset while strictly preserving the user's typography choices
   const handleSelectAppTheme = async (themePreset: ThemeConfig) => {
-    if (!settings) return;
-    const current = currentTheme;
-    const updatedTheme: ThemeConfig = {
+    await writeTheme((stored) => ({
       ...themePreset,
-      fontSize: current.fontSize,
-      fontFamily: current.fontFamily,
-      usePixelUiFont: current.usePixelUiFont,
-      lineHeight: current.lineHeight,
-    };
-    await db.settings.update('default', { theme: updatedTheme });
+      fontSize: stored.fontSize,
+      fontFamily: stored.fontFamily,
+      lineHeight: stored.lineHeight,
+    }));
   };
 
   const handleResetThemeToDefault = async () => {
-    if (!settings) return;
-    await db.settings.update('default', {
-      theme: {
-        ...DEFAULT_THEME,
-      },
-    });
+    await writeTheme(() => ({ ...DEFAULT_THEME }));
     setShowCustomPalette(false);
   };
 
@@ -1624,10 +1624,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <label className="block text-xs text-slate-400 mb-2 font-medium">{t.fontFamily}</label>
             <div className="grid grid-cols-2 gap-2">
               {[
-                { id: 'sans', label: t.fontFamilySans, sampleClass: 'font-sans', sample: 'Аа Aa' },
-                { id: 'serif', label: t.fontFamilySerif, sampleClass: 'font-serif', sample: 'Аа Aa' },
-                { id: 'mono', label: t.fontFamilyMono, sampleClass: 'font-mono', sample: 'Аа Aa' },
-                { id: 'pixel', label: t.fontFamilyPixel, sampleClass: 'font-pixel', sample: 'Аа Aa' },
+                { id: 'sans', label: t.fontFamilySans, sample: 'Аа Aa' },
+                { id: 'serif', label: t.fontFamilySerif, sample: 'Аа Aa' },
+                { id: 'mono', label: t.fontFamilyMono, sample: 'Аа Aa' },
+                { id: 'pixel', label: t.fontFamilyPixel, sample: 'Аа Aa' },
               ].map((f) => {
                 const isSelected = (currentTheme.fontFamily || 'sans') === f.id;
                 return (
@@ -1642,7 +1642,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     }`}
                   >
                     <div className="flex items-center justify-between mb-1">
-                      <span className={`text-base font-bold leading-none text-slate-100 ${f.sampleClass}`}>
+                      <span className="text-base leading-none text-slate-100" style={{ fontFamily: fontStack(f.id) }}>
                         {f.sample}
                       </span>
                       {isSelected && <Check className="w-3.5 h-3.5 text-slate-200" />}
@@ -1655,35 +1655,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               })}
             </div>
           </div>
-
-          {/* Optional Pixel Font Toggle for App Chrome (Headers, Tabs, Buttons) */}
-          <button
-            type="button"
-            onClick={() => handleUpdateTheme({ usePixelUiFont: !currentTheme.usePixelUiFont })}
-            className="w-full flex items-center justify-between gap-3 p-3 rounded-xl bg-silk-950 border border-silk-800 hover:border-silk-700 text-left transition-colors"
-          >
-            <div className="min-w-0">
-              <div className="text-xs font-semibold text-slate-200 font-pixel tracking-wide">
-                {t.pixelUiToggleLabel}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-0.5 leading-snug">
-                {t.pixelUiToggleDesc}
-              </div>
-            </div>
-            <div
-              className={`w-10 h-5 rounded-full p-0.5 transition-colors shrink-0 border ${
-                currentTheme.usePixelUiFont
-                  ? 'bg-violet-600 border-white/15'
-                  : 'bg-silk-800 border-silk-700'
-              }`}
-            >
-              <div
-                className={`w-4 h-4 rounded-full bg-slate-100 transition-transform ${
-                  currentTheme.usePixelUiFont ? 'translate-x-5' : 'translate-x-0'
-                }`}
-              />
-            </div>
-          </button>
 
           {/* Font Size & Line Spacing */}
           <div className="space-y-3 pt-1">

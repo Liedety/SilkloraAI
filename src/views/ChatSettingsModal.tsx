@@ -49,7 +49,7 @@ export const ChatSettingsModal: React.FC<ChatSettingsModalProps> = ({
   // Queries
   const allCharacters = useLiveQuery(() => db.characters.toArray()) || [];
   const allSessions = useLiveQuery(
-    () => db.chats.where('targetId').equals(session.targetId).toArray(),
+    async () => (await db.chats.where('targetId').equals(session.targetId).toArray()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)),
     [session.targetId]
   ) || [];
   const memoryNodes = useLiveQuery(
