@@ -18,16 +18,16 @@ SilkloraAI works with:
 
 ## Features
 
-- **Silklora Local AI Hub (`server/`):** Standalone PC server (Windows, Linux, macOS) with automated Python/engine setup (CUDA, Metal, CPU), hardware-aware Hugging Face GGUF model search, resumable downloads, `mmproj` vision pairing, and a local web dashboard with QR code pairing.
-- **Characters, Groups & Emotion Sprites:** Rich character cards with lore, custom greetings, static avatars, and dedicated emotion sprites rendered below messages with validated emotion tags.
+- **Silklora Local AI Hub (`server/`):** Standalone PC server (Windows, Linux, macOS) with automated Python/engine setup (CUDA, Metal, CPU), DriverStore/WMI NVIDIA detection, CPU-only engine diagnostics, hardware-aware Hugging Face GGUF model search, resumable downloads, `mmproj` vision pairing, and a local web dashboard with QR code pairing.
+- **Characters, Groups & Emotion Sprites:** SillyTavern V1/V2 PNG and JSON character card import/export, lore, custom greetings, static avatars, and dedicated emotion sprites rendered below messages with validated emotion tags.
+- **Roleplay Control & Memory:** Streaming anti-runaway guard (`replyGuard`), turn/meta-leak cleanup, RP sampler presets, concrete state fact tracking (clothing, items, movement), draggable knowledge graph, cache-friendly prompt layout, and token-budgeted context compression.
 - **Per-Function AI Routing & Vision:** Route roleplay chat, Magic Wand ghostwriter, memory extraction, summarization, character/group generators, and image/vision requests independently between your PC and cloud APIs.
-- **Interactive Memory Graph & Long-Chat Optimization:** Draggable knowledge graph of facts and relationships, cache-friendly prompt layout, token-budgeted verbatim context window, and batched rolling summaries.
-- **100% Local & Private:** Characters, personas, messages, and memory graphs are stored directly on your device via IndexedDB.
-- **Customizable UI & Bilingual Support:** 4-tab settings, Graphite & custom themes, configurable writing styles, and full English / Russian localization.
+- **100% Local & Private:** Characters, personas, chat sessions, and memory graphs are stored directly on your device via IndexedDB, opening the last active session for each character or group.
+- **Matte UI, OLED Theme & Bilingual Support:** Zero-neon matte themes including pure black `#000000` OLED, global 4-font typography (including crisp Cyrillic pixel font), smooth transitions, and full English / Russian localization.
 
 ---
 
-## Quick Start (v2.0.0)
+## Quick Start (v2.0.1)
 
 ### 1. Android App
 1. Download `silklora-ai.apk` from [Releases](../../releases).
