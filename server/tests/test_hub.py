@@ -3,10 +3,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hub import context, gguf, planner, store  # noqa: E402
+from hub import context, gguf, hardware, planner, sanitize, store  # noqa: E402
+from hub import engine as engine_mod  # noqa: E402
 from hub.hardware import GIB, build_profile  # noqa: E402
 
 
@@ -245,6 +247,89 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(build_profile(make_hw(vram_gb=12))["tier"], "high")
         self.assertEqual(build_profile(make_hw(vram_gb=8))["tier"], "mid")
         self.assertEqual(build_profile(make_hw(vram_gb=0))["tier"], "cpu")
+
+
+class SanitizeTests(unittest.TestCase):
+    def test_extracts_gemma4_channel_thought_and_turn_tokens(self):
+        raw = "<|turn>model\n<|channel>thought\nLet me plan the scene.\n<channel|><emotion>smirk</emotion> *She lights a cigarette.* Ready?<turn|>"
+        content, reasoning = sanitize.extract_reasoning_and_content(raw)
+        self.assertEqual(content, "<emotion>smirk</emotion> *She lights a cigarette.* Ready?")
+        self.assertEqual(reasoning, "Let me plan the scene.")
+
+    def test_extracts_think_tags_and_strips_leaked_scene_note(self):
+        raw = "<think>Check inventory</think>\n*Hands over the keycard.*\n\n[Заметка сцены (не цитируй):\nФакт 1]"
+        content, reasoning = sanitize.extract_reasoning_and_content(raw)
+        self.assertEqual(content, "*Hands over the keycard.*")
+        self.assertEqual(reasoning, "Check inventory")
+
+    def test_stream_sanitizer_buffers_split_control_tokens_without_damaging_emotion(self):
+        s = sanitize.StreamSanitizer()
+        chunks = [
+            "<|tu", "rn>m", "odel\n",
+            "<|chan", "nel>thought\n", "Internal ", "plan", "<chan", "nel|>",
+            "<emo", "tion>smirk</emotion> *Nods.*",
+            "<|im_end|>",
+        ]
+        out_c, out_r = [], []
+        for ch in chunks:
+            c, r = s.feed(ch)
+            out_c.append(c)
+            out_r.append(r)
+        tc, tr = s.finish()
+        out_c.append(tc)
+        out_r.append(tr)
+        self.assertEqual("".join(out_c), "<emotion>smirk</emotion> *Nods.*")
+        self.assertEqual("".join(out_r).strip(), "Internal plan")
+
+    def test_stream_sanitizer_stops_on_leaked_scene_note(self):
+        s = sanitize.StreamSanitizer()
+        c1, _ = s.feed("Hello!\n[Замет")
+        c2, _ = s.feed("ка сцены:\nSecret]")
+        tc, _ = s.finish()
+        self.assertEqual(c1 + c2 + tc, "Hello!\n")
+
+    def test_strips_simulated_multi_turn_delimiters_and_empty_brackets(self):
+        raw = "<> *She laughs softly.* That is not true.\n>fuser\nHey wait!\n[Собеседник: Алекс]\n[Реплика собеседника:] Stop."
+        content, _ = sanitize.extract_reasoning_and_content(raw)
+        self.assertEqual(content, "*She laughs softly.* That is not true.")
+
+        s = sanitize.StreamSanitizer()
+        out = []
+        for ch in ("*Waves.*", "\n[Собесед", "ник: Max]\nHello"):
+            c, _ = s.feed(ch)
+            out.append(c)
+        tail_c, _ = s.finish()
+        out.append(tail_c)
+        self.assertEqual("".join(out).strip(), "*Waves.*")
+
+
+class HardwareAndEngineWarningTests(unittest.TestCase):
+    def test_parse_mib_handles_units_and_invalid_values(self):
+        self.assertEqual(hardware._parse_mib("8192 MiB"), 8192 * 1024 * 1024)
+        self.assertEqual(hardware._parse_mib("12288"), 12288 * 1024 * 1024)
+        self.assertEqual(hardware._parse_mib(""), 0)
+        self.assertEqual(hardware._parse_mib("N/A"), 0)
+
+    def test_detect_windows_wmi_nvidia_parses_card_and_driver(self):
+        payload = '[{"Name":"Intel(R) UHD Graphics","AdapterRAM":1073741824,"DriverVersion":"31.0"},' \
+                  '{"Name":"NVIDIA GeForce RTX 4060","AdapterRAM":4293918720,"DriverVersion":"32.0.15.6070"}]'
+        with mock.patch.object(hardware.os, "name", "nt"), \
+             mock.patch.object(hardware.subprocess, "check_output", return_value=payload):
+            gpu = hardware._detect_windows_wmi_nvidia()
+        self.assertIsNotNone(gpu)
+        self.assertEqual(gpu["name"], "NVIDIA GeForce RTX 4060")
+        self.assertEqual(gpu["vram_total"], 8 * GIB)
+        self.assertEqual(gpu["driver"], "32.0.15.6070")
+
+    def test_build_plan_emits_engine_cpu_only_warning_when_cuda_present_without_offload(self):
+        mgr = engine_mod.Engine()
+        with mock.patch.object(engine_mod, "inspect_model", return_value=llama_info(4.9)), \
+             mock.patch.object(engine_mod, "analyze_hardware", return_value=make_hw(vram_gb=12, kind="cuda")), \
+             mock.patch.object(engine_mod, "engine_info", return_value={"available": True, "gpu_offload": False}):
+            plan = mgr.build_plan("dummy.gguf", None, {})
+        self.assertEqual(plan["offload"], "none")
+        self.assertEqual(plan["n_gpu_layers"], 0)
+        self.assertIn("engine_cpu_only", plan.get("warnings", []))
 
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@ export const AvatarImage: React.FC<AvatarImageProps> = ({
 
   if (!isValidSrc || hasError) {
     return (
-      <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-violet-900/60 to-indigo-950/80 text-violet-300 select-none">
+      <div className="w-full h-full flex items-center justify-center bg-silk-850 text-slate-400 select-none">
         {isGroup ? (
           <Users className={`${iconClassName} stroke-[1.75] opacity-80`} />
         ) : (

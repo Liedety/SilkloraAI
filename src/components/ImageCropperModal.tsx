@@ -181,8 +181,8 @@ export const ImageCropperModal: React.FC<ImageCropperModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
-      <div className="w-full max-w-sm bg-silk-900 border border-silk-700/80 rounded-2xl overflow-hidden shadow-2xl flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 animate-fade-in">
+      <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl overflow-hidden flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-silk-800">
           <h3 className="font-semibold text-sm text-slate-200">{modalTitle}</h3>
@@ -251,7 +251,7 @@ export const ImageCropperModal: React.FC<ImageCropperModalProps> = ({
               <button
                 onClick={handleApply}
                 type="button"
-                className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium text-white rounded-lg shadow-md theme-accent-bg"
+                className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium text-white rounded-lg theme-accent-bg border border-white/10"
               >
                 <Check className="w-3.5 h-3.5" />
                 <span>{isRu ? 'Готово' : 'Done'}</span>

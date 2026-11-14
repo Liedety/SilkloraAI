@@ -23,6 +23,8 @@ export interface Character {
   id: string;
   name: string;
   description: string;
+  scenario?: string;
+  exampleDialogue?: string;
   avatar: string;
   avatarOffset?: ImageCropOffset;
   chatBackground?: string;
@@ -150,7 +152,8 @@ export interface ThemeConfig {
   bubbleOpacity: number; // 0.3 to 1.0
   fontSize: number; // 13 to 20
   backgroundTint: number; // 0.0 to 0.95
-  fontFamily?: 'sans' | 'serif' | 'mono'; // dialogue font family
+  fontFamily?: 'sans' | 'serif' | 'mono' | 'pixel'; // dialogue font family
+  usePixelUiFont?: boolean; // apply pixel font to UI headings & buttons
   lineHeight?: 'normal' | 'relaxed' | 'loose'; // dialogue line height
 }
 
@@ -167,6 +170,8 @@ export type AiComponent =
   | 'vision';
 
 export type AiBackend = 'cloud' | 'local';
+
+export type GenerationPreset = 'roleplay' | 'balanced' | 'creative' | 'precise' | 'custom';
 
 export interface AppSettings {
   id: string; // singleton 'default'
@@ -186,4 +191,14 @@ export interface AppSettings {
   localHubUrl?: string;
   /** Marks one-time default migrations that were already applied to this install. */
   themeMigration?: string;
+  /** Last opened 1-on-1 or group chat to auto-restore on launch. */
+  lastOpenedChat?: { type: 'character' | 'group'; targetId: string } | null;
+  generationPreset?: GenerationPreset;
+  temperature?: number;
+  topP?: number;
+  minP?: number;
+  repeatPenalty?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+  maxResponseTokens?: number;
 }

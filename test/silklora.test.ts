@@ -10,7 +10,15 @@ import {
   cleanGhostwriterOutput,
   normalizeLocalServerUrl,
   getEffectiveAiConfig,
+  resolveSamplerConfig,
+  stripEchoedUserPrefix,
+  findSimulatedTurnBoundary,
 } from '../src/services/ai.ts';
+import {
+  parseCharacterCardJson,
+  parseCharacterCardFile,
+  exportCharacterCardV2Json,
+} from '../src/services/characterCard.ts';
 import {
   buildSystemPrompt,
   buildSceneNote,
@@ -18,11 +26,21 @@ import {
   buildLengthOverrideDirective,
   parseLengthOverride,
   DEFAULT_CORE_SYSTEM_PROMPT,
+  inferGrammaticalGender,
 } from '../src/services/promptBuilder.ts';
 import { translations } from '../src/i18n/index.ts';
 import { speakerStopStrings, stripLeadingSpeakerName, resolveEmotion } from '../src/services/ai.ts';
 import { estimateTokens, planWindow, planSummaryBatch, summaryLimits, sceneNoteLines, SUMMARY_BATCH } from '../src/services/contextBudget.ts';
-import { normalizeLabel, calculateNodeScore, findDuplicateNodes, selectNodesToPrune, isSignificantTurn } from '../src/services/memoryGraph.ts';
+import { normalizeLabel, calculateNodeScore, findDuplicateNodes, selectNodesToPrune, isSignificantTurn, extractStateFacts } from '../src/services/memoryGraph.ts';
+import {
+  findRepetitionBoundary,
+  findForeignActorBoundary,
+  findMetaLeakBoundary,
+  stripLeakedMeta,
+  dedupeParagraphs,
+  trimIncompleteTail,
+  finalizeReplyText,
+} from '../src/services/replyGuard.ts';
 import { getLocalizedTextStyle, DEFAULT_STYLES, DEFAULT_THEME, APP_THEMES } from '../src/db/index.ts';
 import type { Character, Group, MemoryNode, MemoryEdge, TextStylePreset, AppSettings, ApiKeyConfig } from '../src/types/index.ts';
 
@@ -278,7 +296,7 @@ test('buildSystemPrompt: supports custom system prompt template (augment and ove
     customSystemPromptMode: 'augment',
   });
 
-  assert.match(augmentPrompt, /ABSOLUTE CORE PRINCIPLES/, 'Augment mode must keep base principles');
+  assert.match(augmentPrompt, /CORE PRINCIPLES/, 'Augment mode must keep base principles');
   assert.match(augmentPrompt, /CUSTOM SYSTEM PROMPT EXTENSION/, 'Augment mode must append extension section');
   assert.match(augmentPrompt, /Всегда обращайся к Командир Марк уважительно, отвечая от лица Елена/, 'Placeholders must be resolved');
 
@@ -290,12 +308,12 @@ test('buildSystemPrompt: supports custom system prompt template (augment and ove
     customSystemPromptMode: 'override',
   });
 
-  assert.strictEqual(overridePrompt.includes('ABSOLUTE CORE PRINCIPLES'), false, 'Override mode must replace base principles');
+  assert.strictEqual(overridePrompt.includes('CORE PRINCIPLES'), false, 'Override mode must replace base principles');
   assert.match(overridePrompt, /CUSTOM CORE PROMPT: Елена is in an active tactical stealth simulation with Командир Марк/, 'Override prompt must resolve placeholders');
   assert.match(overridePrompt, /YOUR CURRENT ROLE: ЕЛЕНА/, 'Dynamic character role should still be appended');
 });
 
-test('buildSystemPrompt: enforces strict text style adherence with prominent and recency directives', () => {
+test('buildSystemPrompt: enforces strict text style adherence once without duplicating style bloat', () => {
   const speaker: Character = {
     id: 'char-1',
     name: 'Роланд',
@@ -315,10 +333,9 @@ test('buildSystemPrompt: enforces strict text style adherence with prominent and
     },
   });
 
-  assert.match(prompt, /ABSOLUTE PRIORITY DIRECTIVE — MANDATORY WRITING STYLE/, 'Must have prominent directive at top');
-  assert.match(prompt, /UNCOMPROMISING STYLE ENFORCEMENT RULES/, 'Must have uncompromising enforcement rules');
-  assert.match(prompt, /Every physical action inside \*asterisks\* and every spoken line MUST faithfully embody this chosen style/, 'Must enforce style on actions and speech');
-  assert.match(prompt, /FINAL STYLE CHECK: Ensure every sentence and paragraph strictly complies with "Готический Нуар"/, 'Must enforce final style check');
+  assert.match(prompt, /MANDATORY WRITING STYLE & FORMATTING LIMITS/, 'Must include single authoritative style directive');
+  assert.match(prompt, /Используй архаичные обороты, мрачные описания и тяжелые тени\./, 'Must include text style instructions');
+  assert.strictEqual((prompt.match(/Готический Нуар/g) || []).length, 1, 'Style name should appear once cleanly without duplication bloat');
 });
 
 test('memoryGraph: normalizes labels and scores node priority (pinned nodes never pruned)', () => {
@@ -636,15 +653,21 @@ test('Theme configuration: separates theme design from typography settings', () 
   for (const themeItem of APP_THEMES) {
     assert.ok(themeItem.theme.fontFamily, `Theme ${themeItem.id} must define fontFamily`);
     assert.ok(themeItem.theme.lineHeight, `Theme ${themeItem.id} must define lineHeight`);
-    assert.ok(['sans', 'serif', 'mono'].includes(themeItem.theme.fontFamily));
+    assert.ok(['sans', 'serif', 'mono', 'pixel'].includes(themeItem.theme.fontFamily));
     assert.ok(['normal', 'relaxed', 'loose'].includes(themeItem.theme.lineHeight));
   }
+  assert.strictEqual(APP_THEMES.some((t) => t.id === 'cyberpunk-neon'), false, 'Neon theme must be removed');
+  const oled = APP_THEMES.find((t) => t.id === 'oled-black');
+  assert.ok(oled, 'Dedicated OLED Black theme must exist');
+  assert.strictEqual(oled!.theme.appBgColor, '#000000');
+  assert.strictEqual(oled!.theme.bubbleOpacity, 1.0);
 });
 
 test('App theme selection preserves user custom typography settings', () => {
   const userCustomTheme: ThemeConfig = {
     ...DEFAULT_THEME,
-    fontFamily: 'serif',
+    fontFamily: 'pixel',
+    usePixelUiFont: true,
     fontSize: 18,
     lineHeight: 'loose',
   };
@@ -655,13 +678,15 @@ test('App theme selection preserves user custom typography settings', () => {
   const appliedTheme: ThemeConfig = {
     ...sapphirePreset,
     fontFamily: userCustomTheme.fontFamily,
+    usePixelUiFont: userCustomTheme.usePixelUiFont,
     fontSize: userCustomTheme.fontSize,
     lineHeight: userCustomTheme.lineHeight,
   };
 
   assert.strictEqual(appliedTheme.accentColor, sapphirePreset.accentColor, 'Accent color must update to theme preset');
   assert.strictEqual(appliedTheme.appBgColor, sapphirePreset.appBgColor, 'App background must update to theme preset');
-  assert.strictEqual(appliedTheme.fontFamily, 'serif', 'Font family must be preserved');
+  assert.strictEqual(appliedTheme.fontFamily, 'pixel', 'Pixel font family must be preserved');
+  assert.strictEqual(appliedTheme.usePixelUiFont, true, 'Pixel UI toggle must be preserved');
   assert.strictEqual(appliedTheme.fontSize, 18, 'Font size must be preserved');
   assert.strictEqual(appliedTheme.lineHeight, 'loose', 'Line height must be preserved');
 });
@@ -893,10 +918,11 @@ test('buildSystemPrompt: guides emotion expression, provides non-neutral example
     thoughtsEnabled: true,
   });
 
-  // Prompt should use non-neutral emotion example rather than default neutral
+  // Prompt should use positive non-neutral emotion example and zero "<>" Pink-Elephant priming
   assert.match(prompt, /<emotion>happy<\/emotion>/, 'Should provide non-neutral example e.g. happy');
-  assert.match(prompt, /NEVER default to "neutral"/, 'Should warn against defaulting to neutral');
-  assert.match(prompt, /### MANDATORY EMOTION SPRITE REMINDER:/, 'Should contain recency emotion reminder at prompt end');
+  assert.match(prompt, /avoid defaulting to "neutral"/i, 'Should warn against defaulting to neutral');
+  assert.match(prompt, /### EMOTION SPRITE TAG:/, 'Should contain recency emotion reminder at prompt end');
+  assert.strictEqual(prompt.includes('<>'), false, 'Must NEVER put literal "<>" in prompts');
   assert.match(prompt, /<thought>[\s\S]*?<\/thought>/, 'Should contain thoughts monologue block');
 });
 
@@ -1252,11 +1278,12 @@ test('buildSystemPrompt (ru): localizes sections, enforces anti-godmoding, inclu
     language: 'ru',
   });
   assert.ok(noPersonaPrompt.includes('Дмитрий'));
-  assert.ok(noPersonaPrompt.includes('НИКОГДА не сокращай до <'));
+  assert.strictEqual(noPersonaPrompt.includes('<>'), false, 'Russian prompt must NOT contain Pink-Elephant <> string');
+  assert.ok(noPersonaPrompt.includes('<emotion>название</emotion>'));
   assert.ok(!noPersonaPrompt.includes('ABSOLUTE RESPONSE LENGTH & PACING DIRECTIVE'));
   assert.ok(noPersonaPrompt.includes('НЕ БОЛЕЕ чем из 2 абзацев'));
   assert.ok(!noPersonaPrompt.includes('от 1 до 3 абзацев'));
-  const styleIdx = noPersonaPrompt.indexOf('ОБЯЗАТЕЛЬНЫЙ СТИЛЬ ТЕКСТА');
+  const styleIdx = noPersonaPrompt.indexOf('Стиль повествования:');
   const dirIdx = noPersonaPrompt.indexOf('ПОСТОЯННЫЕ ПРАВИЛА ЭТОГО ЧАТА');
   assert.ok(dirIdx > styleIdx && styleIdx !== -1, 'chatDirectives should come after textStyle to override it');
 
@@ -1345,4 +1372,276 @@ test('enforceParagraphLimit & self-closing <smirk/> emotion tags + buildSceneNot
   });
   assert.ok(noteWithEmos.includes('<emotion>название</emotion>'));
   assert.ok(noteWithEmos.includes('neutral, smirk, happy'));
+  assert.strictEqual(noteWithEmos.includes('<>'), false, 'Scene note must never contain literal <>');
+});
+
+test('Gemma 4 / Qwen / DeepSeek token cleanup and reasoning routing in cleanArtifacts, extractEmotion, and streaming', () => {
+  const emotions: CharacterEmotion[] = [
+    { id: '1', name: 'neutral', avatar: '' },
+    { id: '2', name: 'smirk', avatar: '' },
+  ];
+
+  // 1. Full response with Gemma 4 turn + channel thought + <emotion> + trailing leaked scene note
+  const rawGemma4 =
+    '<|turn>model\n<|channel>thought\nShe wants the keycard.\n<channel|><emotion>smirk</emotion> *Leans closer.* Try asking nicely.<turn|>\n[Заметка сцены (не цитируй):\nФакт 1]';
+  const extracted = extractEmotionAndCleanResponse(rawGemma4, emotions, 'Evelyn');
+  assert.strictEqual(extracted.emotion, 'smirk');
+  assert.strictEqual(extracted.thought, 'She wants the keycard.');
+  assert.strictEqual(extracted.text, '*Leans closer.* Try asking nicely.');
+
+  // 2. Streaming partial Gemma 4 channel control tokens do not leak to visible bubble
+  const streaming1 = parseStreamingBotResponse('<|turn>model\n<|channel>thought\nPlanning', emotions, 'Evelyn');
+  assert.strictEqual(streaming1.text, '');
+  assert.strictEqual(streaming1.thought, 'Planning');
+
+  const streaming2 = parseStreamingBotResponse(
+    '<|turn>model\n<|channel>thought\nDone<channel|><emotion>smirk</emotion> *Smiles* Good.',
+    emotions,
+    'Evelyn'
+  );
+  assert.strictEqual(streaming2.emotion, 'smirk');
+  assert.strictEqual(streaming2.thought, 'Done');
+  assert.strictEqual(streaming2.text, '*Smiles* Good.');
+
+  // 3. <think>...</think> and <start_of_turn>/<end_of_turn> stripped by cleanArtifacts
+  assert.strictEqual(
+    cleanArtifacts('<think>hidden chain</think><start_of_turn>model\n*Waves* Hi!<end_of_turn>'),
+    '*Waves* Hi!'
+  );
+  assert.strictEqual(
+    cleanGhostwriterOutput('<|channel>thought\nplan<channel|><smirk> *Nods* Let us move.<|turn>user', 'Alex', ['Evelyn']),
+    '*Nods* Let us move.'
+  );
+});
+
+test('stripEchoedUserPrefix: removes verbatim echoed user turn from start of reply', () => {
+  const userTurn = '*Достаю из кармана поцарапанный крипточип.* Сколько за работу?';
+  const echoed = `${userTurn}\n*Она оценивающе смотрит на чип.* Пятьдесят тысяч.`;
+  assert.strictEqual(
+    stripEchoedUserPrefix(echoed, userTurn),
+    '*Она оценивающе смотрит на чип.* Пятьдесят тысяч.'
+  );
+
+  // Distinct reply stays untouched
+  assert.strictEqual(
+    stripEchoedUserPrefix('*Хмыкает.* Достаточно.', userTurn),
+    '*Хмыкает.* Достаточно.'
+  );
+});
+
+test('buildSystemPrompt & buildSceneNote: injects scenario, exampleDialogue, expands macros, and filters raw transcript memory fallbacks', () => {
+  const char: Character = {
+    id: 'c1',
+    name: 'Эвелин',
+    description: '{{char}} никогда не верит {{user}} с первого слова.',
+    scenario: '{{user}} и {{char}} прячутся от дронов на складе.',
+    exampleDialogue: '<START>\n{{user}}: Почему так холодно?\n{{char}}: *Запахивает плащ.* Зима, привыкай.',
+    greetingEnabled: true,
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  const memories: MemoryNode[] = [
+    {
+      id: 'm-legacy-quote',
+      chatId: 'c1',
+      label: 'Старый запрос...',
+      type: 'event',
+      detail: 'Пользователь: "Взламывай замок" | Персонаж: "Жди"',
+      createdAt: 100,
+    },
+    {
+      id: 'm-real-fact',
+      chatId: 'c1',
+      label: 'Ключ-карта',
+      type: 'fact',
+      detail: 'У Эвелин поврежден левый протез.',
+      createdAt: 200,
+    },
+  ];
+
+  const prompt = buildSystemPrompt({
+    character: char,
+    userName: 'Макс',
+    memoryNodes: memories,
+    language: 'ru',
+  });
+
+  assert.ok(prompt.includes('Эвелин никогда не верит Макс с первого слова.'));
+  assert.ok(prompt.includes('Макс и Эвелин прячутся от дронов на складе.'));
+  assert.ok(prompt.includes('ПРИМЕРЫ МАНИЕР И ДИАЛОГА'));
+  assert.ok(prompt.includes('Эвелин: *Запахивает плащ.*'));
+  assert.ok(prompt.includes('У Эвелин поврежден левый протез.'));
+  assert.strictEqual(prompt.includes('Пользователь: "Взламывай замок"'), false, 'Raw transcript quote fallback must be excluded');
+
+  const note = buildSceneNote({
+    speakerName: 'Эвелин',
+    userName: 'Макс',
+    memoryNodes: memories,
+    language: 'ru',
+  });
+  assert.ok(note.includes('Ключ-карта'));
+  assert.strictEqual(note.includes('Пользователь: "Взламывай замок"'), false);
+});
+
+test('resolveSamplerConfig: applies named presets cleanly and uses slider overrides only in custom mode', () => {
+  const creative = resolveSamplerConfig({
+    id: 'default',
+    language: 'ru',
+    textModel: 'm',
+    visionModel: 'm',
+    textStyleId: 'immersive',
+    theme: DEFAULT_THEME,
+    contextWindowSize: 8192,
+    generationPreset: 'creative',
+    temperature: 0.33, // stale custom value must not override named preset
+  });
+  assert.strictEqual(creative.temperature, 0.90);
+  assert.ok(creative.minP > 0);
+
+  const custom = resolveSamplerConfig({
+    id: 'default',
+    language: 'ru',
+    textModel: 'm',
+    visionModel: 'm',
+    textStyleId: 'immersive',
+    theme: DEFAULT_THEME,
+    contextWindowSize: 8192,
+    generationPreset: 'custom',
+    temperature: 0.65,
+    minP: 0.09,
+    repeatPenalty: 1.18,
+  });
+  assert.strictEqual(custom.temperature, 0.65);
+  assert.strictEqual(custom.minP, 0.09);
+  assert.strictEqual(custom.repeatPenalty, 1.18);
+});
+
+test('characterCard: imports SillyTavern V2 JSON and UTF-8 PNG chara metadata and exports round-trip JSON', () => {
+  const exported = exportCharacterCardV2Json({
+    id: 'char-test',
+    name: 'Алиса Вэнс',
+    description: 'Сетевой сталкер из Нижнего Сектора.',
+    scenario: 'Дождливый док 14.',
+    exampleDialogue: '<START>\n{{user}}: Привет\n{{char}}: *Кивает.*',
+    greeting: '*Проверяет терминал.*',
+    greetingEnabled: true,
+    avatar: '',
+    createdAt: 1,
+    updatedAt: 1,
+  });
+
+  const parsedJson = parseCharacterCardJson(exported);
+  assert.strictEqual(parsedJson.name, 'Алиса Вэнс');
+  assert.strictEqual(parsedJson.scenario, 'Дождливый док 14.');
+  assert.strictEqual(parsedJson.exampleDialogue, '<START>\n{{user}}: Привет\n{{char}}: *Кивает.*');
+  assert.strictEqual(parsedJson.greeting, '*Проверяет терминал.*');
+
+  // Construct minimal PNG with a UTF-8 Cyrillic base64 `chara` tEXt chunk
+  const b64 = Buffer.from(exported, 'utf-8').toString('base64');
+  const chunkPayload = Buffer.concat([Buffer.from('chara\0', 'latin1'), Buffer.from(b64, 'latin1')]);
+  const lenBuf = Buffer.alloc(4);
+  lenBuf.writeUInt32BE(chunkPayload.length, 0);
+  const pngBytes = Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    lenBuf,
+    Buffer.from('tEXt', 'latin1'),
+    chunkPayload,
+    Buffer.alloc(4), // CRC placeholder
+  ]);
+
+  const parsedPng = parseCharacterCardFile('alice.png', new Uint8Array(pngBytes), 'image/png');
+  assert.strictEqual(parsedPng.name, 'Алиса Вэнс');
+  assert.strictEqual(parsedPng.scenario, 'Дождливый док 14.');
+  assert.ok(parsedPng.avatar?.startsWith('data:image/png;base64,'));
+});
+
+test('runaway guard, gender inference, and cleanArtifacts anti-leak rules', () => {
+  // Grammatical gender inference for character/persona cues
+  assert.strictEqual(inferGrammaticalGender('Молодая девушка-фехтовальщица с рапирой.'), 'female');
+  assert.strictEqual(inferGrammaticalGender('Высокий парень-следопыт в плаще.'), 'male');
+  assert.strictEqual(inferGrammaticalGender('Древний страж руин.'), null);
+
+  // Runaway turn boundaries detect >fuser, bare user\n, inline >Name:, and sheet dumps after opening prose
+  assert.strictEqual(findSimulatedTurnBoundary('*Короткий старт.*'), -1);
+  assert.ok(findSimulatedTurnBoundary('*Он вздыхает и смотрит в окно под дождем.*\n>fuser\nПродолжай') > 35);
+  assert.ok(findSimulatedTurnBoundary('*Девушка ставит кружку на стойку таверны.*\nuser\nДавай') > 35);
+  assert.ok(findSimulatedTurnBoundary('*Лира откидывается на спинку стула в углу.* Свободно? >Артем: *кивает*') > 35);
+  assert.ok(findSimulatedTurnBoundary('*Кайра смотрит в темноту за окном молча.*\n>**Имя:** Кайра\n>**Пол:** женский') > 35);
+
+  // cleanArtifacts strips invented XML tags, spaced < emotion>, [], > prefixes, and trailing sheets
+  const messy = '< emotion>smirk</emotion> <joke> *Усмехается и поправляет плащ.* [] Да ладно.\n>**Имя:** Лира\n>**Пол:** женский';
+  const cleaned = cleanArtifacts(messy, [{ id: '1', name: 'smirk', avatar: '' }]);
+  assert.strictEqual(cleaned.includes('<joke>'), false);
+  assert.strictEqual(cleaned.includes('[]'), false);
+  assert.strictEqual(cleaned.includes('>**Имя:**'), false);
+  assert.ok(cleaned.includes('*Усмехается и поправляет плащ.* Да ладно.'));
+
+  // stripLeadingSpeakerName handles bold/quote/gender variants cleanly
+  assert.strictEqual(stripLeadingSpeakerName('>**Лира:** *Кивает.* Привет.', ['Лира']), '*Кивает.* Привет.');
+  assert.strictEqual(stripLeadingSpeakerName('Лира (она): *Улыбается.* Свободно.', ['Лира']), '*Улыбается.* Свободно.');
+
+  // buildSystemPrompt & buildSceneNote embed clean non-parenthetical gender cues without "персона" trap
+  const lira: Character = { id: 'l', name: 'Лира', description: 'Девушка-фехтовальщица.', createdAt: 1, updatedAt: 1 };
+  const artem: Character = { id: 'a', name: 'Артем', description: 'Парень-следопыт.', isPersona: true, createdAt: 1, updatedAt: 1 };
+  const sys = buildSystemPrompt({ character: lira, userPersona: artem, language: 'ru', dynamicTail: true });
+  assert.ok(sys.includes('пиши о себе в женском роде'));
+  assert.ok(sys.includes('обращайся к нему в мужском роде'));
+  assert.strictEqual(sys.includes('(ПЕРСОНА ИГРОКА)'), false);
+  const scene = buildSceneNote({
+    speakerName: 'Лира',
+    userName: 'Артем',
+    speakerGender: 'female',
+    userGender: 'male',
+    language: 'ru',
+  });
+  assert.ok(scene.includes('Отвечает Лира пишет о себе в женском роде; к Артем обращайся в мужском роде.'));
+});
+
+
+test('replyGuard: cuts lines written for the user and for other characters', () => {
+  const reply = '*Лира берет шарф и держит его в руках, рассматривая.*\n— Спасибо за заботу!\n*Артур улыбается в ответ и берет шарф.*';
+  const cut = finalizeReplyText(reply, { foreignNames: ['Артур'] });
+  assert.ok(cut.includes('Спасибо за заботу'));
+  assert.ok(!cut.includes('Артур улыбается'));
+
+  const group = '*Лира наклоняется к карте и проводит пальцем по чертежу.*\n— Это старая тропа.\n\nВиктор: *Виктор хмыкает.*';
+  const cutGroup = finalizeReplyText(group, { foreignNames: ['Виктор', 'Артур'] });
+  assert.ok(!cutGroup.includes('Виктор'));
+
+  // A vocative at the start of an action line is not acting for that person
+  const vocative = '*Лира кивает.* — Хорошо.\n*Артур, — тихо говорит она, — пойдем.*';
+  assert.strictEqual(findForeignActorBoundary(vocative, ['Артур']), -1);
+
+  // Opening lines are never cut away
+  assert.strictEqual(findForeignActorBoundary('Артур: привет', ['Артур'], 30), -1);
+});
+
+test('replyGuard: detects repeated paragraphs, leaked rule headers and incomplete tails', () => {
+  const para = '*Лира берет шарф и аккуратно закрепляет его вокруг своей шеи, проводя рукой по мягкому ворсу.*';
+  const repeated = `${para}\n— Спасибо.\n${para.replace('аккуратно ', '')}`;
+  assert.ok(findRepetitionBoundary(repeated) > 0);
+  assert.ok(!dedupeParagraphs(repeated).includes('закрепляет его вокруг шеи, проводя') || dedupeParagraphs(repeated).split('\n').length === 2);
+  assert.strictEqual(dedupeParagraphs('Первая строка.\nВторая строка совсем другая по смыслу и длине.').split('\n').length, 2);
+
+  const leaked = '*Он кивает и смотрит на огонь.*\n# Отверба:\n- Объем по умолчанию: от 3 до 5 емких абзацев.\n- Посланья могут меняться в ходе сцены.\n— Садись.';
+  assert.ok(findMetaLeakBoundary(leaked) > 0);
+  const stripped = stripLeakedMeta(leaked);
+  assert.ok(!stripped.includes('Отверба') && !stripped.includes('Объем') && !stripped.includes('Посланья'));
+  assert.ok(stripped.includes('— Садись.'));
+
+  const long = '*Она подходит к окну и долго смотрит на дорогу.* — Мне кажется, они уже близко, и нам нужно решить, что делать дальше, пока не стало поздно. Мы можем остаться здесь или уйти ночью через лес, и каждый вариант опасен по-своему. Затем';
+  const trimmed = trimIncompleteTail(long);
+  assert.ok(trimmed.endsWith('по-своему.'));
+  assert.strictEqual(trimIncompleteTail('Коротко.'), 'Коротко.');
+});
+
+test('extractStateFacts: records clothing and items that changed hands', () => {
+  const facts = extractStateFacts([
+    '*Артур протягивает Лире теплый синий шарф.* — Надень его.',
+    '*Лира надевает шарф и поправляет воротник.* — Спасибо.',
+  ]);
+  assert.ok(facts.length >= 1);
+  assert.ok(facts.some((f) => /шарф/i.test(f.detail)));
+  assert.strictEqual(extractStateFacts(['— Привет, как дела?', 'Привет!']).length, 0);
 });

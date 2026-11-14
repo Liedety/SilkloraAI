@@ -25,8 +25,8 @@ export const Navigation: React.FC<NavigationProps> = ({
   ];
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-30 bg-silk-900/95 backdrop-blur-xl border-t border-silk-800/80 px-4 py-2 pb-safe">
-      <div className="max-w-md mx-auto flex items-center justify-around">
+    <nav className="fixed bottom-0 left-0 right-0 z-30 bg-silk-900 border-t border-silk-800 px-3 py-1.5 pb-safe">
+      <div className="max-w-md mx-auto flex items-center justify-around gap-1">
         {items.map((item) => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
@@ -35,20 +35,14 @@ export const Navigation: React.FC<NavigationProps> = ({
               key={item.id}
               onClick={() => onChangeTab(item.id)}
               type="button"
-              className={`flex flex-col items-center justify-center flex-1 py-1.5 px-2 rounded-xl transition-all duration-200 ${
-                isActive ? 'font-semibold' : 'text-slate-400 hover:text-slate-200'
+              className={`relative flex flex-col items-center justify-center flex-1 py-1.5 px-2 rounded-xl transition-colors ${
+                isActive
+                  ? 'bg-silk-850 text-slate-100 font-semibold border border-silk-700/80'
+                  : 'text-slate-400 hover:text-slate-200 border border-transparent'
               }`}
-              style={isActive ? { color: 'var(--theme-accent, #8b5cf6)' } : undefined}
             >
-              <div
-                className="p-1 rounded-xl transition-all"
-                style={
-                  isActive
-                    ? { backgroundColor: 'rgba(var(--theme-accent-rgb, 139, 92, 246), 0.2)' }
-                    : undefined
-                }
-              >
-                <Icon className={`w-5 h-5 ${isActive ? 'stroke-[2.5]' : 'stroke-[1.8]'}`} />
+              <div className="p-0.5">
+                <Icon className={`w-5 h-5 ${isActive ? 'stroke-[2.25]' : 'stroke-[1.75]'}`} />
               </div>
               <span className="text-[11px] mt-0.5 tracking-tight">{item.label}</span>
             </button>

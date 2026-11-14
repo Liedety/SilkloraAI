@@ -168,6 +168,10 @@ class Engine:
         if projector_name:
             proj_bytes = inspect_model(MODELS_DIR / projector_name)["size_bytes"]
         hw = analyze_hardware(fresh_gpu=True)
+        engine_cpu_only = bool(hw["gpu"]["has_gpu"] and hw["gpu"]["kind"] == "cuda" and not engine_info().get("gpu_offload"))
+        if engine_cpu_only:
+            # The installed engine build cannot use the graphics card: plan for the processor and say so.
+            hw = dict(hw, gpu=dict(hw["gpu"], has_gpu=False, vram_total=0, vram_free=0))
         prefs = settings.get_all()
         ctx_request = options.get("n_ctx")
         if ctx_request in (None, "", "auto", 0):
@@ -189,6 +193,9 @@ class Engine:
         plan["projector_name"] = projector_name or ""
         plan["arch"] = info["arch"]
         plan["profile"] = build_profile(hw)["tier"]
+        if engine_cpu_only:
+            plan.setdefault("warnings", []).append("engine_cpu_only")
+            logger.warning("A graphics card was found but the installed engine is CPU-only. Run start-server with --repair to install the GPU engine.")
         return plan
 
     def load_async(self, model_name: str, projector_name: Optional[str] = None, options: Optional[Dict[str, Any]] = None):

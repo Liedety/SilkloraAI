@@ -46,15 +46,19 @@ import {
   enforceParagraphLimit,
   getEffectiveAiConfig,
   getComponentAiConfig,
+  resolveSamplerConfig,
   speakerStopStrings,
   resolveEmotion,
   stripLeadingSpeakerName,
+  stripEchoedUserPrefix,
 } from '../services/ai';
 import {
   buildSystemPrompt,
   buildSceneNote,
   buildTurnGuidanceBlock,
   parseLengthOverride,
+  substitutePromptMacros,
+  inferGrammaticalGender,
 } from '../services/promptBuilder';
 import {
   estimateTokens,
@@ -65,6 +69,7 @@ import {
   summaryLimits,
 } from '../services/contextBudget';
 import { extractMemoryAndAffinity } from '../services/memoryGraph';
+import { finalizeReplyText } from '../services/replyGuard';
 import { ChatSettingsModal } from './ChatSettingsModal';
 import { AvatarImage } from '../components/AvatarImage';
 
@@ -89,6 +94,13 @@ function cleanHistoryText(text: string): string {
     .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
     .replace(/<thought>[\s\S]*$/gi, '');
   return stripEmotionTags(withoutThoughts, undefined, { stripLeadingUnknownAngleTag: true }).trim();
+}
+
+function truncateOnWordBoundary(text: string, maxLen = 140): string {
+  if (!text || text.length <= maxLen) return text;
+  const slice = text.slice(0, maxLen);
+  const lastSpace = slice.lastIndexOf(' ');
+  return (lastSpace > maxLen * 0.5 ? slice.slice(0, lastSpace) : slice).trim() + '...';
 }
 
 export const ChatView: React.FC<ChatViewProps> = ({
@@ -128,7 +140,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
     try {
       const count = await db.messages.where('chatId').equals(chatId).count();
       if (count > 0) return;
-      const parsedGreeting = extractEmotionAndCleanResponse(character.greeting, character.emotions, character.name);
+      const macroUserName = settings?.userName?.trim() || (language === 'ru' ? 'Игрок' : 'User');
+      const expandedGreeting = substitutePromptMacros(character.greeting, character.name, macroUserName);
+      const parsedGreeting = extractEmotionAndCleanResponse(expandedGreeting, character.emotions, character.name);
       const greetingMsg: ChatMessage = {
         id: 'msg-' + Math.random().toString(36).substring(2, 10),
         chatId,
@@ -138,7 +152,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         emotion: parsedGreeting.emotion,
         variants: [
           {
-            text: parsedGreeting.text || character.greeting,
+            text: parsedGreeting.text || expandedGreeting,
             emotion: parsedGreeting.emotion,
             thought: parsedGreeting.thought,
             timestamp: Date.now(),
@@ -154,14 +168,28 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   };
 
-  // Initialize or fetch active session
+  // Initialize or fetch active session: reopen the session the user was last in for this character or group
+  const lastSessionKey = `silklora_last_session_${targetId}`;
+  const sessionInitForRef = useRef<string | null>(null);
+  const targetReady = type === 'character' ? Boolean(character) : Boolean(group);
+
   useEffect(() => {
+    if (!targetReady) return;
+    // Run once per opened chat: later updates of the character or group must not reset the session
+    if (sessionInitForRef.current === `${type}:${targetId}`) return;
+    sessionInitForRef.current = `${type}:${targetId}`;
+
     async function initSession() {
-      const existing = await db.chats
-        .where('targetId')
-        .equals(targetId)
-        .reverse()
-        .first();
+      const sessions = await db.chats.where('targetId').equals(targetId).toArray();
+      let stored: string | null = null;
+      try {
+        stored = window.localStorage.getItem(lastSessionKey);
+      } catch {
+        // ignore storage errors
+      }
+      const remembered = stored ? sessions.find((x) => x.id === stored) : undefined;
+      const newest = [...sessions].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0];
+      const existing = remembered || newest;
 
       if (existing) {
         setCurrentSessionId(existing.id);
@@ -187,10 +215,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
       }
     }
 
-    if (character || group) {
-      initSession();
+    initSession();
+  }, [type, targetId, targetReady]);
+
+  // Remember the open session for this character or group
+  useEffect(() => {
+    if (!currentSessionId) return;
+    try {
+      window.localStorage.setItem(lastSessionKey, currentSessionId);
+    } catch {
+      // ignore storage errors
     }
-  }, [type, targetId, character, group]);
+    // Opening a session makes it the most recent one, which also orders the history list
+    db.chats.update(currentSessionId, { updatedAt: Date.now() }).catch(() => {});
+  }, [currentSessionId, lastSessionKey]);
 
   // Current session query
   const session = useLiveQuery(
@@ -224,6 +262,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [streamingEmotion, setStreamingEmotion] = useState<string | null>(null);
   const [streamingSender, setStreamingSender] = useState<Character | null>(null);
   const compressionRunningRef = useRef(false);
+  const isSubmittingRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -260,12 +299,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const currentTheme = settings?.theme || DEFAULT_THEME;
 
-  const fontFamilyStyle =
-    currentTheme.fontFamily === 'serif'
-      ? 'Georgia, Cambria, "Times New Roman", serif'
-      : currentTheme.fontFamily === 'mono'
-      ? 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
-      : 'inherit';
+  // The selected font applies to the whole app, so message text simply inherits it
+  const fontFamilyStyle = 'inherit';
 
   const lineHeightStyle =
     currentTheme.lineHeight === 'loose'
@@ -284,12 +319,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const prevScrollHeightRef = useRef<number>(0);
   const prevScrollTopRef = useRef<number>(0);
   const isSmoothScrollingToBottomRef = useRef(false);
+  // True as soon as the reader scrolls up: streaming must never pull the view back down
+  const userScrolledUpRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
 
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
     hasInitialScrolledRef.current = false;
     setShowScrollBottom(false);
     isSmoothScrollingToBottomRef.current = false;
+    userScrolledUpRef.current = false;
+    lastScrollTopRef.current = 0;
   }, [currentSessionId]);
 
   const totalMessagesCount = messages.length;
@@ -299,6 +339,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     : messages;
 
   const scrollToBottom = (smooth = true) => {
+    userScrolledUpRef.current = false;
     if (chatContainerRef.current) {
       if (smooth) {
         isSmoothScrollingToBottomRef.current = true;
@@ -329,11 +370,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   }, [visibleCount]);
 
-  // Keep pinned to bottom during generation / new message ONLY if user hasn't scrolled up
+  // Keep pinned to bottom during generation / new message ONLY if the reader has not scrolled up
   useEffect(() => {
-    if (hasInitialScrolledRef.current && !showScrollBottom && chatContainerRef.current) {
-      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
-    }
+    const el = chatContainerRef.current;
+    if (!el || !hasInitialScrolledRef.current || userScrolledUpRef.current) return;
+    el.scrollTop = el.scrollHeight;
   }, [totalMessagesCount, streamingText]);
 
   const triggerLoadOlderMessages = () => {
@@ -347,23 +388,39 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget;
     const { scrollTop, scrollHeight, clientHeight } = target;
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
 
-    // Check if scrolled away from bottom (> 140px)
-    const isAway = scrollHeight - scrollTop - clientHeight > 140;
+    // Any upward movement hands control to the reader, even a few pixels
+    const movedUp = scrollTop < lastScrollTopRef.current - 2;
+    lastScrollTopRef.current = scrollTop;
+    if (movedUp && !isLoadingOlderRef.current) {
+      userScrolledUpRef.current = true;
+      isSmoothScrollingToBottomRef.current = false;
+    } else if (distanceFromBottom <= 32) {
+      userScrolledUpRef.current = false;
+    }
 
     if (isSmoothScrollingToBottomRef.current) {
-      if (!isAway) {
+      if (distanceFromBottom <= 140) {
         isSmoothScrollingToBottomRef.current = false;
       }
       setShowScrollBottom(false);
       return;
     }
 
-    setShowScrollBottom(isAway);
+    setShowScrollBottom(distanceFromBottom > 140 || (userScrolledUpRef.current && distanceFromBottom > 48));
 
     // Progressive lazy loading when user scrolls near top (< 60px)
     if (scrollTop < 60 && hasMoreMessages && !isLoadingOlderRef.current) {
       triggerLoadOlderMessages();
+    }
+  };
+
+  // A finger or wheel on the message list always cancels automatic following
+  const handleUserScrollIntent = (deltaY?: number) => {
+    isSmoothScrollingToBottomRef.current = false;
+    if (deltaY === undefined || deltaY < 0) {
+      userScrolledUpRef.current = deltaY === undefined ? userScrolledUpRef.current : true;
     }
   };
 
@@ -568,7 +625,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           .map((m) => {
             const cleaned = cleanHistoryText(m.variants[m.activeVariantIndex]?.text || '');
             const displaySender = m.senderId === 'user' && resolvedUserName ? resolvedUserName : m.senderName;
-            return `${displaySender}: ${cleaned.length > 80 ? cleaned.slice(0, 80) + '...' : cleaned}`;
+            return `${displaySender}: ${truncateOnWordBoundary(cleaned, 140)}`;
           })
           .join('\n');
         const header = dialogueLang === 'ru' ? 'Недавние события диалога:\n' : 'Recent dialogue events:\n';
@@ -580,10 +637,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
         buildSceneNote({
           speakerName: speaker.name,
           userName: resolvedUserName || (dialogueLang === 'ru' ? 'собеседник' : 'the other person'),
+          speakerGender: inferGrammaticalGender(speaker.description),
+          userGender: inferGrammaticalGender(userPersona?.description),
           language: dialogueLang,
           relationshipScore: affinity,
           memoryNodes,
           emotionNames: speaker.emotions?.map((e) => e.name),
+          presentNames: type === 'group'
+            ? groupMembers.filter((c) => c.id !== speaker.id && c.id !== userPersona?.id).map((c) => c.name)
+            : undefined,
+          mentionedNames: type === 'group'
+            ? groupMembers
+                .filter((c) => c.id !== speaker.id && c.id !== userPersona?.id)
+                .map((c) => c.name)
+                .filter((n) => lastUserText.toLowerCase().includes(n.toLowerCase().slice(0, Math.max(3, n.length - 2))))
+            : undefined,
         }),
       ]);
       const turnGuidanceBlock = guidancePrompt?.trim()
@@ -594,17 +662,40 @@ export const ChatView: React.FC<ChatViewProps> = ({
       // Build message array for API
       const apiMessages: any[] = [{ role: 'system', content: systemPrompt }];
 
+      // Re-attach valid <emotion> tags to the last 2 assistant replies of this speaker when sprites are enabled,
+      // so small local models have crisp in-context examples without breaking format.
+      const speakerHasEmotions = Boolean(speaker.emotions && speaker.emotions.length > 0);
+      const myAssistantIndices: number[] = [];
+      if (speakerHasEmotions) {
+        contextMsgs.forEach((m, i) => {
+          const isMeMsg = type === 'group' ? m.senderId === speaker.id : m.senderId !== 'user';
+          if (isMeMsg && m.variants[m.activeVariantIndex]?.text?.trim()) {
+            myAssistantIndices.push(i);
+          }
+        });
+      }
+      const recentEmotionKeepSet = new Set(myAssistantIndices.slice(-2));
+
       // Process raw dialogue turns with clear speaker attribution
       const rawTurns: Array<{ role: 'user' | 'assistant'; text: string; image?: string }> = [];
-      for (const msg of contextMsgs) {
+      let lastUserRawText = '';
+      contextMsgs.forEach((msg, idx) => {
         const activeVariant = msg.variants[msg.activeVariantIndex];
-        if (!activeVariant || !activeVariant.text?.trim()) continue;
+        if (!activeVariant || !activeVariant.text?.trim()) return;
 
         const isMe = type === 'group' ? msg.senderId === speaker.id : msg.senderId !== 'user';
         const role: 'user' | 'assistant' = isMe ? 'assistant' : 'user';
 
-        // Strip any hidden <thought> tags and leaked emotion tags from history so past turns do not inflate prompt tokens or trigger ballooning responses
         let textContent = cleanHistoryText(activeVariant.text);
+        if (!isMe && msg.senderId === 'user') {
+          lastUserRawText = textContent;
+        }
+        if (isMe && recentEmotionKeepSet.has(idx) && activeVariant.emotion) {
+          const validEmo = resolveEmotion(activeVariant.emotion, speaker.emotions, speaker.name);
+          if (validEmo) {
+            textContent = `<emotion>${validEmo}</emotion> ${textContent}`;
+          }
+        }
         if (type === 'group' && !isMe) {
           const displaySender = msg.senderId === 'user' && resolvedUserName ? resolvedUserName : msg.senderName;
           textContent = `[${displaySender}]: ${textContent}`;
@@ -615,7 +706,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           text: textContent,
           image: msg.image && msg.senderId === 'user' ? msg.image : undefined,
         });
-      }
+      });
 
       // Merge adjacent turns of the same role
       const alternatingTurns: any[] = [];
@@ -655,12 +746,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
         }
       }
 
-      // Ensure start turn
+      // Ensure start turn without bracketed meta wrappers that small local models mimic at Turn 0
       if (alternatingTurns.length > 0 && alternatingTurns[0].role === 'assistant') {
         alternatingTurns.unshift({
           role: 'user',
           content: type === 'group'
-            ? (dialogueLang === 'ru' ? '[Сцена начинается]' : '[Scene begins]')
+            ? (dialogueLang === 'ru' ? 'Начало сцены.' : 'Scene begins.')
             : (dialogueLang === 'ru' ? 'Привет.' : 'Hello.'),
         });
       }
@@ -668,25 +759,29 @@ export const ChatView: React.FC<ChatViewProps> = ({
       if (alternatingTurns.length === 0) {
         alternatingTurns.push({
           role: 'user',
-          content: dialogueLang === 'ru' ? '[Сцена начинается. Начни разговор.]' : '[Scene begins. Start conversation.]',
+          content: dialogueLang === 'ru' ? 'Начало сцены. Опиши первый шаг персонажа.' : 'Scene begins. Open naturally in character.',
         });
       }
 
-      // Ensure conversation ends with a user turn (e.g. /continue or chained group turn) so volatile tail stays on user turn
+      // Ensure conversation ends with a user turn (e.g. /continue or chained group turn)
       if (alternatingTurns[alternatingTurns.length - 1]?.role === 'assistant' && (sceneNote || turnGuidanceBlock)) {
         alternatingTurns.push({
           role: 'user',
-          content: dialogueLang === 'ru' ? `[Ход ${speaker.name}. Продолжай.]` : `[${speaker.name}'s turn. Continue.]`,
+          content: dialogueLang === 'ru'
+            ? `Продолжи ответ ${speaker.name} естественно с текущего момента сцены, не повторяя прошлые фразы.`
+            : `Continue ${speaker.name}'s turn naturally from the current moment without repeating earlier lines.`,
         });
       }
 
       apiMessages.push(...alternatingTurns);
 
-      // Volatile tail (scene note + turn guidance) attaches cleanly to the end of the last user message
+      // Volatile tail (scene note + turn guidance) sits inside system[0] on Turn 0 (empty history)
+      // so the first user turn stays pure prose with no technical dividers for small models to mimic.
+      // On multi-turn chats it precedes the final user utterance so system[0] stays KV-cacheable.
       const tailBlocks: string[] = [];
       if (sceneNote) {
-        const noteTitle = dialogueLang === 'ru' ? 'Заметка сцены (не цитируй и не упоминай)' : 'Scene note (do not quote or mention)';
-        tailBlocks.push(`[${noteTitle}:\n${sceneNote}]`);
+        const noteTitle = dialogueLang === 'ru' ? 'Контекст текущей сцены (не цитируй):' : 'Current scene context (do not quote):';
+        tailBlocks.push(`${noteTitle}\n${sceneNote}`);
       }
       if (turnGuidanceBlock) {
         tailBlocks.push(turnGuidanceBlock);
@@ -694,11 +789,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       if (tailBlocks.length > 0) {
         const tailText = tailBlocks.join('\n\n');
+        const isFirstTurnOnly = alternatingTurns.length <= 1;
         const last = apiMessages[apiMessages.length - 1];
-        if (last && last.role === 'user' && typeof last.content === 'string') {
-          last.content = `${last.content}\n\n${tailText}`;
-        } else if (last && last.role === 'user' && Array.isArray(last.content)) {
-          last.content.push({ type: 'text', text: tailText });
+        if (!isFirstTurnOnly && last && last.role === 'user' && typeof last.content === 'string') {
+          last.content = `${tailText}\n\n${last.content}`;
+        } else if (!isFirstTurnOnly && last && last.role === 'user' && Array.isArray(last.content)) {
+          last.content = [{ type: 'text', text: tailText }, ...last.content];
         } else {
           apiMessages[0] = { role: 'system', content: `${systemPrompt}\n\n${tailText}` };
         }
@@ -709,6 +805,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       // Photos in the context go to the vision backend; plain text stays on the chat backend
       const hasImages = apiMessages.some((m: any) => Array.isArray(m.content) && m.content.some((p: any) => p.type === 'image_url'));
       const turnConfig = hasImages ? getComponentAiConfig(settings, activeApiKey, 'vision') : null;
+      const samplers = resolveSamplerConfig(freshSettings || settings, isLocal);
 
       // Only the speaker's own name is stripped from the start; the stop list must not contain it,
       // otherwise a reply that begins with "Name:" is cut to nothing.
@@ -722,11 +819,39 @@ export const ChatView: React.FC<ChatViewProps> = ({
       await streamChatCompletion({
         apiKeyConfig: (turnConfig ? turnConfig.apiKeyConfig : effectiveApiKey) as ApiKeyConfig,
         model: turnConfig ? turnConfig.textModel : effectiveModel,
-        // Also stop if the model starts quoting the hidden scene note or turn guidance header
-        extraStops: [...speakerStopStrings(otherSpeakers), '[Scene note', '[Заметка сцены', '[УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ', '[USER TURN DIRECTIVE'],
+        foreignNames: otherSpeakers,
+        // Also stop if the model starts quoting the hidden scene note, turn directive, or fake multi-turn headers
+        extraStops: [
+          ...speakerStopStrings(otherSpeakers),
+          '\n>user',
+          '\n>fuser',
+          '\n>assistant',
+          '>**Имя:',
+          '>**Name:',
+          '\n[Собеседник:',
+          '\n[Реплика',
+          'Контекст текущей сцены',
+          'Текущий контекст сцены',
+          'Current scene context',
+          '[Scene note',
+          '[Scene context',
+          '[Заметка сцены',
+          '[Контекст сцены',
+          '[УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ',
+          'УКАЗАНИЕ ПОЛЬЗОВАТЕЛЯ НА ЭТОТ ХОД',
+          'USER TURN DIRECTIVE',
+        ],
         messages: apiMessages,
-        temperature: isLocal ? 0.7 : 0.85,
-        maxTokens: 1024,
+        temperature: samplers.temperature,
+        topP: samplers.topP,
+        minP: samplers.minP,
+        topK: samplers.topK,
+        repeatPenalty: samplers.repeatPenalty,
+        repeatLastN: samplers.repeatLastN,
+        frequencyPenalty: samplers.frequencyPenalty,
+        presencePenalty: samplers.presencePenalty,
+        maxTokens: samplers.maxTokens,
+        includeReasoning: activeChat.thoughtsEnabled === true,
         signal: abortController.signal,
         onToken: (tok) => {
           fullGenerated += tok;
@@ -748,10 +873,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
               return;
             }
 
-            const { text: finalText, thought: finalThought, emotion: finalEmotion } =
+            const { text: extractedText, thought: finalThought, emotion: finalEmotion } =
               extractEmotionAndCleanResponse(completed, speaker.emotions, speaker.name);
+            const deEchoed = finalizeReplyText(
+              stripEchoedUserPrefix(
+                extractedText || cleanArtifacts(completed, speaker.emotions),
+                lastUserRawText
+              ),
+              { foreignNames: otherSpeakers }
+            );
             const boundedText = enforceParagraphLimit(
-              finalText || cleanArtifacts(completed, speaker.emotions),
+              deEchoed,
               effectiveLengthRule?.maxParagraphs,
               effectiveLengthRule?.mode === 'shorter'
             );
@@ -901,7 +1033,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   // Send User Message
   const handleSendMessage = async () => {
-    if ((!inputText.trim() && !attachedImage) || isGenerating || !session) return;
+    if ((!inputText.trim() && !attachedImage) || isGenerating || isSubmittingRef.current || !session) return;
 
     // Intercept slash commands typed into the input
     const trimmedInput = inputText.trim();
@@ -913,47 +1045,53 @@ export const ChatView: React.FC<ChatViewProps> = ({
       }
     }
 
-    const userPersona = session.personaId
-      ? allCharacters.find((c) => c.id === session.personaId) || null
-      : null;
+    isSubmittingRef.current = true;
+    try {
+      const userPersona = session.personaId
+        ? allCharacters.find((c) => c.id === session.personaId) || null
+        : null;
 
-    const userMsg: ChatMessage = {
-      id: 'msg-' + Math.random().toString(36).substring(2, 10),
-      chatId: session.id,
-      senderId: 'user',
-      senderName: userPersona ? userPersona.name : (settings?.userName?.trim() || (language === 'ru' ? 'Вы' : 'You')),
-      senderAvatar: userPersona ? userPersona.avatar : undefined,
-      variants: [
-        {
-          text: inputText.trim(),
-          timestamp: Date.now(),
-        },
-      ],
-      activeVariantIndex: 0,
-      image: attachedImage || undefined,
-      createdAt: Date.now(),
-    };
+      const userMsg: ChatMessage = {
+        id: 'msg-' + Math.random().toString(36).substring(2, 10),
+        chatId: session.id,
+        senderId: 'user',
+        senderName: userPersona ? userPersona.name : (settings?.userName?.trim() || (language === 'ru' ? 'Вы' : 'You')),
+        senderAvatar: userPersona ? userPersona.avatar : undefined,
+        variants: [
+          {
+            text: inputText.trim(),
+            timestamp: Date.now(),
+          },
+        ],
+        activeVariantIndex: 0,
+        image: attachedImage || undefined,
+        createdAt: Date.now(),
+      };
 
-    await db.messages.put(userMsg);
-    await db.chats.update(session.id, { updatedAt: Date.now() });
+      await db.messages.put(userMsg);
+      await db.chats.update(session.id, { updatedAt: Date.now() });
 
-    setInputText('');
-    setAttachedImage(null);
-    setShowSlashMenu(false);
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-    }
+      setInputText('');
+      setAttachedImage(null);
+      setShowSlashMenu(false);
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+      }
 
-    setShowScrollBottom(false);
-    isSmoothScrollingToBottomRef.current = false;
-    requestAnimationFrame(() => {
-      scrollToBottom(false);
-    });
+      setShowScrollBottom(false);
+      isSmoothScrollingToBottomRef.current = false;
+      userScrolledUpRef.current = false;
+      requestAnimationFrame(() => {
+        scrollToBottom(false);
+      });
 
-    // Trigger bot reply: only in 1-on-1 chat!
-    // In group chats, characters ONLY respond when invoked explicitly by the user!
-    if (type === 'character') {
-      runBotGeneration();
+      // Trigger bot reply: only in 1-on-1 chat!
+      // In group chats, characters ONLY respond when invoked explicitly by the user!
+      if (type === 'character') {
+        runBotGeneration();
+      }
+    } finally {
+      isSubmittingRef.current = false;
     }
   };
 
@@ -1289,6 +1427,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
       <div
         ref={chatContainerRef}
         onScroll={handleScroll}
+        onWheel={(e) => handleUserScrollIntent(e.deltaY)}
+        onTouchStart={() => handleUserScrollIntent()}
         className="relative z-10 flex-1 overflow-y-auto p-4 space-y-4 pb-4"
       >
         {/* Load older messages button */}
@@ -1321,7 +1461,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             return (
               <div
                 key={msg.id}
-                className={`flex ${isUser ? 'justify-end' : 'justify-start'} items-end gap-2.5 group`}
+                className={`flex ${isUser ? 'justify-end' : 'justify-start'} items-end gap-2.5 group ${Date.now() - msg.createdAt < 2500 ? 'animate-message-in' : ''}`}
               >
               {/* Bot Avatar with Emotion Sprite */}
               {!isUser && (
@@ -1344,7 +1484,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
                 {/* Message Bubble Container */}
                 <div
-                  className={`relative p-3.5 shadow-xl transition-all ${
+                  className={`relative p-3.5 border border-silk-800/70 transition-colors ${
                     isUser ? 'text-slate-100' : 'text-slate-200'
                   }`}
                   style={{
@@ -1365,7 +1505,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
                   {/* Inner Monologue / Thoughts Box */}
                   {!isUser && activeVariant.thought && (
-                    <div className="mb-2 p-2 rounded-xl bg-silk-950/70 border border-violet-500/30 text-xs">
+                    <div className="mb-2 p-2 rounded-xl bg-silk-950/80 border border-silk-700 text-xs">
                       <button
                         type="button"
                         onClick={() =>
@@ -1442,7 +1582,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     if (!sprite || !sprite.avatar) return null;
                     return (
                       <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center">
-                        <div className="relative rounded-2xl overflow-hidden border border-violet-500/30 bg-black/40 shadow-lg transition-transform hover:scale-105">
+                        <div className="relative rounded-xl overflow-hidden border border-silk-700 bg-black/40">
                           <img
                             src={sprite.avatar}
                             alt=""
@@ -1554,7 +1694,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                             </button>
 
                             {emotionPickerMsgId === msg.id && (
-                              <div className="absolute left-0 bottom-full mb-2 z-30 p-2 bg-silk-900 border border-silk-700 rounded-xl shadow-2xl flex items-center gap-2 animate-fade-in max-w-xs overflow-x-auto no-scrollbar">
+                              <div className="absolute left-0 bottom-full mb-2 z-30 p-2 bg-silk-900 border border-silk-700 rounded-xl flex items-center gap-2 animate-fade-in max-w-xs overflow-x-auto no-scrollbar">
                                 <button
                                   type="button"
                                   onClick={async () => {
@@ -1637,7 +1777,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 </div>
               )}
               <div
-                className="p-3.5 shadow-xl text-slate-200"
+                className="p-3.5 border border-silk-800/70 text-slate-200"
                 style={{
                   backgroundColor: currentTheme.bubbleBotBg,
                   borderRadius: `${currentTheme.bubbleRadius}px`,
@@ -1648,9 +1788,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 }}
               >
                 {streamingThought && (
-                  <div className="mb-2 p-2 rounded-xl bg-silk-950/70 border border-violet-500/30 text-xs">
-                    <div className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-violet-400 mb-1">
-                      <Sparkles className="w-3 h-3 animate-spin" />
+                  <div className="mb-2 p-2 rounded-xl bg-silk-950/80 border border-silk-700 text-xs">
+                    <div className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                      <Sparkles className="w-3 h-3" />
                       <span>{t.thinkingBlock}</span>
                     </div>
                     <p className="text-slate-300 italic text-[11px] leading-relaxed">
@@ -1661,7 +1801,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
                 <div className="whitespace-pre-wrap break-words" style={{ lineHeight: lineHeightStyle }}>
                   {formatMessageText(streamingText || '...')}
-                  <span className="inline-block w-1.5 h-4 ml-0.5 bg-violet-400 animate-pulse align-middle" />
+                  <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-slate-300 align-middle" />
                 </div>
 
                 {/* Streaming Emotion Sprite */}
@@ -1670,11 +1810,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   if (!sprite || !sprite.avatar) return null;
                   return (
                     <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center">
-                      <div className="relative rounded-2xl overflow-hidden border border-violet-500/30 bg-black/40 shadow-lg">
+                      <div className="relative rounded-xl overflow-hidden border border-silk-700 bg-black/40">
                         <img
                           src={sprite.avatar}
                           alt=""
-                          className="max-h-48 max-w-[200px] w-auto h-auto object-contain rounded-xl block animate-pulse"
+                          className="max-h-48 max-w-[200px] w-auto h-auto object-contain rounded-xl block"
                         />
                       </div>
                     </div>
@@ -1696,7 +1836,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             setShowScrollBottom(false);
           }}
           type="button"
-          className="absolute right-5 bottom-20 z-30 p-2.5 rounded-full bg-silk-850/95 hover:bg-silk-800 text-violet-400 hover:text-white border border-silk-700/90 shadow-2xl backdrop-blur-md transition-all duration-200 animate-fade-in hover:scale-110 active:scale-95 flex items-center justify-center group"
+          className="absolute right-5 bottom-20 z-30 p-2.5 rounded-full bg-silk-900 hover:bg-silk-800 text-slate-300 hover:text-white border border-silk-700 transition-colors animate-fade-in active:scale-95 flex items-center justify-center group"
           title={t.scrollToBottomLabel}
         >
           <ArrowDown className="w-4 h-4 group-hover:translate-y-0.5 transition-transform" />
@@ -1705,7 +1845,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* Slash Command Autocomplete Menu */}
       {showSlashMenu && (
-        <div className="relative z-20 mx-4 mb-2 bg-silk-900 border border-silk-700 rounded-2xl shadow-2xl overflow-hidden animate-slide-up text-xs">
+        <div className="relative z-20 mx-4 mb-2 bg-silk-900 border border-silk-700 rounded-2xl overflow-hidden animate-slide-up text-xs">
           <div className="p-2.5 font-semibold text-[11px] uppercase tracking-wider text-slate-400 border-b border-silk-800">
             {t.slashCommandHeader}
           </div>
@@ -1850,8 +1990,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* User Ghostwriter Wand Modal */}
       {showUserWandModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="w-full max-w-md bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80">
+          <div className="w-full max-w-md bg-silk-900 border border-silk-700 rounded-2xl p-4 space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Wand2 className="w-4 h-4 text-violet-400" />
@@ -1877,7 +2017,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 {wandPreview || (
                   <span className="text-slate-500 text-xs">{language === 'ru' ? 'Ожидание первого слова...' : 'Waiting for the first words...'}</span>
                 )}
-                {isWandGenerating && <span className="inline-block w-1.5 h-4 ml-0.5 align-middle bg-violet-400 animate-pulse" />}
+                {isWandGenerating && <span className="inline-block w-1.5 h-3.5 ml-0.5 align-middle bg-slate-300" />}
               </div>
             )}
 
@@ -1912,7 +2052,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <button
                     onClick={wandPreview ? applyWandPreview : handleExecuteUserWand}
                     type="button"
-                    className="flex items-center gap-1.5 px-4 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-md"
+                    className="flex items-center gap-1.5 px-4 py-1.5 bg-violet-600 hover:bg-violet-500 border border-white/10 text-white rounded-xl text-xs font-semibold"
                   >
                     <Sparkles className="w-3.5 h-3.5" />
                     <span>{wandPreview ? t.applyToInput : (language === 'ru' ? 'Сформулировать' : 'Generate')}</span>
@@ -1926,8 +2066,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* Guided Bot Regeneration Modal */}
       {guidedRegenTargetMsgId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80">
+          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl p-4 space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Wand2 className="w-4 h-4 text-violet-400" />
@@ -1967,7 +2107,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   setGuidedRegenTargetMsgId(null);
                 }}
                 type="button"
-                className="px-4 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-md"
+                className="px-4 py-1.5 bg-violet-600 hover:bg-violet-500 border border-white/10 text-white rounded-xl text-xs font-semibold"
               >
                 {t.regenerate}
               </button>
@@ -1978,8 +2118,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* Group Next Speaker Selector Modal */}
       {showSpeakerModal && type === 'group' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="w-full max-w-xs bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80">
+          <div className="w-full max-w-xs bg-silk-900 border border-silk-700 rounded-2xl p-4 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-sm text-white">{t.nextSpeakerModalTitle}</h3>
               <button
@@ -2022,8 +2162,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* Scene Summary Modal (/summary) */}
       {summaryModalText && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80">
+          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl p-4 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-sm text-white">{t.summaryModalTitle}</h3>
               <button

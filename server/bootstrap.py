@@ -93,15 +93,51 @@ def ensure_requirements(state: dict) -> bool:
 
 # --------------------------------------------------------------------------- hardware
 
+def _windows_nvidia_by_name() -> Optional[dict]:
+    """Fallback for PCs where nvidia-smi is missing from PATH: ask Windows for the video adapters."""
+    if not IS_WINDOWS:
+        return None
+    cmd = [
+        "powershell", "-NoProfile", "-Command",
+        "Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion | ConvertTo-Json -Compress",
+    ]
+    try:
+        out = subprocess.check_output(cmd, universal_newlines=True, timeout=10, stderr=subprocess.DEVNULL).strip()
+        data = json.loads(out) if out else []
+    except Exception:
+        return None
+    for item in data if isinstance(data, list) else [data]:
+        name = str((item or {}).get("Name") or "").strip()
+        if re.search(r"nvidia|geforce|rtx|gtx|quadro|tesla", name, re.IGNORECASE):
+            raw = str((item or {}).get("DriverVersion") or "")
+            # Windows reports 31.0.15.4601 style versions: the last two groups encode 546.01
+            parts = raw.split(".")
+            driver = raw
+            if len(parts) == 4 and parts[2].isdigit() and parts[3].isdigit():
+                tail = parts[2][-1] + parts[3]
+                driver = f"{tail[:-2]}.{tail[-2:]}"
+            return {"name": name, "compute_cap": "", "driver": driver}
+    return None
+
+
 def nvidia_info() -> Optional[dict]:
     smi = shutil.which("nvidia-smi")
     if not smi and IS_WINDOWS:
-        for candidate in (r"C:\Windows\System32\nvidia-smi.exe", r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"):
+        import glob
+
+        candidates = [r"C:\Windows\System32\nvidia-smi.exe", r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"]
+        candidates += sorted(glob.glob(r"C:\Windows\System32\DriverStore\FileRepository\nv*\nvidia-smi.exe"), reverse=True)
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                smi = candidate
+                break
+    if not smi and not IS_WINDOWS:
+        for candidate in ("/usr/bin/nvidia-smi", "/usr/local/nvidia/bin/nvidia-smi"):
             if os.path.exists(candidate):
                 smi = candidate
                 break
     if not smi:
-        return None
+        return _windows_nvidia_by_name()
     for fields in ("name,compute_cap,driver_version", "name,driver_version"):
         try:
             out = subprocess.check_output(
@@ -116,7 +152,7 @@ def nvidia_info() -> Optional[dict]:
             if "compute_cap" in fields:
                 info["compute_cap"] = parts[1]
             return info
-    return None
+    return _windows_nvidia_by_name()
 
 
 def compute_cap_number(info: dict) -> int:
@@ -126,10 +162,17 @@ def compute_cap_number(info: dict) -> int:
     if match:
         return int(match.group(1)) * 10 + int(match.group(2))
     name = info.get("name", "").lower()
-    guesses = (("rtx 50", 120), ("rtx 40", 89), ("rtx 30", 86), ("rtx a", 86), ("rtx 20", 75), ("gtx 16", 75), ("t4", 75))
+    guesses = (
+        ("rtx 50", 120), ("rtx 40", 89), ("rtx 30", 86), ("rtx a", 86), ("rtx 20", 75), ("gtx 16", 75), ("t4", 75),
+        ("h100", 90), ("l40", 89), ("a100", 80), ("a10", 86), ("titan rtx", 75), ("titan v", 70),
+        ("gtx 10", 61), ("gtx 9", 52), ("gtx 7", 35),
+    )
     for token, value in guesses:
         if token in name:
             return value
+    match = re.search(r"\b(50|40|30|20)\d{2}\b", name)
+    if match:
+        return {"50": 120, "40": 89, "30": 86, "20": 75}[match.group(1)]
     return 0
 
 
