@@ -8,49 +8,56 @@ import { CharactersView } from './views/CharactersView';
 import { GroupsView } from './views/GroupsView';
 import { SettingsView } from './views/SettingsView';
 import { ChatView } from './views/ChatView';
+import { fontStack } from './utils/fonts';
+
+interface SavedChatRef {
+  type: 'character' | 'group';
+  targetId: string;
+}
+
+function parseHexColor(hex: string, fallback: [number, number, number] = [82, 82, 91]): [number, number, number] {
+  const clean = (hex || '').replace('#', '').trim();
+  if (clean.length === 3) {
+    const r = parseInt(clean[0] + clean[0], 16);
+    const g = parseInt(clean[1] + clean[1], 16);
+    const b = parseInt(clean[2] + clean[2], 16);
+    if (!Number.isNaN(r) && !Number.isNaN(g) && !Number.isNaN(b)) return [r, g, b];
+  } else if (clean.length >= 6) {
+    const r = parseInt(clean.substring(0, 2), 16);
+    const g = parseInt(clean.substring(2, 4), 16);
+    const b = parseInt(clean.substring(4, 6), 16);
+    if (!Number.isNaN(r) && !Number.isNaN(g) && !Number.isNaN(b)) return [r, g, b];
+  }
+  return fallback;
+}
 
 function hexToRgb(hex: string): string {
-  const clean = hex.replace('#', '').trim();
-  let r = 139, g = 92, b = 246;
-  if (clean.length === 3) {
-    r = parseInt(clean[0] + clean[0], 16) || 139;
-    g = parseInt(clean[1] + clean[1], 16) || 92;
-    b = parseInt(clean[2] + clean[2], 16) || 246;
-  } else if (clean.length >= 6) {
-    r = parseInt(clean.substring(0, 2), 16) || 139;
-    g = parseInt(clean.substring(2, 4), 16) || 92;
-    b = parseInt(clean.substring(4, 6), 16) || 246;
-  }
+  const [r, g, b] = parseHexColor(hex);
   return `${r}, ${g}, ${b}`;
 }
 
 function adjustBrightness(hex: string, percent: number): string {
-  const clean = hex.replace('#', '').trim();
-  let r = 139, g = 92, b = 246;
-  if (clean.length === 3) {
-    r = parseInt(clean[0] + clean[0], 16) || 139;
-    g = parseInt(clean[1] + clean[1], 16) || 92;
-    b = parseInt(clean[2] + clean[2], 16) || 246;
-  } else if (clean.length >= 6) {
-    r = parseInt(clean.substring(0, 2), 16) || 139;
-    g = parseInt(clean.substring(2, 4), 16) || 92;
-    b = parseInt(clean.substring(4, 6), 16) || 246;
-  }
+  const [r, g, b] = parseHexColor(hex);
   const factor = 1 + percent / 100;
   const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
-  const add = percent > 0 ? percent * 0.4 : 0;
+  // Ensure pure-black OLED substrates (#000000 / #08080a) still gain visible 1px border steps
+  const add = percent > 0 ? percent * 0.45 : 0;
   const newR = clamp(r * factor + add);
   const newG = clamp(g * factor + add);
   const newB = clamp(b * factor + add);
   return `#${((1 << 24) + (newR << 16) + (newG << 8) + newB).toString(16).slice(1)}`;
 }
 
+function contrastTextColor(hex: string): string {
+  const [r, g, b] = parseHexColor(hex);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance > 0.62 ? '#09090b' : '#f4f4f5';
+}
+
 export const App: React.FC = () => {
+  // The app always opens on the characters list; each chat reopens its own last session
   const [activeTab, setActiveTab] = useState<TabType>('characters');
-  const [activeChat, setActiveChat] = useState<{
-    type: 'character' | 'group';
-    targetId: string;
-  } | null>(null);
+  const [activeChat, setActiveChat] = useState<SavedChatRef | null>(null);
 
   // Floating save button state
   const [isDirty, setIsDirty] = useState(false);
@@ -62,26 +69,35 @@ export const App: React.FC = () => {
   const language: Language = settings?.language || 'en';
 
   useEffect(() => {
-    initDatabaseDefaults();
+    (async () => {
+      await initDatabaseDefaults();
+      // Ask the system not to evict local data (settings, chats, theme) under storage pressure
+      try {
+        await navigator.storage?.persist?.();
+      } catch {
+        // not supported
+      }
+    })();
   }, []);
 
   // Dynamically update CSS variables when theme changes
   useEffect(() => {
     if (settings?.theme) {
       const root = document.documentElement;
-      const accent = settings.theme.accentColor || '#8b5cf6';
-      const action = settings.theme.actionColor || '#fb7185';
-      const bg = settings.theme.appBgColor || '#0a0814';
-      const surface = settings.theme.appSurfaceColor || '#141126';
+      const accent = settings.theme.accentColor || '#52525b';
+      const action = settings.theme.actionColor || '#a1a1aa';
+      const bg = settings.theme.appBgColor || '#09090b';
+      const surface = settings.theme.appSurfaceColor || '#111114';
 
       const accentHover = adjustBrightness(accent, 15);
-      const accentLight = adjustBrightness(accent, 40);
-      const surfaceElevated = adjustBrightness(surface, 15);
-      const border = adjustBrightness(surface, 25);
-      const borderSubtle = adjustBrightness(surface, 35);
+      const accentLight = adjustBrightness(accent, 42);
+      const surfaceElevated = adjustBrightness(surface, 14);
+      const border = adjustBrightness(surface, 26);
+      const borderSubtle = adjustBrightness(surface, 38);
 
       root.style.setProperty('--theme-accent', accent);
       root.style.setProperty('--theme-accent-rgb', hexToRgb(accent));
+      root.style.setProperty('--theme-on-accent', contrastTextColor(accent));
       root.style.setProperty('--theme-accent-hover', accentHover);
       root.style.setProperty('--theme-accent-hover-rgb', hexToRgb(accentHover));
       root.style.setProperty('--theme-accent-light', accentLight);
@@ -106,13 +122,10 @@ export const App: React.FC = () => {
         metaThemeColor.setAttribute('content', bg);
       }
 
-      const fontFamily =
-        settings.theme.fontFamily === 'serif'
-          ? 'Georgia, Cambria, "Times New Roman", serif'
-          : settings.theme.fontFamily === 'mono'
-          ? 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
-          : 'inherit';
-      root.style.setProperty('--chat-font-family', fontFamily);
+      const fontChoice = settings.theme.fontFamily || 'sans';
+      root.style.setProperty('--app-font', fontStack(fontChoice));
+      root.style.setProperty('--chat-font-family', 'inherit');
+      root.setAttribute('data-font', fontChoice);
     }
   }, [settings?.theme]);
 
@@ -135,7 +148,7 @@ export const App: React.FC = () => {
     setActiveTab(tab);
   };
 
-  const handleOpenChat = (chat: { type: 'character' | 'group'; targetId: string }) => {
+  const handleOpenChat = (chat: SavedChatRef) => {
     setIsDirty(false);
     setSaveAction(null);
     setActiveChat(chat);
@@ -161,14 +174,16 @@ export const App: React.FC = () => {
       {/* Active Screen */}
       <main className="flex-1 w-full h-full overflow-hidden">
         {activeChat ? (
-          <ChatView
-            type={activeChat.type}
-            targetId={activeChat.targetId}
-            language={language}
-            onBack={handleBackFromChat}
-          />
+          <div key={`chat-${activeChat.type}-${activeChat.targetId}`} className="w-full h-full animate-chat-in">
+            <ChatView
+              type={activeChat.type}
+              targetId={activeChat.targetId}
+              language={language}
+              onBack={handleBackFromChat}
+            />
+          </div>
         ) : (
-          <>
+          <div key={`tab-${activeTab}`} className="w-full h-full animate-view-in">
             {activeTab === 'characters' && (
               <CharactersView
                 language={language}
@@ -190,7 +205,7 @@ export const App: React.FC = () => {
                 onDirtyChange={handleDirtyChange}
               />
             )}
-          </>
+          </div>
         )}
       </main>
 

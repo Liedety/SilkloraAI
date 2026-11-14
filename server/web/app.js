@@ -175,6 +175,7 @@
         const map = {
             partial_offload: "warnPartial",
             cpu_only_with_gpu: "warnCpuOnly",
+            engine_cpu_only: "warnEngineCpuOnly",
             memory_tight: "warnMemory",
             fallback_settings: "warnFallback",
             layout_unknown: "warnLayout",

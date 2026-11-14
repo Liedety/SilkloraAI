@@ -345,7 +345,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
         <button
           onClick={handleOpenCreate}
           type="button"
-          className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-indigo-600/30 active:scale-95 transition-all"
+          className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-500 border border-white/10 text-white rounded-xl text-xs font-semibold active:scale-95 transition-colors"
         >
           <Plus className="w-4 h-4" />
           <span>{t.createGroup}</span>
@@ -355,8 +355,8 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
       {/* Group Cards List */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3 pb-28">
         {groups.length === 0 ? (
-          <div className="h-64 flex flex-col items-center justify-center text-center p-6 border border-dashed border-silk-800 rounded-2xl">
-            <Users className="w-8 h-8 text-violet-400/60 mb-2" />
+          <div className="h-64 flex flex-col items-center justify-center text-center p-6 border border-dashed border-silk-800 rounded-2xl bg-silk-900/40">
+            <Users className="w-7 h-7 text-slate-500 mb-2" />
             <h3 className="font-semibold text-slate-300 text-sm">{t.emptyGroupsTitle}</h3>
             <p className="text-xs text-slate-500 mt-1 max-w-xs">{t.emptyGroupsSubtitle}</p>
           </div>
@@ -367,7 +367,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
               <div
                 key={grp.id}
                 onClick={() => onOpenGroupChat(grp.id)}
-                className="group relative flex flex-col p-4 rounded-2xl bg-silk-900/80 border border-silk-800/80 hover:border-violet-500/50 shadow-md hover:shadow-violet-500/10 transition-all cursor-pointer select-none active:scale-[0.99] space-y-3"
+                className="group relative flex flex-col p-4 rounded-2xl bg-silk-900 border border-silk-800 hover:border-silk-600 transition-colors cursor-pointer select-none active:scale-[0.99] space-y-3"
               >
                 {/* Header row */}
                 <div className="flex items-start gap-3">
@@ -552,20 +552,20 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
             <button
               onClick={() => setShowGenModal(true)}
               type="button"
-              className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-gradient-to-r from-violet-950/60 via-indigo-950/40 to-silk-900 border border-violet-800/40 shadow-lg text-left group"
+              className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-silk-900 hover:bg-silk-850 border border-silk-700 text-left group transition-colors"
             >
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-xl bg-violet-600/20 text-violet-400">
+                <div className="p-2 rounded-xl bg-silk-800 text-slate-300 border border-silk-700">
                   <Sparkles className="w-5 h-5" />
                 </div>
                 <div>
-                  <h4 className="text-xs font-semibold text-violet-200">{t.generateGroupAI}</h4>
+                  <h4 className="text-xs font-semibold text-slate-100">{t.generateGroupAI}</h4>
                   <p className="text-[11px] text-slate-400">
                     {t.groupConceptPlaceholder}
                   </p>
                 </div>
               </div>
-              <ChevronRight className="w-4 h-4 text-violet-400 group-hover:translate-x-1 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-slate-400 group-hover:translate-x-0.5 transition-transform" />
             </button>
 
             <div>
@@ -750,8 +750,8 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
 
       {/* AI Roles Generator Modal */}
       {showRolesModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in">
-          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl flex flex-col overflow-hidden shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 animate-fade-in">
+          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl flex flex-col overflow-hidden">
             {/* Header */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-silk-800">
               <div className="flex items-center gap-2">
@@ -814,8 +814,8 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
 
       {/* AI Group Generator Modal */}
       {showGenModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in">
-          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl flex flex-col overflow-hidden shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 animate-fade-in">
+          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl flex flex-col overflow-hidden">
             {/* Header */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-silk-800">
               <div className="flex items-center gap-2">

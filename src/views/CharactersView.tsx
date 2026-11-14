@@ -15,6 +15,8 @@ import {
   AtSign,
   X,
   Smile,
+  Upload,
+  Download,
 } from 'lucide-react';
 import { db } from '../db';
 import type { Character, CharacterEmotion, Folder, Group, ImageCropOffset, Language } from '../types';
@@ -22,6 +24,7 @@ import { translations } from '../i18n';
 import { ImageCropperModal } from '../components/ImageCropperModal';
 import { AvatarImage } from '../components/AvatarImage';
 import { generatePersonaWithAI, getEffectiveAiConfig, getComponentAiConfig } from '../services/ai';
+import { parseCharacterCardFile, exportCharacterCardV2Json } from '../services/characterCard';
 
 interface CharactersViewProps {
   language: Language;
@@ -58,6 +61,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
   // Form fields
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [scenario, setScenario] = useState('');
+  const [exampleDialogue, setExampleDialogue] = useState('');
   const [greeting, setGreeting] = useState('');
   const [greetingEnabled, setGreetingEnabled] = useState(true);
   const [folderId, setFolderId] = useState<string | null>(null);
@@ -72,6 +77,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
   const currentFormRef = useRef({
     name: '',
     description: '',
+    scenario: '',
+    exampleDialogue: '',
     greeting: '',
     greetingEnabled: true,
     folderId: null as string | null,
@@ -112,6 +119,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
     setEditingCharacterId(null);
     setName('');
     setDescription('');
+    setScenario('');
+    setExampleDialogue('');
     setGreeting('');
     setGreetingEnabled(true);
     const initialFolder = selectedFolderId && selectedFolderId !== 'none' ? selectedFolderId : null;
@@ -124,6 +133,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
     syncFormRef({
       name: '',
       description: '',
+      scenario: '',
+      exampleDialogue: '',
       greeting: '',
       greetingEnabled: true,
       folderId: initialFolder,
@@ -141,6 +152,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
     setEditingCharacterId(char.id);
     setName(char.name);
     setDescription(char.description);
+    setScenario(char.scenario || '');
+    setExampleDialogue(char.exampleDialogue || '');
     setGreeting(char.greeting || '');
     setGreetingEnabled(char.greetingEnabled);
     setFolderId(char.folderId || null);
@@ -153,6 +166,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
     syncFormRef({
       name: char.name,
       description: char.description,
+      scenario: char.scenario || '',
+      exampleDialogue: char.exampleDialogue || '',
       greeting: char.greeting || '',
       greetingEnabled: char.greetingEnabled,
       folderId: char.folderId || null,
@@ -180,6 +195,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
       id: editingCharacterId || 'char-' + Math.random().toString(36).substring(2, 10),
       name: data.name.trim(),
       description: data.description.trim(),
+      scenario: data.scenario.trim(),
+      exampleDialogue: data.exampleDialogue.trim(),
       greeting: data.greeting.trim(),
       greetingEnabled: data.greetingEnabled,
       folderId: data.folderId,
@@ -195,6 +212,74 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
     await db.characters.put(charData);
     setShowEditModal(false);
     onDirtyChange(false);
+  };
+
+  const handleImportCardFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const card = parseCharacterCardFile(file.name, new Uint8Array(buf), file.type);
+      const initialFolder = selectedFolderId && selectedFolderId !== 'none' ? selectedFolderId : null;
+      setEditingCharacterId(null);
+      setName(card.name);
+      setDescription(card.description);
+      setScenario(card.scenario);
+      setExampleDialogue(card.exampleDialogue);
+      setGreeting(card.greeting);
+      setGreetingEnabled(card.greetingEnabled);
+      setFolderId(initialFolder);
+      setAvatar(card.avatar || '');
+      setAvatarOffset({ x: 0, y: 0, scale: 1 });
+      setChatBackground('');
+      setChatBackgroundOffset({ x: 0, y: 0, scale: 1 });
+      setEmotions([]);
+      syncFormRef({
+        name: card.name,
+        description: card.description,
+        scenario: card.scenario,
+        exampleDialogue: card.exampleDialogue,
+        greeting: card.greeting,
+        greetingEnabled: card.greetingEnabled,
+        folderId: initialFolder,
+        avatar: card.avatar || '',
+        avatarOffset: { x: 0, y: 0, scale: 1 },
+        chatBackground: '',
+        chatBackgroundOffset: { x: 0, y: 0, scale: 1 },
+        emotions: [],
+      });
+      onDirtyChange(true, handleSaveCharacter);
+      setShowEditModal(true);
+    } catch (err: any) {
+      alert(t.importCardError + (err?.message || err));
+    }
+  };
+
+  const handleExportCurrentCard = () => {
+    const data = currentFormRef.current;
+    if (!data.name.trim()) return;
+    const tempChar: Character = {
+      id: editingCharacterId || 'export',
+      name: data.name.trim(),
+      description: data.description.trim(),
+      scenario: data.scenario.trim(),
+      exampleDialogue: data.exampleDialogue.trim(),
+      greeting: data.greeting.trim(),
+      greetingEnabled: data.greetingEnabled,
+      avatar: data.avatar,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    const json = exportCharacterCardV2Json(tempChar);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const safeName = tempChar.name.replace(/[^\p{L}\p{N}_-]+/gu, '_').slice(0, 40) || 'character';
+    a.href = url;
+    a.download = `${safeName}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   // Delete Character
@@ -380,11 +465,15 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
 
       setName(generated.name);
       setDescription(generated.description);
+      if (generated.scenario) setScenario(generated.scenario);
+      if (generated.exampleDialogue) setExampleDialogue(generated.exampleDialogue);
       setGreeting(generated.greeting);
       setGreetingEnabled(true);
       syncFormRef({
         name: generated.name,
         description: generated.description,
+        ...(generated.scenario ? { scenario: generated.scenario } : {}),
+        ...(generated.exampleDialogue ? { exampleDialogue: generated.exampleDialogue } : {}),
         greeting: generated.greeting,
         greetingEnabled: true,
       });
@@ -422,14 +511,29 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
             </h1>
           </div>
 
-          <button
-            onClick={handleOpenCreate}
-            type="button"
-            className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-indigo-600/30 active:scale-95 transition-all"
-          >
-            <Plus className="w-4 h-4" />
-            <span>{t.createCharacter}</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <label
+              title={t.importCharacterCard}
+              className="flex items-center gap-1.5 px-3 py-2 bg-silk-800 hover:bg-silk-700 border border-silk-700 text-slate-200 rounded-xl text-xs font-medium cursor-pointer active:scale-95 transition-all"
+            >
+              <Upload className="w-3.5 h-3.5 text-violet-400" />
+              <span className="hidden sm:inline">{t.importCharacterCard}</span>
+              <input
+                type="file"
+                accept=".json,.png,application/json,image/png"
+                onChange={handleImportCardFile}
+                className="hidden"
+              />
+            </label>
+            <button
+              onClick={handleOpenCreate}
+              type="button"
+              className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-500 border border-white/10 text-white rounded-xl text-xs font-semibold active:scale-95 transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              <span>{t.createCharacter}</span>
+            </button>
+          </div>
         </div>
 
         {/* Folder Navigation Pills */}
@@ -437,10 +541,10 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
           <button
             onClick={() => setSelectedFolderId(null)}
             type="button"
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap border transition-colors ${
               selectedFolderId === null
-                ? 'bg-violet-600 text-white shadow-md'
-                : 'bg-silk-800/80 text-slate-400 hover:text-white'
+                ? 'bg-silk-800 border-silk-600 text-slate-100'
+                : 'bg-silk-900 border-silk-800 text-slate-400 hover:text-slate-200'
             }`}
           >
             {t.allFolders}
@@ -449,10 +553,10 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
           <button
             onClick={() => setSelectedFolderId('none')}
             type="button"
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap border transition-colors ${
               selectedFolderId === 'none'
-                ? 'bg-violet-600 text-white shadow-md'
-                : 'bg-silk-800/80 text-slate-400 hover:text-white'
+                ? 'bg-silk-800 border-silk-600 text-slate-100'
+                : 'bg-silk-900 border-silk-800 text-slate-400 hover:text-slate-200'
             }`}
           >
             {t.noFolder}
@@ -461,10 +565,10 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
           {folders.map((f) => (
             <div
               key={f.id}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap border transition-colors ${
                 selectedFolderId === f.id
-                  ? 'bg-violet-600 text-white shadow-md'
-                  : 'bg-silk-800/80 text-slate-400 hover:text-white'
+                  ? 'bg-silk-800 border-silk-600 text-slate-100'
+                  : 'bg-silk-900 border-silk-800 text-slate-400 hover:text-slate-200'
               }`}
             >
               <button
@@ -500,8 +604,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
       {/* Character Cards List */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3 pb-28">
         {filteredCharacters.length === 0 ? (
-          <div className="h-64 flex flex-col items-center justify-center text-center p-6 border border-dashed border-silk-800 rounded-2xl">
-            <Sparkles className="w-8 h-8 text-violet-400/60 mb-2" />
+          <div className="h-64 flex flex-col items-center justify-center text-center p-6 border border-dashed border-silk-800 rounded-2xl bg-silk-900/40">
+            <Sparkles className="w-7 h-7 text-slate-500 mb-2" />
             <h3 className="font-semibold text-slate-300 text-sm">{t.emptyCharactersTitle}</h3>
             <p className="text-xs text-slate-500 mt-1 max-w-xs">{t.emptyCharactersSubtitle}</p>
           </div>
@@ -512,7 +616,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
               <div
                 key={char.id}
                 onClick={() => onOpenChat(char.id)}
-                className="group relative flex items-center gap-3.5 p-3 rounded-2xl bg-silk-900/80 border border-silk-800/80 hover:border-violet-500/50 shadow-md hover:shadow-violet-500/10 transition-all cursor-pointer select-none active:scale-[0.99]"
+                className="group relative flex items-center gap-3.5 p-3 rounded-2xl bg-silk-900 border border-silk-800 hover:border-silk-600 transition-colors cursor-pointer select-none active:scale-[0.99]"
               >
                 {/* Avatar with offset */}
                 <div className="relative w-14 h-14 rounded-2xl overflow-hidden shrink-0 border border-silk-700/60 bg-silk-800">
@@ -571,8 +675,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
 
       {/* Folder Creation Modal */}
       {showFolderModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="w-full max-w-xs bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80">
+          <div className="w-full max-w-xs bg-silk-900 border border-silk-700 rounded-2xl p-4 space-y-4">
             <h3 className="text-sm font-semibold text-white">{t.newFolder}</h3>
             <input
               type="text"
@@ -611,6 +715,17 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
               {editingCharacterId ? t.editCharacter : t.createCharacter}
             </h2>
             <div className="flex items-center gap-2">
+              {name.trim() && (
+                <button
+                  onClick={handleExportCurrentCard}
+                  type="button"
+                  title={t.exportCharacterCard}
+                  className="flex items-center gap-1 px-2.5 py-1.5 bg-silk-800 hover:bg-silk-700 border border-silk-700 text-slate-200 rounded-xl text-xs font-medium active:scale-95 transition-all"
+                >
+                  <Download className="w-3.5 h-3.5 text-violet-400" />
+                  <span className="hidden sm:inline">{t.exportCharacterCard}</span>
+                </button>
+              )}
               <button
                 onClick={handleSaveCharacter}
                 type="button"
@@ -713,14 +828,14 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
             <button
               onClick={() => setShowGeneratorModal(true)}
               type="button"
-              className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-gradient-to-r from-violet-950/60 via-indigo-950/40 to-silk-900 border border-violet-800/40 shadow-lg text-left group"
+              className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-silk-900 hover:bg-silk-850 border border-silk-700 text-left group transition-colors"
             >
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-xl bg-violet-600/20 text-violet-400">
+                <div className="p-2 rounded-xl bg-silk-800 text-slate-300 border border-silk-700">
                   <Sparkles className="w-5 h-5" />
                 </div>
                 <div>
-                  <h4 className="text-xs font-semibold text-violet-200">{t.generateWithAI}</h4>
+                  <h4 className="text-xs font-semibold text-slate-100">{t.generateWithAI}</h4>
                   <p className="text-[11px] text-slate-400">
                     {language === 'ru'
                       ? 'Автоматическое создание характера, лора и первой реплики с поддержкой @ упоминаний'
@@ -728,7 +843,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                   </p>
                 </div>
               </div>
-              <ChevronRight className="w-4 h-4 text-violet-400 group-hover:translate-x-1 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-slate-400 group-hover:translate-x-0.5 transition-transform" />
             </button>
 
             {/* Manual Fields */}
@@ -758,6 +873,34 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                   }}
                   placeholder={t.charDescriptionPlaceholder}
                   className="w-full px-3.5 py-2.5 bg-silk-900 border border-silk-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 leading-relaxed resize-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">{t.charScenario}</label>
+                <textarea
+                  rows={3}
+                  value={scenario}
+                  onChange={(e) => {
+                    setScenario(e.target.value);
+                    syncFormRef({ scenario: e.target.value });
+                  }}
+                  placeholder={t.charScenarioPlaceholder}
+                  className="w-full px-3.5 py-2.5 bg-silk-900 border border-silk-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 leading-relaxed resize-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">{t.charExampleDialogue}</label>
+                <textarea
+                  rows={3}
+                  value={exampleDialogue}
+                  onChange={(e) => {
+                    setExampleDialogue(e.target.value);
+                    syncFormRef({ exampleDialogue: e.target.value });
+                  }}
+                  placeholder={t.charExampleDialoguePlaceholder}
+                  className="w-full px-3.5 py-2.5 bg-silk-900 border border-silk-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 leading-relaxed resize-none font-mono"
                 />
               </div>
 
@@ -930,8 +1073,8 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
 
       {/* AI Generator Modal */}
       {showGeneratorModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in">
-          <div className="w-full max-w-sm max-h-[90vh] bg-silk-900 border border-silk-700 rounded-2xl flex flex-col overflow-hidden shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 animate-fade-in">
+          <div className="w-full max-w-sm max-h-[90vh] bg-silk-900 border border-silk-700 rounded-2xl flex flex-col overflow-hidden">
             {/* Header */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-silk-800">
               <div className="flex items-center gap-2">
@@ -963,7 +1106,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
 
                 {/* @ Mention Autocomplete dropdown */}
                 {showMentionDropdown && (
-                  <div className="absolute left-0 right-0 top-full mt-1 z-20 bg-silk-850 border border-silk-700 rounded-xl shadow-2xl overflow-hidden max-h-36 overflow-y-auto text-xs">
+                  <div className="absolute left-0 right-0 top-full mt-1 z-20 bg-silk-850 border border-silk-700 rounded-xl overflow-hidden max-h-36 overflow-y-auto text-xs">
                     <div className="p-2 text-[10px] uppercase font-semibold text-slate-400 border-b border-silk-800">
                       Link Companion or Group Lore
                     </div>

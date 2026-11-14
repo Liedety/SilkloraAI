@@ -33,14 +33,26 @@ import type {
   ApiKeyConfig,
   ApiProvider,
   AppSettings,
+  GenerationPreset,
   Language,
   TextStylePreset,
   ThemeConfig,
 } from '../types';
 import { translations } from '../i18n';
-import { fetchAvailableModels, fetchVisionModels, pingLocalServer, normalizeLocalServerUrl, AI_COMPONENTS, getComponentBackend } from '../services/ai';
+import {
+  fetchAvailableModels,
+  fetchVisionModels,
+  pingLocalServer,
+  normalizeLocalServerUrl,
+  AI_COMPONENTS,
+  getComponentBackend,
+  RP_SAMPLER_PRESETS,
+  resolveSamplerConfig,
+  type RpSamplerPreset,
+} from '../services/ai';
 import { DEFAULT_CORE_SYSTEM_PROMPT } from '../services/promptBuilder';
 import { ChatPreviewCard } from '../components/ChatPreviewCard';
+import { fontStack } from '../utils/fonts';
 import { QrScannerModal } from '../components/QrScannerModal';
 
 interface SettingsViewProps {
@@ -63,6 +75,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   // Settings are grouped into tabs; the tab is remembered only for this visit
   const [settingsTab, setSettingsTab] = useState<'ai' | 'models' | 'style' | 'look'>('ai');
+  const [showCustomPalette, setShowCustomPalette] = useState(false);
   const setComponentBackend = async (component: AiComponent, backend: AiBackend) => {
     await db.settings.update('default', { aiRouting: { ...(settings?.aiRouting || {}), [component]: backend } });
   };
@@ -258,23 +271,37 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // Theme settings local state
   const currentTheme = settings?.theme || DEFAULT_THEME;
 
-  const handleUpdateTheme = async (updates: Partial<ThemeConfig>) => {
-    if (!settings) return;
-    const updatedTheme = { ...currentTheme, ...updates };
-    await db.settings.update('default', { theme: updatedTheme });
+  // Theme writes are read-modify-write on the stored settings, so quick consecutive changes
+  // (slider, color, font) never overwrite each other with a stale copy from the screen.
+  const writeTheme = async (build: (stored: ThemeConfig) => ThemeConfig) => {
+    await db.transaction('rw', db.settings, async () => {
+      const row = await db.settings.get('default');
+      if (!row) return;
+      await db.settings.update('default', { theme: build(row.theme || DEFAULT_THEME) });
+    });
   };
 
-  // Select App Theme preset while strictly preserving user's typography settings (font family, size, line height)
+  const handleUpdateTheme = async (updates: Partial<ThemeConfig>, markCustomColor = false) => {
+    await writeTheme((stored) => ({
+      ...stored,
+      ...updates,
+      ...(markCustomColor ? { id: 'custom', name: 'Custom' } : {}),
+    }));
+  };
+
+  // Select App Theme preset while strictly preserving the user's typography choices
   const handleSelectAppTheme = async (themePreset: ThemeConfig) => {
-    if (!settings) return;
-    const current = currentTheme;
-    const updatedTheme: ThemeConfig = {
+    await writeTheme((stored) => ({
       ...themePreset,
-      fontSize: current.fontSize,
-      fontFamily: current.fontFamily,
-      lineHeight: current.lineHeight,
-    };
-    await db.settings.update('default', { theme: updatedTheme });
+      fontSize: stored.fontSize,
+      fontFamily: stored.fontFamily,
+      lineHeight: stored.lineHeight,
+    }));
+  };
+
+  const handleResetThemeToDefault = async () => {
+    await writeTheme(() => ({ ...DEFAULT_THEME }));
+    setShowCustomPalette(false);
   };
 
   // API Key actions
@@ -541,10 +568,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <button
               type="button"
               onClick={() => handleSetAiEngineMode('cloud')}
-              className={`py-2.5 px-3 rounded-xl text-xs font-semibold border flex items-center justify-center gap-2 transition-all ${
+              className={`py-2.5 px-3 rounded-xl text-xs font-semibold border flex items-center justify-center gap-2 transition-colors ${
                 aiEngineMode === 'cloud'
-                  ? 'bg-violet-600 border-violet-500 text-white shadow-lg shadow-violet-600/30'
-                  : 'bg-silk-800 border-silk-700 text-slate-400 hover:text-white'
+                  ? 'bg-silk-800 border-slate-300/60 text-white'
+                  : 'bg-silk-900 border-silk-800 text-slate-400 hover:text-white'
               }`}
             >
               <Cloud className="w-4 h-4" />
@@ -553,10 +580,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <button
               type="button"
               onClick={() => handleSetAiEngineMode('local')}
-              className={`py-2.5 px-3 rounded-xl text-xs font-semibold border flex items-center justify-center gap-2 transition-all ${
+              className={`py-2.5 px-3 rounded-xl text-xs font-semibold border flex items-center justify-center gap-2 transition-colors ${
                 aiEngineMode === 'local'
-                  ? 'bg-violet-600 border-violet-500 text-white shadow-lg shadow-violet-600/30'
-                  : 'bg-silk-800 border-silk-700 text-slate-400 hover:text-white'
+                  ? 'bg-silk-800 border-slate-300/60 text-white'
+                  : 'bg-silk-900 border-silk-800 text-slate-400 hover:text-white'
               }`}
             >
               <Monitor className="w-4 h-4" />
@@ -569,19 +596,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         {settingsTab === 'look' && (<>
         {/* 1. Language Section */}
-        <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
+        <div className="p-4 rounded-2xl bg-silk-900 border border-silk-800 space-y-3">
           <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
-            <Sliders className="w-4 h-4 text-violet-400" />
+            <Sliders className="w-4 h-4 text-slate-300" />
             <span>{t.sectionLanguage}</span>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <button
               type="button"
               onClick={() => onLanguageChange('en')}
-              className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-all ${
+              className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-colors ${
                 language === 'en'
-                  ? 'bg-violet-600 border-violet-500 text-white shadow-md'
-                  : 'bg-silk-800 border-silk-700 text-slate-400 hover:text-white'
+                  ? 'bg-silk-800 border-slate-300/60 text-white'
+                  : 'bg-silk-950 border-silk-800 text-slate-400 hover:text-white'
               }`}
             >
               English (Default)
@@ -589,10 +616,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <button
               type="button"
               onClick={() => onLanguageChange('ru')}
-              className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-all ${
+              className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-colors ${
                 language === 'ru'
-                  ? 'bg-violet-600 border-violet-500 text-white shadow-md'
-                  : 'bg-silk-800 border-silk-700 text-slate-400 hover:text-white'
+                  ? 'bg-silk-800 border-slate-300/60 text-white'
+                  : 'bg-silk-950 border-silk-800 text-slate-400 hover:text-white'
               }`}
             >
               Русский
@@ -605,7 +632,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         {settingsTab === 'ai' && (<>
         {aiEngineMode === 'local' ? (
           /* LOCAL AI HUB SECTION (Replaces Cloud Keys & Models) */
-          <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4 shadow-xl">
+          <div className="p-4 rounded-2xl bg-silk-900 border border-silk-800 space-y-4">
             <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-300">
               <Wifi className="w-4 h-4 text-emerald-400 shrink-0" />
               <span>{t.localHubTitle}</span>
@@ -624,9 +651,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowQrScanner(true)}
-                  className="flex items-center gap-1.5 px-2.5 py-1 bg-silk-800 hover:bg-silk-750 border border-violet-500/30 hover:border-violet-400/60 text-violet-300 rounded-lg text-[11px] font-medium transition-all active:scale-95 shadow-sm"
+                  className="flex items-center gap-1.5 px-2.5 py-1 bg-silk-800 hover:bg-silk-700 border border-silk-700 text-slate-200 rounded-lg text-[11px] font-medium transition-colors active:scale-95"
                 >
-                  <Scan className="w-3.5 h-3.5 text-violet-400" />
+                  <Scan className="w-3.5 h-3.5 text-slate-300" />
                   <span>{t.scanQrCode}</span>
                 </button>
               </div>
@@ -636,13 +663,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 value={localServerUrl}
                 onChange={(e) => handleUpdateLocalServerUrl(e.target.value)}
                 placeholder={t.localServerUrlPlaceholder}
-                className="w-full px-3.5 py-2.5 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white font-mono placeholder-slate-500 focus:outline-none focus:border-violet-500"
+                className="w-full px-3.5 py-2.5 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white font-mono placeholder-slate-500 focus:outline-none focus:border-slate-500"
               />
               <button
                 type="button"
                 onClick={handlePingServer}
                 disabled={isPinging}
-                className="w-full py-2.5 px-4 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-2 shadow-md transition-all active:scale-[0.98]"
+                className="w-full py-2.5 px-4 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 border border-white/10 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-colors active:scale-[0.98]"
               >
                 <Activity className={`w-4 h-4 ${isPinging ? 'animate-spin' : ''}`} />
                 <span>{isPinging ? t.checkingConnection : t.checkConnection}</span>
@@ -652,17 +679,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             {/* Ping Result Status Banner */}
             {pingResult && (
               <div
-                className={`p-3 rounded-xl border transition-all ${
+                className={`p-3 rounded-xl border transition-colors ${
                   pingResult.ok
-                    ? 'bg-emerald-950/40 border-emerald-500/60 text-emerald-200'
-                    : 'bg-rose-950/40 border-rose-500/60 text-rose-200'
+                    ? 'bg-emerald-950/35 border-emerald-700/60 text-emerald-200'
+                    : 'bg-rose-950/35 border-rose-700/60 text-rose-200'
                 }`}
               >
                 <div className="flex items-start gap-2.5">
                   {pingResult.ok ? (
-                    <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 mt-1 shrink-0 animate-pulse shadow-[0_0_8px_#34d399]" />
+                    <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 mt-1 shrink-0" />
                   ) : (
-                    <div className="w-2.5 h-2.5 rounded-full bg-rose-400 mt-1 shrink-0" />
+                    <div className="w-2.5 h-2.5 rounded-full bg-rose-500 mt-1 shrink-0" />
                   )}
                   <div className="flex-1 text-xs space-y-1">
                     <div className="font-semibold flex items-center justify-between">
@@ -897,6 +924,201 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         {settingsTab === 'models' && (<>
         {renderRouting()}
+
+        {/* RP Generation & Samplers Card */}
+        {(() => {
+          const activePreset: GenerationPreset = settings?.generationPreset || 'roleplay';
+          const effectiveSamplers = resolveSamplerConfig(settings, settings?.aiEngineMode === 'local');
+          const applyPreset = async (preset: RpSamplerPreset) => {
+            const p = RP_SAMPLER_PRESETS[preset];
+            await db.settings.update('default', {
+              generationPreset: preset,
+              temperature: p.temperature,
+              topP: p.topP,
+              minP: p.minP,
+              repeatPenalty: p.repeatPenalty,
+              frequencyPenalty: p.frequencyPenalty,
+              presencePenalty: p.presencePenalty,
+              maxResponseTokens: p.maxTokens,
+            });
+          };
+          const updateSampler = async (patch: Partial<AppSettings>) => {
+            await db.settings.update('default', {
+              generationPreset: 'custom',
+              temperature: effectiveSamplers.temperature,
+              topP: effectiveSamplers.topP,
+              minP: effectiveSamplers.minP,
+              repeatPenalty: effectiveSamplers.repeatPenalty,
+              frequencyPenalty: effectiveSamplers.frequencyPenalty,
+              presencePenalty: effectiveSamplers.presencePenalty,
+              maxResponseTokens: effectiveSamplers.maxTokens,
+              ...patch,
+            });
+          };
+          const presetButtons: Array<{ id: RpSamplerPreset; label: string }> = [
+            { id: 'roleplay', label: t.presetRoleplay },
+            { id: 'balanced', label: t.presetBalanced },
+            { id: 'creative', label: t.presetCreative },
+            { id: 'precise', label: t.presetPrecise },
+          ];
+          return (
+            <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+                  <Sliders className="w-4 h-4 text-violet-400" />
+                  <span>{t.generationSamplersTitle}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => applyPreset('roleplay')}
+                  className="text-[11px] text-violet-400 hover:text-violet-300"
+                >
+                  {t.resetSamplers}
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-snug">{t.generationSamplersDesc}</p>
+
+              <div className="flex flex-wrap gap-1.5">
+                {presetButtons.map((p) => {
+                  const isActive = activePreset === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => applyPreset(p.id)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-all ${
+                        isActive
+                          ? 'bg-violet-600 text-white border-violet-500 shadow-sm'
+                          : 'bg-silk-800 text-slate-300 border-silk-700 hover:text-white'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  );
+                })}
+                {activePreset === 'custom' && (
+                  <span className="px-3 py-1.5 rounded-xl text-xs font-medium bg-indigo-950/60 text-indigo-300 border border-indigo-700/50">
+                    {t.presetCustom}
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                <label className="block space-y-1">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-300">{t.samplerTemp}</span>
+                    <span className="font-mono text-violet-400">{effectiveSamplers.temperature.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.1"
+                    max="1.4"
+                    step="0.02"
+                    value={effectiveSamplers.temperature}
+                    onChange={(e) => updateSampler({ temperature: parseFloat(e.target.value) })}
+                    className="w-full accent-violet-500"
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-300">{t.samplerMinP}</span>
+                    <span className="font-mono text-violet-400">{effectiveSamplers.minP.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="0.3"
+                    step="0.01"
+                    value={effectiveSamplers.minP}
+                    onChange={(e) => updateSampler({ minP: parseFloat(e.target.value) })}
+                    className="w-full accent-violet-500"
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-300">{t.samplerTopP}</span>
+                    <span className="font-mono text-violet-400">{effectiveSamplers.topP.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="1.0"
+                    step="0.02"
+                    value={effectiveSamplers.topP}
+                    onChange={(e) => updateSampler({ topP: parseFloat(e.target.value) })}
+                    className="w-full accent-violet-500"
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-300">{t.samplerRepeatPenalty}</span>
+                    <span className="font-mono text-violet-400">{effectiveSamplers.repeatPenalty.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1.0"
+                    max="1.35"
+                    step="0.01"
+                    value={effectiveSamplers.repeatPenalty}
+                    onChange={(e) => updateSampler({ repeatPenalty: parseFloat(e.target.value) })}
+                    className="w-full accent-violet-500"
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-300">{t.samplerFrequencyPenalty}</span>
+                    <span className="font-mono text-violet-400">{effectiveSamplers.frequencyPenalty.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1.0"
+                    step="0.02"
+                    value={effectiveSamplers.frequencyPenalty}
+                    onChange={(e) => updateSampler({ frequencyPenalty: parseFloat(e.target.value) })}
+                    className="w-full accent-violet-500"
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-300">{t.samplerPresencePenalty}</span>
+                    <span className="font-mono text-violet-400">{effectiveSamplers.presencePenalty.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1.0"
+                    step="0.02"
+                    value={effectiveSamplers.presencePenalty}
+                    onChange={(e) => updateSampler({ presencePenalty: parseFloat(e.target.value) })}
+                    className="w-full accent-violet-500"
+                  />
+                </label>
+
+                <label className="block space-y-1 sm:col-span-2">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-300">{t.samplerMaxTokens}</span>
+                    <span className="font-mono text-violet-400">{effectiveSamplers.maxTokens}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="200"
+                    max="2048"
+                    step="50"
+                    value={effectiveSamplers.maxTokens}
+                    onChange={(e) => updateSampler({ maxResponseTokens: parseInt(e.target.value, 10) })}
+                    className="w-full accent-violet-500"
+                  />
+                </label>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* 3. Text & RP Model Selector */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
@@ -1269,250 +1491,188 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </>)}
 
         {settingsTab === 'look' && (<>
-        {/* 7. Application Themes (Design & Interface) */}
-        <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4">
-          <div>
-            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
-              <Palette className="w-4 h-4 text-violet-400" />
-              <span>{t.sectionAppThemes}</span>
+        {/* Live Preview directly at the top of Theme controls */}
+        <ChatPreviewCard theme={currentTheme} language={language} />
+
+        {/* Application Themes & Color Palette */}
+        <div className="p-4 rounded-2xl bg-silk-900 border border-silk-800 space-y-4">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-300">
+                <Palette className="w-4 h-4 text-slate-300" />
+                <span>{t.sectionAppThemes}</span>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1 leading-snug">{t.sectionAppThemesDesc}</p>
             </div>
-            <p className="text-[11px] text-slate-400 mt-1 leading-snug">{t.sectionAppThemesDesc}</p>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowCustomPalette((v) => !v)}
+                className={`px-2.5 py-1 rounded-lg border text-[11px] font-medium transition-colors ${
+                  showCustomPalette || currentTheme.id === 'custom'
+                    ? 'bg-silk-800 border-slate-400/60 text-white'
+                    : 'bg-silk-950 border-silk-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                {t.customColorsToggle}
+              </button>
+              <button
+                type="button"
+                onClick={handleResetThemeToDefault}
+                title={t.resetThemeBtn}
+                className="p-1.5 rounded-lg border border-silk-800 bg-silk-950 text-slate-400 hover:text-white transition-colors"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
 
-          {/* Theme Presets */}
-          <div className="grid grid-cols-2 gap-2">
+          {/* 2-Column Visual Palette Swatch Cards */}
+          <div className="grid grid-cols-2 gap-2.5">
             {APP_THEMES.map((pt) => {
               const isSelected = currentTheme.id === pt.id;
+              const isOled = pt.id === 'oled-black';
               return (
                 <button
                   key={pt.id}
                   onClick={() => handleSelectAppTheme(pt.theme)}
                   type="button"
-                  className={`p-2.5 rounded-xl border text-left transition-all ${
+                  className={`p-3 rounded-xl border text-left transition-colors ${
                     isSelected
-                      ? 'bg-violet-600/20 border-violet-500 text-white'
-                      : 'bg-silk-850 border-silk-800 text-slate-400 hover:text-white'
+                      ? 'bg-silk-800 border-slate-300/70 text-white'
+                      : 'bg-silk-950 border-silk-800 text-slate-400 hover:text-slate-100 hover:border-silk-700'
                   }`}
                 >
-                  <div className="flex items-center gap-2">
-                    <span
-                      className="w-3.5 h-3.5 rounded-full shrink-0 shadow-sm"
-                      style={{ backgroundColor: pt.theme.accentColor }}
-                    />
-                    <span className="text-xs font-medium truncate">{pt.name}</span>
+                  {/* Mini multi-color swatch strip */}
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div className="flex items-center gap-1">
+                      {[
+                        pt.theme.appBgColor || '#09090b',
+                        pt.theme.appSurfaceColor || '#111114',
+                        pt.theme.bubbleUserBg,
+                        pt.theme.accentColor,
+                        pt.theme.actionColor,
+                      ].map((hex, idx) => (
+                        <span
+                          key={idx}
+                          className="w-3.5 h-3.5 rounded-sm border border-white/15 shrink-0"
+                          style={{ backgroundColor: hex }}
+                        />
+                      ))}
+                    </div>
+                    {isOled && (
+                      <span className="px-1.5 py-0.5 rounded bg-black border border-white/20 text-[9px] font-mono font-bold tracking-wider text-slate-200">
+                        {t.oledBadge}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between gap-1.5">
+                    <span className="text-xs font-semibold truncate">{pt.name}</span>
+                    {isSelected && <Check className="w-3.5 h-3.5 text-slate-200 shrink-0" />}
                   </div>
                 </button>
               );
             })}
           </div>
 
-          {/* Custom App Colors: Accent, Action, Background, Surface */}
-          <div className="space-y-3 pt-1 border-t border-silk-800/80">
-            <h4 className="text-xs font-semibold text-slate-300">
-              {language === 'ru' ? 'Палитра дизайна интерфейса:' : 'App Interface Palette:'}
-            </h4>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-[11px] text-slate-400 mb-1">{t.accentColor}</label>
-                <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
-                  <input
-                    type="color"
-                    value={currentTheme.accentColor}
-                    onChange={(e) => handleUpdateTheme({ accentColor: e.target.value })}
-                    className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
-                  />
-                  <span className="text-xs font-mono text-slate-300">{currentTheme.accentColor}</span>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] text-slate-400 mb-1">{t.actionColor}</label>
-                <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
-                  <input
-                    type="color"
-                    value={currentTheme.actionColor}
-                    onChange={(e) => handleUpdateTheme({ actionColor: e.target.value })}
-                    className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
-                  />
-                  <span className="text-xs font-mono text-slate-300">{currentTheme.actionColor}</span>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] text-slate-400 mb-1">{t.appBgColor}</label>
-                <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
-                  <input
-                    type="color"
-                    value={currentTheme.appBgColor || '#0a0814'}
-                    onChange={(e) => handleUpdateTheme({ appBgColor: e.target.value })}
-                    className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
-                  />
-                  <span className="text-xs font-mono text-slate-300">{currentTheme.appBgColor || '#0a0814'}</span>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] text-slate-400 mb-1">{t.appSurfaceColor}</label>
-                <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
-                  <input
-                    type="color"
-                    value={currentTheme.appSurfaceColor || '#141126'}
-                    onChange={(e) => handleUpdateTheme({ appSurfaceColor: e.target.value })}
-                    className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
-                  />
-                  <span className="text-xs font-mono text-slate-300">{currentTheme.appSurfaceColor || '#141126'}</span>
-                </div>
+          {/* Collapsible Custom Hex Palette Matrix */}
+          {(showCustomPalette || currentTheme.id === 'custom') && (
+            <div className="pt-3 border-t border-silk-800 space-y-2.5">
+              <div className="grid grid-cols-2 gap-2.5">
+                {[
+                  { label: t.accentColor, key: 'accentColor' as const, val: currentTheme.accentColor },
+                  { label: t.actionColor, key: 'actionColor' as const, val: currentTheme.actionColor },
+                  { label: t.appBgColor, key: 'appBgColor' as const, val: currentTheme.appBgColor || '#09090b' },
+                  { label: t.appSurfaceColor, key: 'appSurfaceColor' as const, val: currentTheme.appSurfaceColor || '#111114' },
+                  { label: t.bubbleUserBg, key: 'bubbleUserBg' as const, val: currentTheme.bubbleUserBg },
+                  { label: t.bubbleBotBg, key: 'bubbleBotBg' as const, val: currentTheme.bubbleBotBg },
+                ].map((item) => (
+                  <label
+                    key={item.key}
+                    className="flex items-center gap-2.5 p-2 rounded-xl bg-silk-950 border border-silk-800 cursor-pointer hover:border-silk-700"
+                  >
+                    <input
+                      type="color"
+                      value={item.val}
+                      onChange={(e) => handleUpdateTheme({ [item.key]: e.target.value }, true)}
+                      className="w-6 h-6 rounded border-0 cursor-pointer bg-transparent shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <span className="block text-[10px] text-slate-400 truncate">{item.label}</span>
+                      <span className="block text-[11px] font-mono text-slate-200">{item.val}</span>
+                    </div>
+                  </label>
+                ))}
               </div>
             </div>
-          </div>
+          )}
         </div>
 
-        {/* 8. Message Bubbles Style */}
-        <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4">
+        {/* Typography & Icon-Matching Pixel Font */}
+        <div className="p-4 rounded-2xl bg-silk-900 border border-silk-800 space-y-4">
           <div>
-            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
-              <Sliders className="w-4 h-4 text-violet-400" />
-              <span>{t.sectionChatStyling}</span>
-            </div>
-            <p className="text-[11px] text-slate-400 mt-1 leading-snug">{t.sectionChatStylingDesc}</p>
-          </div>
-
-          {/* Bubble Colors: User and Bot */}
-          <div className="grid grid-cols-2 gap-3 pt-1">
-            <div>
-              <label className="block text-[11px] text-slate-400 mb-1">{t.bubbleUserBg}</label>
-              <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
-                <input
-                  type="color"
-                  value={currentTheme.bubbleUserBg}
-                  onChange={(e) => handleUpdateTheme({ bubbleUserBg: e.target.value })}
-                  className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
-                />
-                <span className="text-xs font-mono text-slate-300">{currentTheme.bubbleUserBg}</span>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-[11px] text-slate-400 mb-1">{t.bubbleBotBg}</label>
-              <div className="flex items-center gap-2 bg-silk-800 p-1.5 rounded-xl border border-silk-700">
-                <input
-                  type="color"
-                  value={currentTheme.bubbleBotBg}
-                  onChange={(e) => handleUpdateTheme({ bubbleBotBg: e.target.value })}
-                  className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
-                />
-                <span className="text-xs font-mono text-slate-300">{currentTheme.bubbleBotBg}</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Sliders: Radius, Opacity, Background tint */}
-          <div className="space-y-3 pt-1">
-            <div>
-              <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span>{t.bubbleRadius}</span>
-                <span className="font-mono">{currentTheme.bubbleRadius}px</span>
-              </div>
-              <input
-                type="range"
-                min={6}
-                max={26}
-                value={currentTheme.bubbleRadius}
-                onChange={(e) => handleUpdateTheme({ bubbleRadius: parseInt(e.target.value) })}
-                className="w-full accent-violet-500 h-1.5 bg-silk-800 rounded-lg cursor-pointer"
-              />
-            </div>
-
-            <div>
-              <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span>{t.bubbleOpacity}</span>
-                <span className="font-mono">{Math.round(currentTheme.bubbleOpacity * 100)}%</span>
-              </div>
-              <input
-                type="range"
-                min={0.3}
-                max={1.0}
-                step={0.05}
-                value={currentTheme.bubbleOpacity}
-                onChange={(e) => handleUpdateTheme({ bubbleOpacity: parseFloat(e.target.value) })}
-                className="w-full accent-violet-500 h-1.5 bg-silk-800 rounded-lg cursor-pointer"
-              />
-            </div>
-
-            <div>
-              <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span>{t.backgroundTint}</span>
-                <span className="font-mono">{Math.round(currentTheme.backgroundTint * 100)}%</span>
-              </div>
-              <input
-                type="range"
-                min={0.1}
-                max={0.95}
-                step={0.05}
-                value={currentTheme.backgroundTint}
-                onChange={(e) => handleUpdateTheme({ backgroundTint: parseFloat(e.target.value) })}
-                className="w-full accent-violet-500 h-1.5 bg-silk-800 rounded-lg cursor-pointer"
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* 9. Typography & Text Settings */}
-        <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-4">
-          <div>
-            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
-              <Type className="w-4 h-4 text-violet-400" />
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-300">
+              <Type className="w-4 h-4 text-slate-300" />
               <span>{t.sectionTypography}</span>
             </div>
             <p className="text-[11px] text-slate-400 mt-1 leading-snug">{t.sectionTypographyDesc}</p>
           </div>
 
-          <div className="space-y-4 pt-1">
-            {/* Font Size */}
+          {/* 2x2 Font Family Grid with Visual Samples */}
+          <div>
+            <label className="block text-xs text-slate-400 mb-2 font-medium">{t.fontFamily}</label>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { id: 'sans', label: t.fontFamilySans, sample: 'Аа Aa' },
+                { id: 'serif', label: t.fontFamilySerif, sample: 'Аа Aa' },
+                { id: 'mono', label: t.fontFamilyMono, sample: 'Аа Aa' },
+                { id: 'pixel', label: t.fontFamilyPixel, sample: 'Аа Aa' },
+              ].map((f) => {
+                const isSelected = (currentTheme.fontFamily || 'sans') === f.id;
+                return (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => handleUpdateTheme({ fontFamily: f.id as ThemeConfig['fontFamily'] })}
+                    className={`p-2.5 rounded-xl border text-left transition-colors ${
+                      isSelected
+                        ? 'bg-silk-800 border-slate-300/70 text-white'
+                        : 'bg-silk-950 border-silk-800 text-slate-400 hover:text-slate-100'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-base leading-none text-slate-100" style={{ fontFamily: fontStack(f.id) }}>
+                        {f.sample}
+                      </span>
+                      {isSelected && <Check className="w-3.5 h-3.5 text-slate-200" />}
+                    </div>
+                    <span className={`text-[11px] block truncate ${isSelected ? 'text-slate-200' : 'text-slate-400'}`}>
+                      {f.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Font Size & Line Spacing */}
+          <div className="space-y-3 pt-1">
             <div>
               <div className="flex justify-between text-xs text-slate-400 mb-1">
                 <span>{t.fontSize}</span>
-                <span className="font-mono text-violet-400 font-semibold">{currentTheme.fontSize}px</span>
+                <span className="font-mono text-slate-200 font-semibold">{currentTheme.fontSize}px</span>
               </div>
               <input
                 type="range"
                 min={12}
                 max={20}
                 value={currentTheme.fontSize}
-                onChange={(e) => handleUpdateTheme({ fontSize: parseInt(e.target.value) })}
-                className="w-full accent-violet-500 h-1.5 bg-silk-800 rounded-lg cursor-pointer"
+                onChange={(e) => handleUpdateTheme({ fontSize: parseInt(e.target.value, 10) })}
+                className="w-full accent-slate-300 h-1.5 bg-silk-800 rounded-lg cursor-pointer"
               />
             </div>
 
-            {/* Font Family Selector */}
-            <div>
-              <label className="block text-xs text-slate-400 mb-1.5 font-medium">{t.fontFamily}</label>
-              <div className="grid grid-cols-3 gap-2">
-                {[
-                  { id: 'sans', label: t.fontFamilySans, fontStyle: 'font-sans' },
-                  { id: 'serif', label: t.fontFamilySerif, fontStyle: 'font-serif' },
-                  { id: 'mono', label: t.fontFamilyMono, fontStyle: 'font-mono' },
-                ].map((f) => {
-                  const isSelected = (currentTheme.fontFamily || 'sans') === f.id;
-                  return (
-                    <button
-                      key={f.id}
-                      type="button"
-                      onClick={() => handleUpdateTheme({ fontFamily: f.id as any })}
-                      className={`p-2 rounded-xl border text-center transition-all ${
-                        isSelected
-                          ? 'bg-violet-600/25 border-violet-500 text-white font-semibold'
-                          : 'bg-silk-850 border-silk-800 text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      <span className={`text-xs block ${f.fontStyle}`}>{f.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Line Spacing Selector */}
             <div>
               <label className="block text-xs text-slate-400 mb-1.5 font-medium">{t.lineHeight}</label>
               <div className="grid grid-cols-3 gap-2">
@@ -1526,24 +1686,79 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <button
                       key={lh.id}
                       type="button"
-                      onClick={() => handleUpdateTheme({ lineHeight: lh.id as any })}
-                      className={`p-2 rounded-xl border text-center transition-all ${
+                      onClick={() => handleUpdateTheme({ lineHeight: lh.id as ThemeConfig['lineHeight'] })}
+                      className={`py-2 px-2 rounded-xl border text-center text-xs transition-colors ${
                         isSelected
-                          ? 'bg-violet-600/25 border-violet-500 text-white font-semibold'
-                          : 'bg-silk-850 border-silk-800 text-slate-400 hover:text-white'
+                          ? 'bg-silk-800 border-slate-300/70 text-white font-semibold'
+                          : 'bg-silk-950 border-silk-800 text-slate-400 hover:text-white'
                       }`}
                     >
-                      <span className="text-xs block">{lh.label}</span>
+                      {lh.label}
                     </button>
                   );
                 })}
               </div>
             </div>
           </div>
+        </div>
 
-          {/* Live Preview Card */}
-          <div className="pt-2">
-            <ChatPreviewCard theme={currentTheme} />
+        {/* Message Bubble Geometry & Backdrop */}
+        <div className="p-4 rounded-2xl bg-silk-900 border border-silk-800 space-y-3.5">
+          <div>
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-300">
+              <Sliders className="w-4 h-4 text-slate-300" />
+              <span>{t.sectionChatStyling}</span>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1 leading-snug">{t.sectionChatStylingDesc}</p>
+          </div>
+
+          <div className="space-y-3">
+            <div>
+              <div className="flex justify-between text-xs text-slate-400 mb-1">
+                <span>{t.bubbleRadius}</span>
+                <span className="font-mono text-slate-200">{currentTheme.bubbleRadius}px</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={24}
+                value={currentTheme.bubbleRadius}
+                onChange={(e) => handleUpdateTheme({ bubbleRadius: parseInt(e.target.value, 10) })}
+                className="w-full accent-slate-300 h-1.5 bg-silk-800 rounded-lg cursor-pointer"
+              />
+            </div>
+
+            <div>
+              <div className="flex justify-between text-xs text-slate-400 mb-1">
+                <span>{t.bubbleOpacity}</span>
+                <span className="font-mono text-slate-200">{Math.round(currentTheme.bubbleOpacity * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min={0.35}
+                max={1.0}
+                step={0.05}
+                value={currentTheme.bubbleOpacity}
+                onChange={(e) => handleUpdateTheme({ bubbleOpacity: parseFloat(e.target.value) })}
+                className="w-full accent-slate-300 h-1.5 bg-silk-800 rounded-lg cursor-pointer"
+              />
+            </div>
+
+            <div>
+              <div className="flex justify-between text-xs text-slate-400 mb-1">
+                <span>{t.backgroundTint}</span>
+                <span className="font-mono text-slate-200">{Math.round(currentTheme.backgroundTint * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min={0.1}
+                max={0.98}
+                step={0.05}
+                value={currentTheme.backgroundTint}
+                onChange={(e) => handleUpdateTheme({ backgroundTint: parseFloat(e.target.value) })}
+                className="w-full accent-slate-300 h-1.5 bg-silk-800 rounded-lg cursor-pointer"
+              />
+            </div>
           </div>
         </div>
         </>)}
@@ -1551,8 +1766,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
       {/* Style Modal */}
       {showStyleModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl p-4 shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80">
+          <div className="w-full max-w-sm bg-silk-900 border border-silk-700 rounded-2xl p-4 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-sm text-white">
                 {editingStyleId ? t.editStyle : t.createStyle}
