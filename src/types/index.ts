@@ -120,6 +120,7 @@ export type ApiProvider =
   | 'gemini'
   | 'groq'
   | 'deepseek'
+  | 'demonroute'
   | 'custom';
 
 export interface ApiKeyConfig {

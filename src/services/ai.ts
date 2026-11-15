@@ -323,6 +323,8 @@ function getProviderBaseUrl(config: ApiKeyConfig): string {
       return 'https://api.groq.com/openai/v1';
     case 'deepseek':
       return 'https://api.deepseek.com/v1';
+    case 'demonroute':
+      return 'https://api.demonroute.com/v1';
     default:
       return 'https://openrouter.ai/api/v1';
   }
@@ -397,7 +399,7 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
       return;
     }
 
-    // Standard OpenAI-compatible format (OpenRouter, OpenAI, Groq, DeepSeek, Custom)
+    // Standard OpenAI-compatible format (OpenRouter, OpenAI, Groq, DeepSeek, Demon Route, Custom)
     const baseUrl = getProviderBaseUrl(apiKeyConfig);
     const url = `${baseUrl}/chat/completions`;
 
@@ -751,6 +753,25 @@ export async function fetchAvailableModels(apiKeyConfig: ApiKeyConfig): Promise<
           pricing: {
             prompt: parseFloat(m.pricing?.prompt || '0'),
           },
+        }));
+      }
+    } catch {
+      // fallback
+    }
+  }
+
+  if (apiKeyConfig.provider === 'demonroute' && apiKeyConfig.key.trim()) {
+    try {
+      const res = await fetch(`${getProviderBaseUrl(apiKeyConfig)}/models`, {
+        headers: {
+          Authorization: `Bearer ${apiKeyConfig.key.trim()}`,
+        },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return (data.data || []).map((m: any) => ({
+          id: m.id,
+          name: m.name || m.id,
         }));
       }
     } catch {
