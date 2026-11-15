@@ -871,6 +871,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <option value="gemini">Google Gemini</option>
                   <option value="groq">Groq</option>
                   <option value="deepseek">DeepSeek</option>
+                  <option value="demonroute">Demon Route</option>
                   <option value="custom">Custom (Local / vLLM / Ollama)</option>
                 </select>
               </div>
