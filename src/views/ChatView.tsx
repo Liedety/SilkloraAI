@@ -21,6 +21,10 @@ import {
   CornerDownRight,
   Smile,
   ArrowDown,
+  Camera,
+  Download,
+  Pin,
+  PinOff,
 } from 'lucide-react';
 import { db, DEFAULT_THEME, getLocalizedTextStyle } from '../db';
 import type {
@@ -31,6 +35,9 @@ import type {
   Group,
   Language,
   MessageVariant,
+  SceneAsset,
+  SceneState,
+  ThemeConfig,
 } from '../types';
 import { translations } from '../i18n';
 import {
@@ -46,6 +53,7 @@ import {
   enforceParagraphLimit,
   getEffectiveAiConfig,
   getComponentAiConfig,
+  getComponentBackend,
   resolveSamplerConfig,
   speakerStopStrings,
   resolveEmotion,
@@ -68,15 +76,32 @@ import {
   sceneNoteLines,
   summaryLimits,
 } from '../services/contextBudget';
-import { extractMemoryAndAffinity } from '../services/memoryGraph';
+import { cloneMemoryGraphRecords, extractMemoryAndAffinity, removeMemoriesWithBridge } from '../services/memoryGraph';
 import { finalizeReplyText } from '../services/replyGuard';
+import { parseSceneCommand } from '../services/sceneState';
+import { executeSceneGenerationPipeline, selectSceneCharacters } from '../services/sceneDirector';
+import { normalizeSceneOutputImage } from '../utils/imageUtils';
+import {
+  filterSlashCommands,
+  parseWandCommand,
+  resolveCanonicalSlashCommand,
+} from '../utils/slashCommands';
+import {
+  hexToRgba,
+  lineHeightNumeric,
+  readCachedTheme,
+  resolveActiveTheme,
+} from '../utils/themePersistence';
 import { ChatSettingsModal } from './ChatSettingsModal';
 import { AvatarImage } from '../components/AvatarImage';
+import { ActivityProgressBar } from '../components/ActivityProgressBar';
+import { SceneGuideModal, SceneHelpButton } from '../components/SceneHelp';
 
 interface ChatViewProps {
   type: 'character' | 'group';
   targetId: string;
   language: Language;
+  theme?: ThemeConfig;
   onBack: () => void;
 }
 
@@ -107,6 +132,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   type,
   targetId,
   language,
+  theme: propTheme,
   onBack,
 }) => {
   const t = translations[language];
@@ -253,6 +279,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
     [currentSessionId]
   ) || [];
 
+  // Scene assets rendered for /scene commands in this session
+  const sceneAssets = useLiveQuery(
+    () => (currentSessionId ? db.sceneAssets.where('chatId').equals(currentSessionId).toArray() : []),
+    [currentSessionId]
+  ) || [];
+  const sceneAssetsById: Record<string, SceneAsset> = {};
+  for (const asset of sceneAssets) {
+    sceneAssetsById[asset.id] = asset;
+  }
+
   // UI state
   const [inputText, setInputText] = useState('');
   const [attachedImage, setAttachedImage] = useState<string | null>(null);
@@ -286,6 +322,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // Slash command dropdown
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [summaryModalText, setSummaryModalText] = useState<string | null>(null);
+  const [isSummarizing, setIsSummarizing] = useState(false);
+  const [summaryStartedAt, setSummaryStartedAt] = useState(0);
+  const [botGenStartedAt, setBotGenStartedAt] = useState(0);
+  const [wandStartedAt, setWandStartedAt] = useState(0);
 
   // Copy feedback
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -296,18 +336,34 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // Bot message manual emotion sprite picker
   const [emotionPickerMsgId, setEmotionPickerMsgId] = useState<string | null>(null);
 
+  // Scene Generation UI state (/scene)
+  const [isGeneratingScene, setIsGeneratingScene] = useState(false);
+  const [sceneStageText, setSceneStageText] = useState('');
+  const [sceneProgressPct, setSceneProgressPct] = useState(0);
+  const [sceneStartedAt, setSceneStartedAt] = useState(0);
+  const [sceneStepInfo, setSceneStepInfo] = useState<{ step: number; totalSteps: number } | null>(null);
+  const [activeSceneTargetMsgId, setActiveSceneTargetMsgId] = useState<string | null>(null);
+  const sceneAbortRef = useRef<AbortController | null>(null);
+  const imageModeActiveRef = useRef(false);
+  const [restoringLlmNotice, setRestoringLlmNotice] = useState(false);
+  const [lightboxAsset, setLightboxAsset] = useState<{ asset: SceneAsset; msgId: string } | null>(null);
+  const [angleInputMsgId, setAngleInputMsgId] = useState<string | null>(null);
+  const [angleInputText, setAngleInputText] = useState('');
+  const [showSceneGuide, setShowSceneGuide] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const currentTheme = settings?.theme || DEFAULT_THEME;
+  const cachedThemeRef = useRef<ThemeConfig | null>(readCachedTheme(undefined, DEFAULT_THEME));
+  const currentTheme = resolveActiveTheme({
+    dbTheme: settings?.theme,
+    propTheme,
+    cachedTheme: cachedThemeRef.current,
+    fallback: DEFAULT_THEME,
+  });
+  cachedThemeRef.current = currentTheme;
 
   // The selected font applies to the whole app, so message text simply inherits it
   const fontFamilyStyle = 'inherit';
-
-  const lineHeightStyle =
-    currentTheme.lineHeight === 'loose'
-      ? 1.8
-      : currentTheme.lineHeight === 'relaxed'
-      ? 1.6
-      : 1.45;
+  const lineHeightStyle = lineHeightNumeric(currentTheme.lineHeight);
 
   // Pagination & Scroll navigation state
   const PAGE_SIZE = 25;
@@ -330,6 +386,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
     isSmoothScrollingToBottomRef.current = false;
     userScrolledUpRef.current = false;
     lastScrollTopRef.current = 0;
+    setAngleInputMsgId(null);
+    setAngleInputText('');
+    setLightboxAsset(null);
   }, [currentSessionId]);
 
   const totalMessagesCount = messages.length;
@@ -435,15 +494,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
     adjustTextareaHeight();
   }, [inputText]);
 
+  const matchingSlashCommands = filterSlashCommands(inputText);
+
   // Slash command trigger & auto-expanding textarea
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
     setInputText(val);
-    if (val.startsWith('/')) {
-      setShowSlashMenu(true);
-    } else {
-      setShowSlashMenu(false);
-    }
+    setShowSlashMenu(filterSlashCommands(val).length > 0);
     adjustTextareaHeight();
   };
 
@@ -463,6 +520,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // Build current dialogue context string for AI
   const buildContextHistory = (msgList: ChatMessage[], userLabelOverride?: string): string => {
     return msgList
+      .filter((m) => m.senderId !== 'scene-director')
       .slice(-8)
       .map((m) => {
         const v = m.variants[m.activeVariantIndex];
@@ -513,6 +571,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
     if (!speaker) return;
 
+    if (imageModeActiveRef.current) {
+      imageModeActiveRef.current = false;
+      setRestoringLlmNotice(true);
+    }
+
+    setBotGenStartedAt(Date.now());
     setIsGenerating(true);
     setStreamingText('');
     setStreamingThought('');
@@ -532,21 +596,25 @@ export const ChatView: React.FC<ChatViewProps> = ({
         ? allCharacters.find((c) => c.id === activeChat.personaId) || null
         : null;
 
-      // Retrieve affinity score
+      // Retrieve affinity score & custom bond details
       const affinity = activeChat.relationships?.[speaker.id] || 0;
+      const speakerRelDetail = activeChat.relationshipDetails?.[speaker.id] || null;
 
       // Query fresh settings & text style from database
       const freshSettings = await db.settings.get('default');
+      if (getComponentBackend(freshSettings || settings, 'chat') !== 'local') {
+        setRestoringLlmNotice(false);
+      }
       const styleId = activeChat.textStyleId || freshSettings?.textStyleId || 'literary';
       const rawStyle = (await db.textStyles.get(styleId)) || activeStyle;
 
       // Context sliding window with context compression
       const freshDbMsgs = await db.messages.where('chatId').equals(session.id).sortBy('createdAt');
-      let msgsForContext = freshDbMsgs;
+      let msgsForContext = freshDbMsgs.filter((m) => m.senderId !== 'scene-director');
       if (existingBotMsgToVariant) {
-        const targetIdx = freshDbMsgs.findIndex((m) => m.id === existingBotMsgToVariant.id);
+        const targetIdx = msgsForContext.findIndex((m) => m.id === existingBotMsgToVariant.id);
         if (targetIdx !== -1) {
-          msgsForContext = freshDbMsgs.slice(0, targetIdx);
+          msgsForContext = msgsForContext.slice(0, targetIdx);
         }
       }
 
@@ -589,6 +657,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const groupMembers = type === 'group' ? allCharacters.filter((c) => group?.characterIds.includes(c.id)) : [];
       const turnHasLengthOverride = Boolean(guidancePrompt && parseLengthOverride(guidancePrompt));
 
+      const freshMemoryNodes = await db.memoryNodes.where('chatId').equals(session.id).toArray();
+      const freshMemoryEdges = await db.memoryEdges.where('chatId').equals(session.id).toArray();
+      const memoryQueryContext = msgsForContext
+        .slice(-3)
+        .map((m) => m.variants[m.activeVariantIndex]?.text || '')
+        .join(' ')
+        .trim();
+
       const makeSystemPrompt = (summaryText: string) => buildSystemPrompt({
         character: speaker,
         group: group || undefined,
@@ -599,8 +675,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
         chatDirectives: activeChat.chatDirectives,
         turnGuidance: turnHasLengthOverride ? guidancePrompt : undefined,
         thoughtsEnabled: activeChat.thoughtsEnabled === true,
-        memoryNodes,
+        memoryNodes: freshMemoryNodes,
+        memoryEdges: freshMemoryEdges,
+        queryContext: memoryQueryContext,
         relationshipScore: affinity,
+        relationshipDetail: speakerRelDetail,
         speakerCharacter: speaker,
         customSystemPrompt: freshSettings?.customSystemPrompt,
         customSystemPromptMode: freshSettings?.customSystemPromptMode,
@@ -641,11 +720,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
           userGender: inferGrammaticalGender(userPersona?.description),
           language: dialogueLang,
           relationshipScore: affinity,
-          memoryNodes,
+          relationshipDetail: speakerRelDetail,
+          memoryNodes: freshMemoryNodes,
+          memoryEdges: freshMemoryEdges,
+          queryContext: memoryQueryContext,
           emotionNames: speaker.emotions?.map((e) => e.name),
           presentNames: type === 'group'
             ? groupMembers.filter((c) => c.id !== speaker.id && c.id !== userPersona?.id).map((c) => c.name)
             : undefined,
+          sceneState: activeChat.sceneState,
           mentionedNames: type === 'group'
             ? groupMembers
                 .filter((c) => c.id !== speaker.id && c.id !== userPersona?.id)
@@ -854,6 +937,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         includeReasoning: activeChat.thoughtsEnabled === true,
         signal: abortController.signal,
         onToken: (tok) => {
+          setRestoringLlmNotice(false);
           fullGenerated += tok;
           const parsed = parseStreamingBotResponse(fullGenerated, speaker.emotions, speaker.name, [speaker.name]);
           if (parsed.emotion) {
@@ -863,6 +947,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           setStreamingText(parsed.text);
         },
         onComplete: async (rawCompleted) => {
+          setRestoringLlmNotice(false);
           setIsGenerating(false);
           abortControllerRef.current = null;
           const completed = stripLeadingSpeakerName(rawCompleted, [speaker.name]);
@@ -932,7 +1017,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
             const summaryConfig = getComponentAiConfig(settings, activeApiKey, 'summary');
 
             // Run automated memory graph extraction and affinity change in background with fresh DB messages
-            const freshHistory = await db.messages.where('chatId').equals(session.id).sortBy('createdAt');
+            const freshHistory = (await db.messages.where('chatId').equals(session.id).sortBy('createdAt')).filter(
+              (m) => m.senderId !== 'scene-director'
+            );
             extractMemoryAndAffinity(
               session.id,
               speaker.id,
@@ -944,7 +1031,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             ).then(async ({ newAffinity }) => {
               if (newAffinity !== affinity) {
                 const currentLatest = await db.chats.get(session.id);
-                if (currentLatest) {
+                if (currentLatest && !currentLatest.relationshipDetails?.[speaker.id]?.locked) {
                   const updatedR = { ...(currentLatest.relationships || {}), [speaker.id]: newAffinity };
                   await db.chats.update(session.id, { relationships: updatedR });
                 }
@@ -994,7 +1081,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   summaryConfig.textModel,
                   toSummarize,
                   prevSummary,
-                  isLocal ? { maxChars: limits.maxChars, maxTokens: limits.maxTokens, timeoutMs: 120000 } : undefined
+                  isLocal
+                    ? { maxChars: limits.maxChars, maxTokens: limits.maxTokens, timeoutMs: 120000, isBackground: true }
+                    : { isBackground: true }
                 ).then(async (summary) => {
                   if (summary && summary.trim()) {
                     await db.chats.update(session.id, {
@@ -1014,6 +1103,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           }
         },
         onError: (err) => {
+          setRestoringLlmNotice(false);
           setIsGenerating(false);
           abortControllerRef.current = null;
           if (!abortController.signal.aborted) {
@@ -1026,21 +1116,252 @@ export const ChatView: React.FC<ChatViewProps> = ({
         alert((language === 'ru' ? 'Ошибка запуска генерации: ' : 'Failed to generate: ') + (err?.message || err));
       }
     } finally {
+      setRestoringLlmNotice(false);
       setIsGenerating(false);
       abortControllerRef.current = null;
     }
   };
 
+  // Scene generation handler (/scene [perspective])
+  const handleToggleSceneAnchorPin = async () => {
+    if (!session?.sceneState) return;
+    const nextLocked = !session.sceneState.location.locked;
+    await db.chats.update(session.id, {
+      sceneState: {
+        ...session.sceneState,
+        location: { ...session.sceneState.location, locked: nextLocked },
+      },
+      updatedAt: Date.now(),
+    });
+  };
+
+  const runSceneGeneration = async (options?: {
+    perspective?: string;
+    targetMsg?: ChatMessage;
+    skipAnalysis?: boolean;
+    customPromptOverride?: string;
+    seed?: number;
+  }) => {
+    if (!session || isGenerating || isGeneratingScene) return;
+
+    const freshSettings = await db.settings.get('default');
+    const effSettings = freshSettings || settings;
+    const analysisCfg = getComponentAiConfig(effSettings, activeApiKey, 'sceneAnalysis');
+    const imageCfg = getComponentAiConfig(effSettings, activeApiKey, 'sceneImage');
+
+    if (!options?.skipAnalysis && !analysisCfg.isLocal && !analysisCfg.apiKeyConfig?.key?.trim()) {
+      alert(language === 'ru' ? 'Настройте ИИ для анализа сцен в Настройках.' : 'Please configure AI connection for Scene Director in Settings.');
+      return;
+    }
+    if (!imageCfg.isLocal && !imageCfg.apiKeyConfig?.key?.trim()) {
+      alert(language === 'ru' ? 'Настройте ИИ для генерации изображений в Настройках.' : 'Please configure AI or Local Hub for Scene Images in Settings.');
+      return;
+    }
+
+    const sceneCharacters = selectSceneCharacters({
+      chatType: type,
+      character,
+      group,
+      allCharacters,
+      personaId: session.personaId,
+    });
+
+    if (sceneCharacters.length === 0) {
+      if (type === 'group') {
+        alert(t.sceneGroupNoEnabled);
+      }
+      return;
+    }
+
+    const controller = new AbortController();
+    sceneAbortRef.current = controller;
+    setSceneStartedAt(Date.now());
+    setSceneStepInfo(null);
+    setActiveSceneTargetMsgId(options?.targetMsg?.id || null);
+    setIsGeneratingScene(true);
+    setSceneStageText(options?.skipAnalysis ? t.sceneGeneratingStage : t.sceneAnalyzingStage);
+    setSceneProgressPct(options?.skipAnalysis ? 25 : 8);
+
+    try {
+      const freshChat = (await db.chats.get(session.id)) || session;
+      const freshMsgs = (await db.messages.where('chatId').equals(session.id).sortBy('createdAt')).filter(
+        (m) => m.senderId !== 'scene-director'
+      );
+      const userPersona = freshChat.personaId
+        ? allCharacters.find((c) => c.id === freshChat.personaId) || null
+        : null;
+
+      const result = await executeSceneGenerationPipeline({
+        session: freshChat,
+        messages: freshMsgs,
+        characters: sceneCharacters,
+        userPersona,
+        perspective: options?.perspective || '',
+        settings: effSettings,
+        activeApiKey,
+        skipAnalysis: options?.skipAnalysis,
+        customPromptOverride: options?.customPromptOverride,
+        seed: options?.seed,
+        signal: controller.signal,
+        onStage: (info) => {
+          if (info.stage === 'analyzing') {
+            setSceneStageText(t.sceneAnalyzingStage);
+            setSceneStepInfo(null);
+            setSceneProgressPct(info.progress ?? 12);
+          } else if (info.stage === 'switching_memory') {
+            if (imageCfg.isLocal) {
+              imageModeActiveRef.current = true;
+            }
+            setSceneStageText(t.sceneMemorySwapStage);
+            setSceneStepInfo(null);
+            setSceneProgressPct(info.progress ?? 18);
+          } else if (info.stage === 'loading_model') {
+            if (imageCfg.isLocal) {
+              imageModeActiveRef.current = true;
+            }
+            setSceneStageText(t.sceneLoadingModelStage);
+            setSceneStepInfo(null);
+            setSceneProgressPct(info.progress ?? 22);
+          } else if (info.stage === 'encoding_prompt') {
+            if (imageCfg.isLocal) {
+              imageModeActiveRef.current = true;
+            }
+            setSceneStageText(t.sceneEncodingPromptStage);
+            setSceneStepInfo(null);
+            setSceneProgressPct(info.progress ?? 26);
+          } else if (info.stage === 'decoding') {
+            if (imageCfg.isLocal) {
+              imageModeActiveRef.current = true;
+            }
+            setSceneStageText(t.sceneDecodingStage);
+            setSceneProgressPct(info.progress ?? 96);
+          } else {
+            if (imageCfg.isLocal) {
+              imageModeActiveRef.current = true;
+            }
+            if (info.totalSteps && info.step) {
+              setSceneStepInfo({ step: info.step, totalSteps: info.totalSteps });
+            }
+            setSceneStageText(t.sceneGeneratingStage);
+            setSceneProgressPct(info.progress ?? 50);
+          }
+        },
+        onSceneStateUpdated: async (nextState) => {
+          await db.chats.update(session.id, { sceneState: nextState, updatedAt: Date.now() });
+        },
+      });
+
+      const compressed =
+        (await normalizeSceneOutputImage(result.assetDraft.imageData, 1280, 0.9).catch(
+          () => result.assetDraft.imageData
+        )) || result.assetDraft.imageData;
+
+      const now = Date.now();
+      const assetId = 'scene-' + Math.random().toString(36).substring(2, 10);
+
+      if (options?.targetMsg) {
+        const latestTarget = (await db.messages.get(options.targetMsg.id)) || options.targetMsg;
+        const nextIds = [...(latestTarget.sceneAssetIds || []), assetId];
+        const newAsset: SceneAsset = {
+          ...result.assetDraft,
+          id: assetId,
+          messageId: latestTarget.id,
+          imageData: compressed,
+          createdAt: now,
+        };
+        await db.sceneAssets.put(newAsset);
+        await db.messages.update(latestTarget.id, {
+          sceneAssetIds: nextIds,
+          activeSceneAssetIndex: nextIds.length - 1,
+        });
+      } else {
+        const msgId = 'msg-' + Math.random().toString(36).substring(2, 10);
+        const newAsset: SceneAsset = {
+          ...result.assetDraft,
+          id: assetId,
+          messageId: msgId,
+          imageData: compressed,
+          createdAt: now,
+        };
+        const label =
+          options?.perspective?.trim() ||
+          result.sceneState.location.locationName ||
+          (language === 'ru' ? 'Сцена' : 'Scene');
+        const sceneMsg: ChatMessage = {
+          id: msgId,
+          chatId: session.id,
+          senderId: 'scene-director',
+          senderName: language === 'ru' ? 'Режиссёр сцен' : 'Scene Director',
+          variants: [{ text: label, timestamp: now }],
+          activeVariantIndex: 0,
+          sceneAssetIds: [assetId],
+          activeSceneAssetIndex: 0,
+          createdAt: now,
+        };
+        await db.sceneAssets.put(newAsset);
+        await db.messages.put(sceneMsg);
+        await db.chats.update(session.id, { updatedAt: now });
+        requestAnimationFrame(() => scrollToBottom(false));
+      }
+    } catch (err: any) {
+      if (!controller.signal.aborted) {
+        const rawErr = String(err?.message || err || '');
+        const missMatch = rawErr.match(/Model '([^']+)' \([^)]+\) is missing required companion files[^:]*:\s*([^.]+)/i);
+        if (missMatch) {
+          alert(
+            `${t.sceneFailedPrefix}${t.sceneErrMissingCompanions
+              .replace('{model}', missMatch[1])
+              .replace('{roles}', missMatch[2].trim())}`
+          );
+        } else {
+          alert(`${t.sceneFailedPrefix}${rawErr}`);
+        }
+      }
+    } finally {
+      sceneAbortRef.current = null;
+      setIsGeneratingScene(false);
+      setSceneStageText('');
+      setSceneProgressPct(0);
+      setSceneStepInfo(null);
+      setActiveSceneTargetMsgId(null);
+    }
+  };
+
   // Send User Message
   const handleSendMessage = async () => {
-    if ((!inputText.trim() && !attachedImage) || isGenerating || isSubmittingRef.current || !session) return;
+    if ((!inputText.trim() && !attachedImage) || isGenerating || isGeneratingScene || isSubmittingRef.current || !session) return;
 
     // Intercept slash commands typed into the input
     const trimmedInput = inputText.trim();
     if (trimmedInput.startsWith('/') && !attachedImage) {
-      const cmd = trimmedInput.split(/\s+/)[0].toLowerCase();
-      if (['/continue', '/summary', '/memory', '/reset', '/action'].includes(cmd)) {
-        await handleSelectSlashCommand(cmd);
+      const parsedScene = parseSceneCommand(trimmedInput);
+      if (parsedScene.isSceneCommand) {
+        setInputText('');
+        setShowSlashMenu(false);
+        if (textareaRef.current) {
+          textareaRef.current.style.height = 'auto';
+        }
+        await runSceneGeneration({ perspective: parsedScene.perspective });
+        return;
+      }
+      const parsedWand = parseWandCommand(trimmedInput);
+      if (parsedWand.isWandCommand) {
+        setInputText('');
+        setShowSlashMenu(false);
+        if (textareaRef.current) {
+          textareaRef.current.style.height = 'auto';
+        }
+        setUserWandPrompt(parsedWand.hint);
+        setWandPreview('');
+        setShowUserWandModal(true);
+        if (parsedWand.hint) {
+          void handleExecuteUserWand(parsedWand.hint);
+        }
+        return;
+      }
+      const canonicalCmd = resolveCanonicalSlashCommand(trimmedInput.split(/\s+/)[0]);
+      if (canonicalCmd && canonicalCmd !== '/scene' && canonicalCmd !== '/wand') {
+        await handleSelectSlashCommand(canonicalCmd);
         return;
       }
     }
@@ -1095,7 +1416,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   };
 
-  // Rollback and Fork chat session
+  // Rollback and Fork chat session (preserving memory nodes, bridged edges, and scene state!)
   const handleRollback = async (targetMsg: ChatMessage) => {
     if (!session) return;
     const targetIdx = messages.findIndex((m) => m.id === targetMsg.id);
@@ -1107,10 +1428,28 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const newSessionId = 'chat-fork-' + Math.random().toString(36).substring(2, 9);
     const newTitle = `${session.title} (Fork ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`;
 
+    const msgIdMap = new Map<string, string>();
+    for (const msg of messagesToKeep) {
+      msgIdMap.set(msg.id, 'msg-' + Math.random().toString(36).substring(2, 10));
+    }
+
+    const forkedSceneState: SceneState | undefined = session.sceneState
+      ? {
+          ...session.sceneState,
+          lastAnalyzedMsgId: session.sceneState.lastAnalyzedMsgId
+            ? msgIdMap.get(session.sceneState.lastAnalyzedMsgId)
+            : undefined,
+        }
+      : undefined;
+
     const forkedSession: ChatSession = {
       ...session,
       id: newSessionId,
       title: newTitle,
+      sceneState: forkedSceneState,
+      lastSummarizedMsgId: session.lastSummarizedMsgId
+        ? msgIdMap.get(session.lastSummarizedMsgId)
+        : undefined,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -1119,11 +1458,49 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
     // Clone messages into the new session
     for (const msg of messagesToKeep) {
+      const clonedMsgId = msgIdMap.get(msg.id)!;
+      let clonedSceneIds: string[] | undefined;
+      if (msg.sceneAssetIds && msg.sceneAssetIds.length > 0) {
+        clonedSceneIds = [];
+        for (const aid of msg.sceneAssetIds) {
+          const orig = sceneAssetsById[aid];
+          if (orig) {
+            const newAid = 'scene-' + Math.random().toString(36).substring(2, 10);
+            await db.sceneAssets.put({
+              ...orig,
+              id: newAid,
+              chatId: newSessionId,
+              messageId: clonedMsgId,
+            });
+            clonedSceneIds.push(newAid);
+          }
+        }
+      }
       await db.messages.put({
         ...msg,
-        id: 'msg-' + Math.random().toString(36).substring(2, 10),
+        id: clonedMsgId,
         chatId: newSessionId,
+        sceneAssetIds: clonedSceneIds,
       });
+    }
+
+    // Clone memory graph nodes & edges up to the rollback point so long-chat memories never disappear!
+    try {
+      const [origNodes, origEdges] = await Promise.all([
+        db.memoryNodes.where('chatId').equals(session.id).toArray(),
+        db.memoryEdges.where('chatId').equals(session.id).toArray(),
+      ]);
+      if (origNodes.length > 0) {
+        const clonedGraph = cloneMemoryGraphRecords(origNodes, origEdges, newSessionId, msgIdMap);
+        if (clonedGraph.nodes.length > 0) {
+          await db.memoryNodes.bulkPut(clonedGraph.nodes);
+        }
+        if (clonedGraph.edges.length > 0) {
+          await db.memoryEdges.bulkPut(clonedGraph.edges);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to clone memory graph on rollback:', err);
     }
 
     // Switch to new session
@@ -1156,22 +1533,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const msgIndex = messages.findIndex((m) => m.id === msg.id);
       if (msgIndex !== -1) {
         const toDelete = messages.slice(msgIndex + 1);
+        const deletedIds: string[] = [];
         for (const d of toDelete) {
+          deletedIds.push(d.id);
           await db.messages.delete(d.id);
-          try {
-            const staleNodes = await db.memoryNodes
-              .where('chatId')
-              .equals(msg.chatId)
-              .filter((n) => n.messageId === d.id)
-              .toArray();
-            for (const sn of staleNodes) {
-              await db.memoryEdges.where('source').equals(sn.id).delete();
-              await db.memoryEdges.where('target').equals(sn.id).delete();
-              await db.memoryNodes.delete(sn.id);
-            }
-          } catch {
-            // ignore
-          }
+          await db.sceneAssets.where('messageId').equals(d.id).delete().catch(() => {});
+        }
+        if (deletedIds.length > 0) {
+          await removeMemoriesWithBridge({
+            chatId: msg.chatId,
+            messageIds: deletedIds,
+            respectPinned: true,
+          }).catch(() => {});
         }
       }
       runBotGeneration();
@@ -1204,7 +1577,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   };
 
   // User Magic Wand Ghostwriter: streams the suggestion, can be stopped, keeps the partial text
-  const handleExecuteUserWand = async () => {
+  const handleExecuteUserWand = async (promptOverride?: string | React.MouseEvent) => {
+    const effectiveWandPrompt = typeof promptOverride === 'string' ? promptOverride : userWandPrompt;
     const ghostCfg = getComponentAiConfig(settings, activeApiKey, 'ghostwriter');
     const ghostKey = ghostCfg.apiKeyConfig;
     if (!ghostKey || (!ghostKey.key?.trim() && !ghostCfg.isLocal)) {
@@ -1214,6 +1588,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const controller = new AbortController();
     wandAbortRef.current = controller;
     setWandPreview('');
+    setWandStartedAt(Date.now());
     setIsWandGenerating(true);
     try {
       const userPersona = session?.personaId
@@ -1226,14 +1601,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
             .filter((c) => group?.characterIds.includes(c.id) && c.id !== userPersona?.id)
             .map((c) => c.name)
         : (character ? [character.name] : []);
-      const langProbe = history || userWandPrompt || character?.description || '';
+      const langProbe = history || effectiveWandPrompt || character?.description || '';
       const wandLang: 'en' | 'ru' = /[а-яА-ЯёЁ]/.test(langProbe) ? 'ru' : (/[a-zA-Z]/.test(langProbe) ? 'en' : language);
 
       const suggested = await suggestUserReply(
         ghostKey as any,
         ghostCfg.textModel,
         userPersona,
-        userWandPrompt,
+        effectiveWandPrompt,
         history,
         {
           userName: wandUserName,
@@ -1280,7 +1655,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // Slash commands handler
   const handleSelectSlashCommand = async (cmd: string) => {
     setShowSlashMenu(false);
-    if (cmd === '/continue') {
+    if (cmd === '/scene') {
+      const parsed = parseSceneCommand(inputText.trim());
+      setInputText('');
+      await runSceneGeneration({ perspective: parsed.perspective });
+    } else if (cmd === '/wand') {
+      const parsedWand = parseWandCommand(inputText.trim());
+      const hint = parsedWand.isWandCommand ? parsedWand.hint : '';
+      setInputText('');
+      setUserWandPrompt(hint);
+      setWandPreview('');
+      setShowUserWandModal(true);
+      if (hint) {
+        void handleExecuteUserWand(hint);
+      }
+    } else if (cmd === '/continue') {
       setInputText('');
       runBotGeneration();
     } else if (cmd === '/summary') {
@@ -1297,7 +1686,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
         alert(language === 'ru' ? 'Требуется подключение к ИИ для генерации сводки.' : 'AI connection required for summary.');
         return;
       }
-      setSummaryModalText(language === 'ru' ? 'Генерация сводки сцены...' : 'Generating scene recap...');
+      setSummaryStartedAt(Date.now());
+      setIsSummarizing(true);
+      setSummaryModalText(' ');
       try {
         const history = buildContextHistory(messages);
         const summaryCfg = getComponentAiConfig(settings, activeApiKey, 'summary');
@@ -1310,6 +1701,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
         setSummaryModalText(recap);
       } catch (err: any) {
         setSummaryModalText(language === 'ru' ? `Ошибка генерации сводки: ${err.message}` : `Failed to summarize: ${err.message}`);
+      } finally {
+        setIsSummarizing(false);
       }
     } else if (cmd === '/memory') {
       setInputText('');
@@ -1320,16 +1713,26 @@ export const ChatView: React.FC<ChatViewProps> = ({
       if (window.confirm(language === 'ru' ? 'Очистить сообщения и не зафиксированные воспоминания в этой сессии?' : 'Clear messages and unpinned memories in this chat session?')) {
         if (session) {
           await db.messages.where('chatId').equals(session.id).delete();
+          await db.sceneAssets.where('chatId').equals(session.id).delete().catch(() => {});
           const unpinned = await db.memoryNodes.where('chatId').equals(session.id).filter((n) => !n.isPinned).toArray();
-          for (const u of unpinned) {
-            await db.memoryEdges.where('source').equals(u.id).delete();
-            await db.memoryEdges.where('target').equals(u.id).delete();
-            await db.memoryNodes.delete(u.id);
+          if (unpinned.length > 0) {
+            await removeMemoriesWithBridge({
+              chatId: session.id,
+              nodeIds: unpinned.map((u) => u.id),
+              respectPinned: true,
+            }).catch(() => {});
+          }
+          const lockedRelationships: Record<string, number> = {};
+          for (const [charId, val] of Object.entries(session.relationships || {})) {
+            if (session.relationshipDetails?.[charId]?.locked) {
+              lockedRelationships[charId] = val;
+            }
           }
           await db.chats.update(session.id, {
             rollingSummary: undefined,
             lastSummarizedMsgId: undefined,
-            relationships: {},
+            sceneState: undefined,
+            relationships: lockedRelationships,
             updatedAt: Date.now(),
           });
         }
@@ -1347,7 +1750,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <span
             key={i}
             className="italic font-normal"
-            style={{ color: currentTheme.actionColor || '#fb7185' }}
+            style={{ color: currentTheme.actionColor || 'var(--theme-action, #a1a1aa)' }}
           >
             {part}
           </span>
@@ -1378,17 +1781,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* 1. Header */}
       <div className="relative z-10 flex items-center justify-between px-4 py-3 bg-silk-900/80 backdrop-blur-xl border-b border-silk-800/80 shrink-0">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 min-w-0">
           <button
             onClick={onBack}
             type="button"
-            className="p-1.5 -ml-1 text-slate-400 hover:text-white rounded-xl hover:bg-silk-800"
+            className="p-1.5 -ml-1 text-slate-400 hover:text-white rounded-xl hover:bg-silk-800 shrink-0"
           >
             <ArrowLeft className="w-5 h-5" />
           </button>
 
           {/* Avatar & Title */}
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2.5 min-w-0">
             <div className="relative w-9 h-9 rounded-xl overflow-hidden bg-silk-800 border border-silk-700 shrink-0">
               <AvatarImage
                 src={type === 'character' ? character?.avatar : group?.avatar}
@@ -1398,30 +1801,61 @@ export const ChatView: React.FC<ChatViewProps> = ({
               />
             </div>
 
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white leading-tight truncate max-w-[180px]">
+                <h2 className="text-sm font-bold text-white leading-tight truncate max-w-[150px] sm:max-w-[200px]">
                   {type === 'character' ? character?.name : group?.name}
                 </h2>
               </div>
               <span className="text-[10px] text-emerald-400 flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
-                <span>{type === 'character' ? (language === 'ru' ? 'В ролевой' : 'In Roleplay') : (language === 'ru' ? 'Групповая сессия' : 'Group Session')}</span>
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block shrink-0" />
+                <span className="truncate">{type === 'character' ? (language === 'ru' ? 'В ролевой' : 'In Roleplay') : (language === 'ru' ? 'Групповая сессия' : 'Group Session')}</span>
               </span>
             </div>
           </div>
         </div>
 
         {/* Top Right RP Settings */}
-        <button
-          onClick={() => setShowSettingsModal(true)}
-          type="button"
-          className="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-silk-800"
-          title={t.chatSettings}
-        >
-          <SettingsIcon className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            onClick={() => setShowSettingsModal(true)}
+            type="button"
+            className="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-silk-800"
+            title={t.chatSettings}
+          >
+            <SettingsIcon className="w-5 h-5" />
+          </button>
+        </div>
       </div>
+
+      {/* Sticky Activity Strip (visible even when scrolled up in history) */}
+      {(isGeneratingScene || (isGenerating && !streamingText && !streamingThought)) && (
+        <div className="relative z-20 px-3 py-1.5 bg-silk-950/90 border-b border-silk-800/80 shrink-0">
+          {isGeneratingScene ? (
+            <ActivityProgressBar
+              compact
+              accent="emerald"
+              language={language}
+              label={sceneStageText || t.sceneGeneratingStage}
+              progress={sceneProgressPct}
+              stepInfo={sceneStepInfo}
+              startedAt={sceneStartedAt}
+              onCancel={() => sceneAbortRef.current?.abort()}
+              cancelLabel={t.cancel}
+            />
+          ) : (
+            <ActivityProgressBar
+              compact
+              accent={restoringLlmNotice ? 'emerald' : 'violet'}
+              language={language}
+              label={restoringLlmNotice ? t.sceneRestoringLlmStage : t.chatPreparingReply}
+              startedAt={botGenStartedAt}
+              onCancel={() => abortControllerRef.current?.abort()}
+              cancelLabel={t.stopGenerating}
+            />
+          )}
+        </div>
+      )}
 
       {/* 2. Messages Scroll Area */}
       <div
@@ -1445,8 +1879,266 @@ export const ChatView: React.FC<ChatViewProps> = ({
         )}
 
         {(() => {
-          const latestBotMsg = [...messages].reverse().find((m) => m.senderId !== 'user');
+          const latestBotMsg = [...messages]
+            .reverse()
+            .find((m) => m.senderId !== 'user' && m.senderId !== 'scene-director');
           return displayedMessages.map((msg) => {
+            if (msg.senderId === 'scene-director' || (msg.sceneAssetIds && msg.sceneAssetIds.length > 0)) {
+              const assetIds = msg.sceneAssetIds || [];
+              const activeIdx = Math.min(msg.activeSceneAssetIndex || 0, Math.max(0, assetIds.length - 1));
+              const activeAsset = assetIds[activeIdx] ? sceneAssetsById[assetIds[activeIdx]] : undefined;
+              const isPinned = Boolean(session?.sceneState?.location.locked);
+              const sceneTitle =
+                activeAsset?.perspective?.trim() ||
+                msg.variants[msg.activeVariantIndex]?.text ||
+                (language === 'ru' ? 'Сцена' : 'Scene');
+
+              return (
+                <div key={msg.id} className="flex justify-center animate-message-in my-1">
+                  <div className="w-full max-w-md rounded-2xl bg-silk-900/95 border border-silk-700/80 overflow-hidden shadow-lg">
+                    {/* Scene Header */}
+                    <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-silk-800/80 bg-silk-950/60">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <Camera className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span className="text-[11px] font-semibold text-slate-200 truncate">{sceneTitle}</span>
+                        <SceneHelpButton
+                          topic="sceneCard"
+                          language={language}
+                          onOpenGuide={() => setShowSceneGuide(true)}
+                        />
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {assetIds.length > 1 && (
+                          <div className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-lg bg-silk-800 border border-silk-700 font-mono text-[10px] text-slate-300">
+                            <button
+                              type="button"
+                              disabled={activeIdx <= 0}
+                              onClick={() => db.messages.update(msg.id, { activeSceneAssetIndex: activeIdx - 1 })}
+                              className="disabled:opacity-30 hover:text-white"
+                            >
+                              <ChevronLeft className="w-3 h-3" />
+                            </button>
+                            <span>{activeIdx + 1}/{assetIds.length}</span>
+                            <button
+                              type="button"
+                              disabled={activeIdx >= assetIds.length - 1}
+                              onClick={() => db.messages.update(msg.id, { activeSceneAssetIndex: activeIdx + 1 })}
+                              className="disabled:opacity-30 hover:text-white"
+                            >
+                              <ChevronRight className="w-3 h-3" />
+                            </button>
+                          </div>
+                        )}
+                        {session?.sceneState && (
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={handleToggleSceneAnchorPin}
+                              className={`flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-medium border transition-colors ${
+                                isPinned
+                                  ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                                  : 'bg-silk-800 border-silk-700 text-slate-400 hover:text-white'
+                              }`}
+                              title={isPinned ? t.sceneUnpinAnchorBtn : t.scenePinAnchorBtn}
+                            >
+                              {isPinned ? <Pin className="w-3 h-3" /> : <PinOff className="w-3 h-3" />}
+                              <span>{isPinned ? t.sceneAnchorPinnedBadge : t.scenePinAnchorBtn}</span>
+                            </button>
+                            <SceneHelpButton
+                              topic="locationAnchor"
+                              language={language}
+                              onOpenGuide={() => setShowSceneGuide(true)}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Rendered Image */}
+                    {activeAsset?.imageData && (
+                      <button
+                        type="button"
+                        onClick={() => setLightboxAsset({ asset: activeAsset, msgId: msg.id })}
+                        className="block w-full bg-black/40 cursor-zoom-in"
+                      >
+                        <img
+                          src={activeAsset.imageData}
+                          alt={sceneTitle}
+                          className="w-full max-h-96 object-contain mx-auto block"
+                        />
+                      </button>
+                    )}
+
+                    {/* Skipped Incompatible LoRA Notice (when switching base model families) */}
+                    {activeAsset?.skippedLoras && activeAsset.skippedLoras.length > 0 && (
+                      <div className="px-3 py-1.5 border-t border-silk-800/80 bg-amber-500/10 text-[10px] text-amber-200 leading-snug">
+                        {activeAsset.skippedLoras.map((s) =>
+                          t.sceneSkippedLoraNotice
+                            .replace('{lora}', `${s.filename} [${s.lora_arch || '?'}]`)
+                            .replace('{model}', s.model_family || 'active')
+                        ).join(' · ')}
+                      </div>
+                    )}
+
+                    {/* Inline Progress Bar when regenerating or changing camera angle on this card */}
+                    {isGeneratingScene && activeSceneTargetMsgId === msg.id && (
+                      <div className="p-2.5 border-t border-silk-800/80 bg-silk-950/75">
+                        <ActivityProgressBar
+                          compact
+                          accent="emerald"
+                          language={language}
+                          label={sceneStageText || t.sceneGeneratingStage}
+                          progress={sceneProgressPct}
+                          stepInfo={sceneStepInfo}
+                          startedAt={sceneStartedAt}
+                          onCancel={() => sceneAbortRef.current?.abort()}
+                          cancelLabel={t.cancel}
+                        />
+                      </div>
+                    )}
+
+                    {/* Action Controls */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-t border-silk-800/80 bg-silk-950/40 text-[11px]">
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={isGenerating || isGeneratingScene}
+                          onClick={() =>
+                            runSceneGeneration({
+                              perspective: activeAsset?.perspective || '',
+                              targetMsg: msg,
+                              skipAnalysis: Boolean(session?.sceneState),
+                            })
+                          }
+                          className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 disabled:opacity-40 text-slate-200 border border-silk-700"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          <span>{t.sceneRegenerateBtn}</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isGenerating || isGeneratingScene}
+                          onClick={() => {
+                            if (angleInputMsgId === msg.id) {
+                              setAngleInputMsgId(null);
+                              setAngleInputText('');
+                            } else {
+                              setAngleInputMsgId(msg.id);
+                              setAngleInputText('');
+                            }
+                          }}
+                          className={`flex items-center gap-1 px-2.5 py-1 rounded-lg disabled:opacity-40 border transition-colors ${
+                            angleInputMsgId === msg.id
+                              ? 'bg-emerald-600/20 border-emerald-500/60 text-emerald-200'
+                              : 'bg-silk-800 hover:bg-silk-700 text-emerald-300 border-silk-700'
+                          }`}
+                        >
+                          <Camera className="w-3 h-3" />
+                          <span>{t.sceneChangeAngleBtn}</span>
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {activeAsset?.imageData && (
+                          <a
+                            href={activeAsset.imageData}
+                            download={`scene-${activeAsset.id}.jpg`}
+                            className="flex items-center gap-1 px-2 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 text-slate-300 hover:text-white border border-silk-700"
+                            title={t.sceneDownloadBtn}
+                          >
+                            <Download className="w-3 h-3" />
+                            <span>{t.sceneDownloadBtn}</span>
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleRollback(msg)}
+                          className="p-1 text-slate-400 hover:text-amber-400 rounded hover:bg-silk-800"
+                          title={t.rollback}
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Inline Camera Angle Presets + Custom Input */}
+                    {angleInputMsgId === msg.id && (
+                      <div className="px-3 pb-3 pt-2 border-t border-silk-800/60 bg-silk-950/70 space-y-2">
+                        <div className="flex flex-wrap gap-1.5">
+                          {([
+                            [t.sceneAngleCloseUp, language === 'ru' ? 'крупный план' : 'close-up portrait'],
+                            [t.sceneAngleFromBehind, language === 'ru' ? 'со спины' : 'from behind'],
+                            [t.sceneAngleFullBody, language === 'ru' ? 'в полный рост' : 'full-body wide shot'],
+                            [t.sceneAngleSideView, language === 'ru' ? 'вид сбоку' : 'side profile'],
+                            [t.sceneAngleLowAngle, language === 'ru' ? 'нижний ракурс' : 'low angle'],
+                            [t.sceneAngleFirstPerson, language === 'ru' ? 'от первого лица' : 'first-person POV'],
+                          ] as const).map(([chipLabel, chipAngle]) => (
+                            <button
+                              key={chipLabel}
+                              type="button"
+                              disabled={isGeneratingScene || isGenerating}
+                              onClick={() => {
+                                setAngleInputMsgId(null);
+                                setAngleInputText('');
+                                runSceneGeneration({
+                                  perspective: chipAngle,
+                                  targetMsg: msg,
+                                  skipAnalysis: false,
+                                });
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 border border-silk-700 text-[11px] text-slate-200 font-medium transition-colors"
+                            >
+                              {chipLabel}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            value={angleInputText}
+                            onChange={(e) => setAngleInputText(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && angleInputText.trim()) {
+                                e.preventDefault();
+                                const p = angleInputText.trim();
+                                setAngleInputMsgId(null);
+                                setAngleInputText('');
+                                runSceneGeneration({ perspective: p, targetMsg: msg, skipAnalysis: false });
+                              }
+                            }}
+                            placeholder={t.sceneAnglePromptPlaceholder}
+                            className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-silk-800 border border-silk-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                          />
+                          <button
+                            type="button"
+                            disabled={!angleInputText.trim() || isGeneratingScene || isGenerating}
+                            onClick={() => {
+                              const p = angleInputText.trim();
+                              setAngleInputMsgId(null);
+                              setAngleInputText('');
+                              runSceneGeneration({ perspective: p, targetMsg: msg, skipAnalysis: false });
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-medium shrink-0"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAngleInputMsgId(null);
+                              setAngleInputText('');
+                            }}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-white"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            }
+
             const isUser = msg.senderId === 'user';
             const isLatestBotMsg = !isUser && latestBotMsg?.id === msg.id;
             const activeVariant = msg.variants[msg.activeVariantIndex] || { text: '' };
@@ -1488,9 +2180,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     isUser ? 'text-slate-100' : 'text-slate-200'
                   }`}
                   style={{
-                    backgroundColor: isUser ? currentTheme.bubbleUserBg : currentTheme.bubbleBotBg,
+                    backgroundColor: hexToRgba(
+                      isUser ? currentTheme.bubbleUserBg : currentTheme.bubbleBotBg,
+                      currentTheme.bubbleOpacity
+                    ),
                     borderRadius: `${currentTheme.bubbleRadius}px`,
-                    opacity: currentTheme.bubbleOpacity,
                     fontSize: `${currentTheme.fontSize}px`,
                     fontFamily: fontFamilyStyle,
                     lineHeight: lineHeightStyle,
@@ -1779,9 +2473,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <div
                 className="p-3.5 border border-silk-800/70 text-slate-200"
                 style={{
-                  backgroundColor: currentTheme.bubbleBotBg,
+                  backgroundColor: hexToRgba(currentTheme.bubbleBotBg, currentTheme.bubbleOpacity),
                   borderRadius: `${currentTheme.bubbleRadius}px`,
-                  opacity: currentTheme.bubbleOpacity,
                   fontSize: `${currentTheme.fontSize}px`,
                   fontFamily: fontFamilyStyle,
                   lineHeight: lineHeightStyle,
@@ -1799,10 +2492,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   </div>
                 )}
 
-                <div className="whitespace-pre-wrap break-words" style={{ lineHeight: lineHeightStyle }}>
-                  {formatMessageText(streamingText || '...')}
-                  <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-slate-300 align-middle" />
-                </div>
+                {!streamingText && !streamingThought ? (
+                  <div className="min-w-[220px]">
+                    <ActivityProgressBar
+                      compact
+                      accent={restoringLlmNotice ? 'emerald' : 'violet'}
+                      language={language}
+                      label={restoringLlmNotice ? t.sceneRestoringLlmStage : t.chatPreparingReply}
+                      startedAt={botGenStartedAt}
+                    />
+                  </div>
+                ) : (
+                  <div className="whitespace-pre-wrap break-words" style={{ lineHeight: lineHeightStyle }}>
+                    {formatMessageText(streamingText || '...')}
+                    <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-slate-300 align-middle" />
+                  </div>
+                )}
 
                 {/* Streaming Emotion Sprite */}
                 {(() => {
@@ -1821,6 +2526,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   );
                 })()}
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Scene Director Progress Bubble (for new /scene cards) */}
+        {isGeneratingScene && !activeSceneTargetMsgId && (
+          <div className="flex justify-center animate-fade-in my-1">
+            <div className="w-full max-w-md">
+              <ActivityProgressBar
+                accent="emerald"
+                language={language}
+                label={sceneStageText || t.sceneGeneratingStage}
+                progress={sceneProgressPct}
+                stepInfo={sceneStepInfo}
+                startedAt={sceneStartedAt}
+                onCancel={() => sceneAbortRef.current?.abort()}
+                cancelLabel={t.cancel}
+              />
             </div>
           </div>
         )}
@@ -1844,51 +2567,81 @@ export const ChatView: React.FC<ChatViewProps> = ({
       )}
 
       {/* Slash Command Autocomplete Menu */}
-      {showSlashMenu && (
+      {showSlashMenu && matchingSlashCommands.length > 0 && (
         <div className="relative z-20 mx-4 mb-2 bg-silk-900 border border-silk-700 rounded-2xl overflow-hidden animate-slide-up text-xs">
           <div className="p-2.5 font-semibold text-[11px] uppercase tracking-wider text-slate-400 border-b border-silk-800">
             {t.slashCommandHeader}
           </div>
-          <button
-            onClick={() => handleSelectSlashCommand('/continue')}
-            type="button"
-            className="w-full flex items-center gap-2.5 px-3.5 py-2 hover:bg-silk-800 text-left text-slate-200"
-          >
-            <span className="font-mono text-violet-400 font-semibold">/continue</span>
-            <span className="text-slate-400 text-[11px]">{t.cmdContinue}</span>
-          </button>
-          <button
-            onClick={() => handleSelectSlashCommand('/summary')}
-            type="button"
-            className="w-full flex items-center gap-2.5 px-3.5 py-2 hover:bg-silk-800 text-left text-slate-200"
-          >
-            <span className="font-mono text-emerald-400 font-semibold">/summary</span>
-            <span className="text-slate-400 text-[11px]">{t.cmdSummary}</span>
-          </button>
-          <button
-            onClick={() => handleSelectSlashCommand('/action')}
-            type="button"
-            className="w-full flex items-center gap-2.5 px-3.5 py-2 hover:bg-silk-800 text-left text-slate-200"
-          >
-            <span className="font-mono text-rose-400 font-semibold">/action</span>
-            <span className="text-slate-400 text-[11px]">{t.cmdAction}</span>
-          </button>
-          <button
-            onClick={() => handleSelectSlashCommand('/memory')}
-            type="button"
-            className="w-full flex items-center gap-2.5 px-3.5 py-2 hover:bg-silk-800 text-left text-slate-200"
-          >
-            <span className="font-mono text-sky-400 font-semibold">/memory</span>
-            <span className="text-slate-400 text-[11px]">{t.cmdMemory}</span>
-          </button>
-          <button
-            onClick={() => handleSelectSlashCommand('/reset')}
-            type="button"
-            className="w-full flex items-center gap-2.5 px-3.5 py-2 hover:bg-silk-800 text-left text-slate-200"
-          >
-            <span className="font-mono text-red-400 font-semibold">/reset</span>
-            <span className="text-slate-400 text-[11px]">{t.cmdReset}</span>
-          </button>
+          {matchingSlashCommands.includes('/scene') && (
+            <button
+              onClick={() => handleSelectSlashCommand('/scene')}
+              type="button"
+              className="w-full flex items-center gap-2.5 px-3.5 py-2 hover:bg-silk-800 text-left text-slate-200"
+            >
+              <span className="font-mono text-emerald-400 font-semibold shrink-0">/scene</span>
+              <span className="text-slate-400 text-[11px] truncate">{t.slashSceneDesc}</span>
+            </button>
+          )}
+          {matchingSlashCommands.includes('/wand') && (
+            <button
+              onClick={() => handleSelectSlashCommand('/wand')}
+              type="button"
+              className="w-full flex items-center gap-2.5 px-3.5 py-2 hover:bg-silk-800 text-left text-slate-200"
+            >
+              <span className="font-mono text-violet-400 font-semibold shrink-0">/wand</span>
+              <span className="text-slate-400 text-[11px] truncate">{t.cmdWand}</span>
+            </button>
+          )}
+          {matchingSlashCommands.includes('/continue') && (
+            <button
+              onClick={() => handleSelectSlashCommand('/continue')}
+              type="button"
+              className="w-full flex items-center gap-2.5 px-3.5 py-2 hover:bg-silk-800 text-left text-slate-200"
+            >
+              <span className="font-mono text-violet-400 font-semibold">/continue</span>
+              <span className="text-slate-400 text-[11px]">{t.cmdContinue}</span>
+            </button>
+          )}
+          {matchingSlashCommands.includes('/summary') && (
+            <button
+              onClick={() => handleSelectSlashCommand('/summary')}
+              type="button"
+              className="w-full flex items-center gap-2.5 px-3.5 py-2 hover:bg-silk-800 text-left text-slate-200"
+            >
+              <span className="font-mono text-emerald-400 font-semibold">/summary</span>
+              <span className="text-slate-400 text-[11px]">{t.cmdSummary}</span>
+            </button>
+          )}
+          {matchingSlashCommands.includes('/action') && (
+            <button
+              onClick={() => handleSelectSlashCommand('/action')}
+              type="button"
+              className="w-full flex items-center gap-2.5 px-3.5 py-2 hover:bg-silk-800 text-left text-slate-200"
+            >
+              <span className="font-mono text-rose-400 font-semibold">/action</span>
+              <span className="text-slate-400 text-[11px]">{t.cmdAction}</span>
+            </button>
+          )}
+          {matchingSlashCommands.includes('/memory') && (
+            <button
+              onClick={() => handleSelectSlashCommand('/memory')}
+              type="button"
+              className="w-full flex items-center gap-2.5 px-3.5 py-2 hover:bg-silk-800 text-left text-slate-200"
+            >
+              <span className="font-mono text-sky-400 font-semibold">/memory</span>
+              <span className="text-slate-400 text-[11px]">{t.cmdMemory}</span>
+            </button>
+          )}
+          {matchingSlashCommands.includes('/reset') && (
+            <button
+              onClick={() => handleSelectSlashCommand('/reset')}
+              type="button"
+              className="w-full flex items-center gap-2.5 px-3.5 py-2 hover:bg-silk-800 text-left text-slate-200"
+            >
+              <span className="font-mono text-red-400 font-semibold">/reset</span>
+              <span className="text-slate-400 text-[11px]">{t.cmdReset}</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -1928,16 +2681,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
             />
           </label>
 
-          {/* User Magic Wand Ghostwriter */}
-          <button
-            onClick={() => setShowUserWandModal(true)}
-            type="button"
-            className="p-2.5 text-slate-400 hover:text-violet-400 rounded-xl hover:bg-silk-800 shrink-0"
-            title={t.magicWandUser}
-          >
-            <Wand2 className="w-5 h-5" />
-          </button>
-
           {/* Group Chat: Robot icon to select speaker or converse */}
           {type === 'group' && (
             <button
@@ -1975,6 +2718,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
             >
               {t.stopGenerating}
             </button>
+          ) : isGeneratingScene ? (
+            <button
+              onClick={() => sceneAbortRef.current?.abort()}
+              type="button"
+              className="px-3.5 py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-2xl text-xs font-semibold shrink-0 shadow-md"
+            >
+              {t.cancel}
+            </button>
           ) : (
             <button
               onClick={handleSendMessage}
@@ -2011,6 +2762,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
               className="w-full px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white resize-none disabled:opacity-60"
               autoFocus
             />
+
+            {isWandGenerating && (
+              <ActivityProgressBar
+                compact
+                accent="violet"
+                language={language}
+                label={t.wandGeneratingProgress}
+                startedAt={wandStartedAt}
+              />
+            )}
 
             {(isWandGenerating || wandPreview) && (
               <div className="max-h-56 overflow-y-auto px-3 py-2 bg-silk-800/60 border border-silk-700 rounded-xl text-sm text-slate-100 whitespace-pre-wrap leading-relaxed">
@@ -2173,9 +2934,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap max-h-72 overflow-y-auto">
-              {summaryModalText}
-            </div>
+            {isSummarizing ? (
+              <ActivityProgressBar
+                accent="emerald"
+                language={language}
+                label={t.summaryGeneratingProgress}
+                startedAt={summaryStartedAt}
+              />
+            ) : (
+              <div className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap max-h-72 overflow-y-auto">
+                {summaryModalText}
+              </div>
+            )}
             <div className="flex justify-end pt-1">
               <button
                 onClick={() => setSummaryModalText(null)}
@@ -2214,6 +2984,70 @@ export const ChatView: React.FC<ChatViewProps> = ({
           }}
         />
       )}
+
+      {/* Fullscreen Scene Lightbox Modal */}
+      {lightboxAsset && (
+        <div
+          className="fixed inset-0 z-50 flex flex-col bg-black/95 p-3 sm:p-6"
+          onClick={() => setLightboxAsset(null)}
+        >
+          <div className="flex items-center justify-between gap-2 pb-2" onClick={(e) => e.stopPropagation()}>
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-white truncate">
+                {lightboxAsset.asset.perspective || (language === 'ru' ? 'Сцена' : 'Scene')}
+              </div>
+              {lightboxAsset.asset.modelUsed && (
+                <div className="text-[10px] font-mono text-slate-400 truncate">
+                  {lightboxAsset.asset.modelUsed} ({lightboxAsset.asset.backendUsed})
+                </div>
+              )}
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <a
+                href={lightboxAsset.asset.imageData}
+                download={`scene-${lightboxAsset.asset.id}.jpg`}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-silk-800 hover:bg-silk-700 text-xs text-white border border-silk-700"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>{t.sceneDownloadBtn}</span>
+              </a>
+              <button
+                type="button"
+                onClick={() => setLightboxAsset(null)}
+                className="p-2 rounded-xl bg-silk-800 hover:bg-silk-700 text-slate-300 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          <div
+            className="flex-1 flex items-center justify-center overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <img
+              src={lightboxAsset.asset.imageData}
+              alt={lightboxAsset.asset.perspective || 'Scene'}
+              className="max-w-full max-h-full object-contain rounded-xl"
+            />
+          </div>
+
+          {lightboxAsset.asset.prompt && (
+            <div
+              className="mt-2 p-2.5 rounded-xl bg-silk-900/90 border border-silk-800 text-[10px] font-mono text-slate-400 max-h-24 overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {lightboxAsset.asset.prompt}
+            </div>
+          )}
+        </div>
+      )}
+
+      <SceneGuideModal
+        isOpen={showSceneGuide}
+        onClose={() => setShowSceneGuide(false)}
+        language={language}
+      />
     </div>
   );
 };

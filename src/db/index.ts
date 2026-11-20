@@ -11,7 +11,9 @@ import type {
   TextStylePreset,
   AppSettings,
   ThemeConfig,
+  SceneAsset,
 } from '../types';
+import { saveCachedTheme } from '../utils/themePersistence.ts';
 
 export class SilkloraDatabase extends Dexie {
   characters!: Table<Character, string>;
@@ -24,6 +26,7 @@ export class SilkloraDatabase extends Dexie {
   apiKeys!: Table<ApiKeyConfig, string>;
   textStyles!: Table<TextStylePreset, string>;
   settings!: Table<AppSettings, string>;
+  sceneAssets!: Table<SceneAsset, string>;
 
   constructor() {
     super('SilkloraAIDatabase');
@@ -41,6 +44,9 @@ export class SilkloraDatabase extends Dexie {
     });
     this.version(2).stores({
       memoryNodes: 'id, chatId, messageId, type, createdAt',
+    });
+    this.version(3).stores({
+      sceneAssets: 'id, chatId, messageId, createdAt',
     });
   }
 }
@@ -303,24 +309,28 @@ export async function initDatabaseDefaults() {
     const isRemovedNeon = curId === 'violet-dark' || curId === 'cyberpunk-neon';
     const matchingPreset = APP_THEMES.find((p) => p.id === curId)?.theme;
     const nextPalette = isRemovedNeon ? DEFAULT_THEME : matchingPreset;
+    const migratedTheme = nextPalette
+      ? {
+          ...nextPalette,
+          bubbleRadius: existing.theme?.bubbleRadius ?? nextPalette.bubbleRadius,
+          bubbleOpacity: existing.theme?.bubbleOpacity ?? nextPalette.bubbleOpacity,
+          fontSize: existing.theme?.fontSize ?? nextPalette.fontSize,
+          backgroundTint: existing.theme?.backgroundTint ?? nextPalette.backgroundTint,
+          fontFamily: existing.theme?.fontFamily ?? nextPalette.fontFamily,
+          usePixelUiFont: existing.theme?.usePixelUiFont ?? false,
+          lineHeight: existing.theme?.lineHeight ?? nextPalette.lineHeight,
+        }
+      : existing.theme;
 
     await db.settings.update('default', {
       themeMigration: 'matte-ui-v2',
-      ...(nextPalette
-        ? {
-            theme: {
-              ...nextPalette,
-              bubbleRadius: existing.theme?.bubbleRadius ?? nextPalette.bubbleRadius,
-              bubbleOpacity: existing.theme?.bubbleOpacity ?? nextPalette.bubbleOpacity,
-              fontSize: existing.theme?.fontSize ?? nextPalette.fontSize,
-              backgroundTint: existing.theme?.backgroundTint ?? nextPalette.backgroundTint,
-              fontFamily: existing.theme?.fontFamily ?? nextPalette.fontFamily,
-              usePixelUiFont: existing.theme?.usePixelUiFont ?? false,
-              lineHeight: existing.theme?.lineHeight ?? nextPalette.lineHeight,
-            },
-          }
-        : {}),
+      ...(migratedTheme ? { theme: migratedTheme } : {}),
     });
+    if (migratedTheme) {
+      saveCachedTheme(migratedTheme, undefined, DEFAULT_THEME);
+    }
+  } else if (existing?.theme) {
+    saveCachedTheme(existing.theme, undefined, DEFAULT_THEME);
   }
 
   const settingsCount = await db.settings.count();
@@ -330,14 +340,18 @@ export async function initDatabaseDefaults() {
       language: 'en',
       textModel: 'deepseek/deepseek-chat',
       visionModel: 'google/gemini-flash-1.5',
+      sceneImageModel: '',
+      sceneAspectRatio: 'portrait',
       textStyleId: 'immersive',
       theme: DEFAULT_THEME,
+      themeMigration: 'matte-ui-v2',
       contextWindowSize: 20,
       customSystemPrompt: '',
       customSystemPromptMode: 'augment',
       aiEngineMode: 'cloud',
       localHubUrl: 'http://192.168.1.55:8080/v1',
     });
+    saveCachedTheme(DEFAULT_THEME, undefined, DEFAULT_THEME);
   }
 
   const stylesCount = await db.textStyles.count();

@@ -108,16 +108,52 @@ def _query_nvidia() -> Optional[Dict[str, Any]]:
     return None
 
 
+def _estimate_wmi_nvidia_vram(name: str, raw_ram: int = 0) -> int:
+    """Estimate NVIDIA VRAM when Win32_VideoController caps AdapterRAM at 4 GiB (uint32)."""
+    low = (name or "").lower()
+    explicit_gb = re.search(r"(?:\b|_)((?:3|4|6|8|10|11|12|16|20|24|32|48))\s*gb\b", low)
+    if explicit_gb:
+        return int(explicit_gb.group(1)) * GIB
+    if re.search(r"\b(?:4060|5060)\s*ti\s*16(?:g|gb)?\b", low):
+        return 16 * GIB
+    if "5090" in low:
+        return (24 if "laptop" in low else 32) * GIB
+    if any(x in low for x in ("4090", "3090")):
+        return (16 if ("4090" in low and "laptop" in low) else 24) * GIB
+    if any(x in low for x in ("5080", "4080", "5070 ti", "4070 ti super", "3080 16")):
+        return (12 if ("laptop" in low and ("4080" in low or "5070 ti" in low)) else 16) * GIB
+    if any(x in low for x in ("5070", "4070", "3080 ti", "3080 12")):
+        return (8 if ("laptop" in low and ("4070" in low or "5070" in low)) else 12) * GIB
+    if "2080 ti" in low or "1080 ti" in low:
+        return 11 * GIB
+    if "3080" in low:
+        return (8 if "laptop" in low else 10) * GIB
+    if "3060 ti" in low:
+        return 8 * GIB
+    if "3060" in low:
+        return (6 if "laptop" in low else 12) * GIB
+    if any(x in low for x in ("5060 ti", "5060", "4060 ti", "4060", "3070", "2080", "2070", "2060 super", "1080", "1070")):
+        return 8 * GIB
+    if any(x in low for x in ("2060", "1660", "3050 6", "1060")):
+        return 6 * GIB
+    return max(int(raw_ram or 0), 4 * GIB)
+
+
 def _detect_windows_wmi_nvidia() -> Optional[Dict[str, Any]]:
     """Fallback when nvidia-smi is not in PATH or blocked on Windows."""
     if os.name != "nt":
         return None
-    cmd = [
-        "powershell",
-        "-NoProfile",
-        "-Command",
-        "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM,DriverVersion | ConvertTo-Json -Compress",
-    ]
+    ps_script = (
+        "$reg = @{}; "
+        "Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\0*' "
+        "-ErrorAction SilentlyContinue | ForEach-Object { "
+        "if ($_.'DriverDesc' -and $_.'HardwareInformation.qwMemorySize') { "
+        "$reg[[string]$_.'DriverDesc'] = [int64]$_.'HardwareInformation.qwMemorySize' } }; "
+        "Get-CimInstance Win32_VideoController | ForEach-Object { "
+        "[PSCustomObject]@{ Name=$_.Name; AdapterRAM=$_.AdapterRAM; DriverVersion=$_.DriverVersion; "
+        "QwMemorySize=$reg[[string]$_.Name] } } | ConvertTo-Json -Compress"
+    )
+    cmd = ["powershell", "-NoProfile", "-Command", ps_script]
     try:
         out = subprocess.check_output(cmd, universal_newlines=True, timeout=6, stderr=subprocess.DEVNULL).strip()
         if not out:
@@ -130,20 +166,8 @@ def _detect_windows_wmi_nvidia() -> Optional[Dict[str, Any]]:
             name = str(item.get("Name") or "").strip()
             if "nvidia" in name.lower() or "geforce" in name.lower() or "rtx" in name.lower() or "gtx" in name.lower():
                 raw_ram = int(item.get("AdapterRAM") or 0)
-                # Win32_VideoController caps AdapterRAM at 4 GiB (uint32); estimate by model name if capped
-                low = name.lower()
-                if any(x in low for x in ("4090", "3090", "5090")):
-                    vram_total = 24 * GIB
-                elif any(x in low for x in ("4080", "5080", "4070 ti super", "3080 12")):
-                    vram_total = 16 * GIB
-                elif any(x in low for x in ("4070", "3060", "3080", "4060 ti", "6700", "7700")):
-                    vram_total = 12 * GIB
-                elif any(x in low for x in ("4060", "3070", "3060 ti", "2080", "2070", "2060 super", "1080", "1070")):
-                    vram_total = 8 * GIB
-                elif any(x in low for x in ("2060", "1660", "3050 6", "1060")):
-                    vram_total = 6 * GIB
-                else:
-                    vram_total = max(raw_ram, 4 * GIB)
+                qw_mem = int(item.get("QwMemorySize") or 0)
+                vram_total = qw_mem if qw_mem >= 2 * GIB else _estimate_wmi_nvidia_vram(name, raw_ram)
                 return {
                     "name": name,
                     "count": 1,
@@ -239,13 +263,28 @@ def analyze_hardware(fresh_gpu: bool = True) -> Dict[str, Any]:
     }
 
 
-def memory_budgets(hw: Dict[str, Any]) -> Dict[str, int]:
-    """Bytes that can safely be used for model weights plus KV cache."""
+def memory_budgets(hw: Dict[str, Any], ignore_active_load: bool = True) -> Dict[str, int]:
+    """Bytes that can safely be used for model weights plus KV cache.
+
+    When ignore_active_load is True (the default for hardware profiling, catalog fit badges,
+    and replacement model load planning), capacity is derived from total VRAM as well as free VRAM
+    so an already-loaded Silklora model never makes the GPU appear unavailable.
+    """
     gpu = hw["gpu"]
     gpu_budget = 0
     if gpu["has_gpu"] and gpu["vram_total"] >= 2 * GIB:
-        gpu_budget = max(0, int(gpu["vram_free"] * 0.92) - int(0.6 * GIB))
-    ram_budget = max(0, int(hw["ram_available"] * 0.85) - int(1.0 * GIB))
+        free_based = max(0, int(gpu["vram_free"] * 0.92) - int(0.6 * GIB))
+        if ignore_active_load:
+            total_based = max(0, int(gpu["vram_total"] * 0.90) - int(0.6 * GIB))
+            gpu_budget = max(free_based, total_based)
+        else:
+            gpu_budget = free_based
+    ram_free = max(int(hw["ram_available"] * 0.85) - int(1.0 * GIB), 0)
+    if ignore_active_load and hw.get("ram_total", 0) > 0:
+        ram_cap = max(int(hw["ram_total"] * 0.65) - int(1.0 * GIB), 0)
+        ram_budget = max(ram_free, ram_cap)
+    else:
+        ram_budget = ram_free
     if gpu["kind"] == "metal":
         ram_budget = 0
     return {"gpu": gpu_budget, "ram": ram_budget}

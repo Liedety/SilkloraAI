@@ -1,5 +1,6 @@
 import React from 'react';
 import type { Language, ThemeConfig } from '../types';
+import { hexToRgba, lineHeightNumeric } from '../utils/themePersistence';
 
 interface ChatPreviewCardProps {
   theme: ThemeConfig;
@@ -29,13 +30,7 @@ export const ChatPreviewCard: React.FC<ChatPreviewCardProps> = ({ theme, languag
 
   // The selected font applies to the whole app, so message text simply inherits it
   const fontFamilyStyle = 'inherit';
-
-  const lineHeightStyle =
-    theme.lineHeight === 'loose'
-      ? 1.8
-      : theme.lineHeight === 'relaxed'
-      ? 1.6
-      : 1.45;
+  const lineHeightStyle = lineHeightNumeric(theme.lineHeight);
 
   return (
     <div
@@ -59,9 +54,8 @@ export const ChatPreviewCard: React.FC<ChatPreviewCardProps> = ({ theme, languag
           <div
             className="max-w-[85%] px-3.5 py-2.5 text-slate-100 border border-white/10"
             style={{
-              backgroundColor: theme.bubbleUserBg,
+              backgroundColor: hexToRgba(theme.bubbleUserBg, theme.bubbleOpacity),
               borderRadius: `${theme.bubbleRadius}px`,
-              opacity: theme.bubbleOpacity,
             }}
           >
             <p style={{ lineHeight: lineHeightStyle }}>
@@ -79,9 +73,8 @@ export const ChatPreviewCard: React.FC<ChatPreviewCardProps> = ({ theme, languag
           <div
             className="max-w-[85%] px-3.5 py-2.5 text-slate-100 border border-white/10"
             style={{
-              backgroundColor: theme.bubbleBotBg,
+              backgroundColor: hexToRgba(theme.bubbleBotBg, theme.bubbleOpacity),
               borderRadius: `${theme.bubbleRadius}px`,
-              opacity: theme.bubbleOpacity,
             }}
           >
             <div className="text-[10px] font-semibold mb-1" style={{ color: theme.actionColor || '#a1a1aa' }}>

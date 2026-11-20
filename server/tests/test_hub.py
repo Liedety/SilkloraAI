@@ -321,6 +321,28 @@ class HardwareAndEngineWarningTests(unittest.TestCase):
         self.assertEqual(gpu["vram_total"], 8 * GIB)
         self.assertEqual(gpu["driver"], "32.0.15.6070")
 
+        # Base RTX 4060 Ti and RTX 3060 Ti have 8 GiB VRAM, whereas explicit 16GB / desktop 3060 / 1080 Ti / 1060 3GB map accurately
+        self.assertEqual(hardware._estimate_wmi_nvidia_vram("NVIDIA GeForce RTX 4060 Ti", 4293918720), 8 * GIB)
+        self.assertEqual(hardware._estimate_wmi_nvidia_vram("NVIDIA GeForce RTX 4060 Ti 16GB", 4293918720), 16 * GIB)
+        self.assertEqual(hardware._estimate_wmi_nvidia_vram("NVIDIA GeForce RTX 3060 Ti", 4293918720), 8 * GIB)
+        self.assertEqual(hardware._estimate_wmi_nvidia_vram("NVIDIA GeForce RTX 3060", 4293918720), 12 * GIB)
+        self.assertEqual(hardware._estimate_wmi_nvidia_vram("NVIDIA GeForce RTX 3080", 4293918720), 10 * GIB)
+        self.assertEqual(hardware._estimate_wmi_nvidia_vram("NVIDIA GeForce RTX 3080 Laptop GPU", 4293918720), 8 * GIB)
+        self.assertEqual(hardware._estimate_wmi_nvidia_vram("NVIDIA GeForce RTX 3080 Ti", 4293918720), 12 * GIB)
+        self.assertEqual(hardware._estimate_wmi_nvidia_vram("NVIDIA GeForce GTX 1080 Ti", 4293918720), 11 * GIB)
+        self.assertEqual(hardware._estimate_wmi_nvidia_vram("NVIDIA GeForce GTX 1060 3GB", 3221225472), 3 * GIB)
+
+        # When 64-bit registry QwMemorySize is present, unlabeled 16 GB RTX 4060 Ti reports exact 16 GiB VRAM
+        payload_16gb = (
+            '[{"Name":"NVIDIA GeForce RTX 4060 Ti","AdapterRAM":4293918720,'
+            f'"DriverVersion":"32.0.15.6094","QwMemorySize":{16 * GIB}}}]'
+        )
+        with mock.patch.object(hardware.os, "name", "nt"), \
+             mock.patch.object(hardware.subprocess, "check_output", return_value=payload_16gb):
+            gpu_16 = hardware._detect_windows_wmi_nvidia()
+        self.assertIsNotNone(gpu_16)
+        self.assertEqual(gpu_16["vram_total"], 16 * GIB)
+
     def test_build_plan_emits_engine_cpu_only_warning_when_cuda_present_without_offload(self):
         mgr = engine_mod.Engine()
         with mock.patch.object(engine_mod, "inspect_model", return_value=llama_info(4.9)), \
@@ -330,6 +352,36 @@ class HardwareAndEngineWarningTests(unittest.TestCase):
         self.assertEqual(plan["offload"], "none")
         self.assertEqual(plan["n_gpu_layers"], 0)
         self.assertIn("engine_cpu_only", plan.get("warnings", []))
+
+        # Retry on a genuinely CPU-only machine must NOT append a false cpu_only_with_gpu warning
+        cpu_plan = {
+            "n_ctx": 8192,
+            "n_gpu_layers": 0,
+            "layers_gpu": 0,
+            "n_layer": 32,
+            "offload": "none",
+            "flash_attn": False,
+            "kv_type": "f16",
+            "type_k": 1,
+            "type_v": 1,
+            "n_threads": 8,
+            "profile": "cpu",
+            "warnings": [],
+        }
+        calls = []
+
+        def fake_llama(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError("context allocation failed")
+            return object()
+
+        with mock.patch.object(engine_mod, "Llama", side_effect=fake_llama):
+            inst, used, err = mgr._instantiate("dummy.gguf", cpu_plan, None)
+        self.assertIsNotNone(inst)
+        self.assertEqual(err, "")
+        self.assertNotIn("cpu_only_with_gpu", used["warnings"])
+        self.assertIn("fallback_settings", used["warnings"])
 
 
 if __name__ == "__main__":
