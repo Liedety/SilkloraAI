@@ -20,6 +20,7 @@ import type { Group, ImageCropOffset, Language } from '../types';
 import { translations } from '../i18n';
 import { ImageCropperModal } from '../components/ImageCropperModal';
 import { AvatarImage } from '../components/AvatarImage';
+import { ActivityProgressBar } from '../components/ActivityProgressBar';
 import { generateGroupWithAI, generateGroupRolesWithAI, getEffectiveAiConfig, getComponentAiConfig } from '../services/ai';
 
 interface GroupsViewProps {
@@ -787,6 +788,13 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                 className="w-full px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 resize-none"
                 autoFocus
               />
+              {isGeneratingRoles && (
+                <ActivityProgressBar
+                  accent="violet"
+                  language={language}
+                  label={t.generatingRoles}
+                />
+              )}
             </div>
 
             {/* Footer */}
@@ -843,6 +851,13 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                 className="w-full px-3 py-2 bg-silk-800 border border-silk-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 resize-none"
                 autoFocus
               />
+              {isGeneratingGroup && (
+                <ActivityProgressBar
+                  accent="violet"
+                  language={language}
+                  label={t.generatingGroup}
+                />
+              )}
             </div>
 
             {/* Footer */}

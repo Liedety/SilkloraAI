@@ -1,8 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import '@fontsource/dotgothic16/cyrillic-400.css';
-import '@fontsource/dotgothic16/latin-400.css';
-import '@fontsource/dotgothic16/latin-ext-400.css';
+import '@fontsource/tiny5/index.css';
 import App from './App';
 import './index.css';
 

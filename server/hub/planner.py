@@ -59,9 +59,10 @@ def plan_load(
     kv_quant: bool = True,
     ctx_cap: int = 32768,
     vision: bool = False,
+    ignore_active_load: bool = True,
 ) -> Dict[str, Any]:
     """Choose context length, GPU offload and KV cache type for the given model and machine."""
-    budgets = memory_budgets(hw)
+    budgets = memory_budgets(hw, ignore_active_load=ignore_active_load)
     gpu_budget = float(budgets["gpu"])
     ram_budget = float(budgets["ram"])
 
@@ -193,3 +194,23 @@ def classify_fit(size_bytes: int, hw: Dict[str, Any]) -> str:
     if need <= budgets["ram"]:
         return "cpu_ok"
     return "too_big"
+
+
+def classify_image_fit(size_bytes: int, hw: Dict[str, Any]) -> str:
+    """Rate an image diffusion model against GPU VRAM + host RAM block streaming.
+
+    Diffusion engines (sd-server / sd-cli) execute compute on the GPU even when weights exceed
+    dedicated VRAM by streaming transformer blocks from system RAM.
+    """
+    budgets = memory_budgets(hw)
+    need = size_bytes * 1.12 + 0.4 * GIB
+    if budgets["gpu"]:
+        if need <= budgets["gpu"]:
+            return "gpu_full"
+        if need <= budgets["gpu"] + budgets["ram"]:
+            return "gpu_stream"
+        return "too_big"
+    if need <= budgets["ram"]:
+        return "cpu_ok"
+    return "too_big"
+

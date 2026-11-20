@@ -17,14 +17,47 @@ import {
   Smile,
   Upload,
   Download,
+  SlidersHorizontal,
+  ChevronDown,
+  RefreshCw,
+  Cpu,
+  BookOpen,
 } from 'lucide-react';
 import { db } from '../db';
-import type { Character, CharacterEmotion, Folder, Group, ImageCropOffset, Language } from '../types';
+import type { Character, CharacterEmotion, CharacterImageGenConfig, Folder, Group, ImageCropOffset, Language } from '../types';
 import { translations } from '../i18n';
 import { ImageCropperModal } from '../components/ImageCropperModal';
 import { AvatarImage } from '../components/AvatarImage';
-import { generatePersonaWithAI, getEffectiveAiConfig, getComponentAiConfig } from '../services/ai';
+import { ActivityProgressBar } from '../components/ActivityProgressBar';
+import { SceneGuideModal, SceneHelpButton } from '../components/SceneHelp';
+import {
+  describeCharacterPhotoWithVision,
+  fetchLocalLoras,
+  fetchLoraTrainStatus,
+  generatePersonaWithAI,
+  getEffectiveAiConfig,
+  getComponentAiConfig,
+  isLoraCompatibleWithModelFamily,
+  selectLocalImageModel,
+  trainCharacterLoraOnHub,
+  type LocalLoraItem,
+  type ReadyImageModelItem,
+  type TrainableCheckpointItem,
+} from '../services/ai';
+import { transliterateCyrillicToLatin } from '../services/sceneState';
 import { parseCharacterCardFile, exportCharacterCardV2Json } from '../services/characterCard';
+import { compressDataUrlToJpeg, fileToCompressedJpeg, isRasterImageDataUrl } from '../utils/imageUtils';
+
+const DEFAULT_IMAGE_GEN: CharacterImageGenConfig = {
+  enabled: false,
+  mode: 'reference',
+  referenceImages: [],
+  appearancePrompt: '',
+  styleHint: '',
+  loraName: '',
+  loraTrigger: '',
+  loraWeight: 0.85,
+};
 
 interface CharactersViewProps {
   language: Language;
@@ -45,7 +78,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
   const groups = useLiveQuery(() => db.groups.toArray()) || [];
   const activeApiKey = useLiveQuery(() => db.apiKeys.filter((k) => k.isActive).first());
   const settings = useLiveQuery(() => db.settings.get('default'));
-  const { apiKeyConfig: effectiveApiKey, textModel: effectiveModel, isLocal } = getEffectiveAiConfig(settings, activeApiKey);
+  const { apiKeyConfig: effectiveApiKey, isLocal } = getEffectiveAiConfig(settings, activeApiKey);
 
   // Active folder filter: null = all, 'none' = no folder, or folderId
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
@@ -71,6 +104,37 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
   const [chatBackground, setChatBackground] = useState<string>('');
   const [chatBackgroundOffset, setChatBackgroundOffset] = useState<ImageCropOffset>({ x: 0, y: 0, scale: 1 });
   const [emotions, setEmotions] = useState<CharacterEmotion[]>([]);
+  const [imageGen, setImageGen] = useState<CharacterImageGenConfig>(DEFAULT_IMAGE_GEN);
+  const [showAdvancedScene, setShowAdvancedScene] = useState(false);
+  const [availableLoras, setAvailableLoras] = useState<LocalLoraItem[]>([]);
+  const [activeHubImageModel, setActiveHubImageModel] = useState<{ filename: string; family: string; variant?: string; format?: string } | null>(null);
+  const [trainableCheckpoints, setTrainableCheckpoints] = useState<TrainableCheckpointItem[]>([]);
+  const [inferenceOnlyModels, setInferenceOnlyModels] = useState<Array<{ filename: string; family: string; format?: string }>>([]);
+  const [readyHubModels, setReadyHubModels] = useState<ReadyImageModelItem[]>([]);
+  const [switchingHubModel, setSwitchingHubModel] = useState(false);
+  const [selectedTrainBaseModel, setSelectedTrainBaseModel] = useState<string>('');
+  const [loraTrainerInfo, setLoraTrainerInfo] = useState<{ installed: boolean; gpu_ok: boolean; warning?: string } | null>(null);
+  const [isUploadingRefs, setIsUploadingRefs] = useState(false);
+  const [RefsStartedAt, setRefsStartedAt] = useState(0);
+  const [describingPhoto, setDescribingPhoto] = useState(false);
+  const [visionStartedAt, setVisionStartedAt] = useState(0);
+  const [visionChars, setVisionChars] = useState(0);
+  const [isLoadingLoras, setIsLoadingLoras] = useState(false);
+  const [lorasStartedAt, setLorasStartedAt] = useState(0);
+  const [loraTrainStartedAt, setLoraTrainStartedAt] = useState(0);
+  const [loraTrainJob, setLoraTrainJob] = useState<{
+    status: string;
+    stage?: string;
+    progress?: number;
+    step?: number;
+    total_steps?: number;
+    started_at?: number;
+    elapsed_sec?: number;
+    logs?: string[];
+    error?: string;
+    output_file?: string;
+  } | null>(null);
+  const loraPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [activeEmotionCropperId, setActiveEmotionCropperId] = useState<string | null>(null);
 
   // Synchronous form ref to prevent stale closures during save
@@ -87,14 +151,23 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
     chatBackground: '',
     chatBackgroundOffset: { x: 0, y: 0, scale: 1 } as ImageCropOffset,
     emotions: [] as CharacterEmotion[],
+    imageGen: DEFAULT_IMAGE_GEN as CharacterImageGenConfig,
   });
 
   const syncFormRef = (updates: Partial<typeof currentFormRef.current>) => {
     currentFormRef.current = { ...currentFormRef.current, ...updates };
   };
 
+  const stopLoraPolling = () => {
+    if (loraPollTimerRef.current) {
+      clearInterval(loraPollTimerRef.current);
+      loraPollTimerRef.current = null;
+    }
+  };
+
   useEffect(() => {
     return () => {
+      stopLoraPolling();
       onDirtyChange(false);
     };
   }, []);
@@ -111,6 +184,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
   const [genDont, setGenDont] = useState('');
   const [genPhotoRef, setGenPhotoRef] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [genStartedAt, setGenStartedAt] = useState(0);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [showMentionDropdown, setShowMentionDropdown] = useState(false);
 
@@ -130,6 +204,9 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
     setChatBackground('');
     setChatBackgroundOffset({ x: 0, y: 0, scale: 1 });
     setEmotions([]);
+    setImageGen(DEFAULT_IMAGE_GEN);
+    setShowAdvancedScene(false);
+    setLoraTrainJob(null);
     syncFormRef({
       name: '',
       description: '',
@@ -143,6 +220,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
       chatBackground: '',
       chatBackgroundOffset: { x: 0, y: 0, scale: 1 },
       emotions: [],
+      imageGen: DEFAULT_IMAGE_GEN,
     });
     setShowEditModal(true);
   };
@@ -162,7 +240,11 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
     setChatBackground(char.chatBackground || '');
     setChatBackgroundOffset(char.chatBackgroundOffset || { x: 0, y: 0, scale: 1 });
     const loadedEmotions = char.emotions || [];
+    const loadedImgGen: CharacterImageGenConfig = { ...DEFAULT_IMAGE_GEN, ...(char.imageGen || {}) };
     setEmotions(loadedEmotions);
+    setImageGen(loadedImgGen);
+    setShowAdvancedScene(false);
+    setLoraTrainJob(null);
     syncFormRef({
       name: char.name,
       description: char.description,
@@ -176,12 +258,14 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
       chatBackground: char.chatBackground || '',
       chatBackgroundOffset: char.chatBackgroundOffset || { x: 0, y: 0, scale: 1 },
       emotions: loadedEmotions,
+      imageGen: loadedImgGen,
     });
     setShowEditModal(true);
   };
 
   // Close Character Modal
   const handleCloseModal = () => {
+    stopLoraPolling();
     setShowEditModal(false);
     onDirtyChange(false);
   };
@@ -205,13 +289,183 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
       chatBackground: data.chatBackground,
       chatBackgroundOffset: data.chatBackgroundOffset,
       emotions: data.emotions,
+      imageGen: data.imageGen,
       createdAt: editingCharacterId ? (await db.characters.get(editingCharacterId))?.createdAt || Date.now() : Date.now(),
       updatedAt: Date.now(),
     };
 
     await db.characters.put(charData);
+    stopLoraPolling();
     setShowEditModal(false);
     onDirtyChange(false);
+  };
+
+  const updateImageGen = (patch: Partial<CharacterImageGenConfig>) => {
+    setImageGen((prev) => {
+      const next = { ...prev, ...patch };
+      syncFormRef({ imageGen: next });
+      return next;
+    });
+    onDirtyChange(true, handleSaveCharacter);
+  };
+
+  const handleUploadRefPhotos = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (fileList.length === 0) return;
+    setRefsStartedAt(Date.now());
+    setIsUploadingRefs(true);
+    try {
+      const current = [...(imageGen.referenceImages || [])];
+      for (const f of fileList) {
+        if (current.length >= 4) break;
+        try {
+          const jpg = await fileToCompressedJpeg(f, 896, 0.88);
+          current.push(jpg);
+        } catch {
+          // skip unreadable image
+        }
+      }
+      updateImageGen({ referenceImages: current });
+    } finally {
+      setIsUploadingRefs(false);
+    }
+  };
+
+  const [showSceneGuide, setShowSceneGuide] = useState(false);
+
+  const handleUseAvatarAsRef = async () => {
+    if (!isRasterImageDataUrl(avatar)) return;
+    const current = [...(imageGen.referenceImages || [])];
+    if (current.length >= 4) return;
+    setRefsStartedAt(Date.now());
+    setIsUploadingRefs(true);
+    try {
+      const normalized = (await compressDataUrlToJpeg(avatar, 896, 0.9)) || avatar;
+      if (!current.includes(normalized)) {
+        updateImageGen({ referenceImages: [normalized, ...current].slice(0, 4) });
+      }
+    } finally {
+      setIsUploadingRefs(false);
+    }
+  };
+
+  const handleAutoDescribeAppearance = async () => {
+    const validRef = (imageGen.referenceImages || []).find((p) => isRasterImageDataUrl(p));
+    const sample = validRef || (isRasterImageDataUrl(avatar) ? avatar : '');
+    if (!sample) return;
+    setVisionStartedAt(Date.now());
+    setVisionChars(0);
+    setDescribingPhoto(true);
+    try {
+      const desc = await describeCharacterPhotoWithVision({
+        settings,
+        activeApiKey,
+        photoDataUrl: sample,
+        characterName: name || 'Character',
+        onProgress: (chars) => setVisionChars(chars),
+      });
+      if (desc && desc.trim()) {
+        updateImageGen({ appearancePrompt: desc.trim() });
+      } else {
+        alert(
+          language === 'ru'
+            ? 'Vision-модель вернула пустой ответ. Убедитесь, что на ПК загружена Vision-модель с mmproj или выбрана облачная Vision-модель.'
+            : 'Vision AI returned an empty description. Ensure a Vision model with mmproj is active on PC or configure a Cloud Vision model.'
+        );
+      }
+    } catch (err: any) {
+      alert(err?.message || 'Vision error');
+    } finally {
+      setDescribingPhoto(false);
+      setVisionChars(0);
+    }
+  };
+
+  const startLoraStatusPolling = (hubUrl: string, trigOnComplete?: string) => {
+    stopLoraPolling();
+    loraPollTimerRef.current = setInterval(async () => {
+      try {
+        const st = await fetchLoraTrainStatus(hubUrl);
+        if (st?.job) {
+          setLoraTrainJob(st.job);
+          if (st.job.status === 'done') {
+            stopLoraPolling();
+            if (trigOnComplete) {
+              updateImageGen({
+                loraName: st.job.output_file,
+                loraTrigger: trigOnComplete,
+                enabled: true,
+                mode: 'lora',
+              });
+            }
+            loadLocalLoras(false);
+          } else if (st.job.status === 'error') {
+            stopLoraPolling();
+          }
+        }
+      } catch {
+        stopLoraPolling();
+      }
+    }, 1500);
+  };
+
+  const loadLocalLoras = async (checkActiveJob = true) => {
+    const hubUrl = settings?.localHubUrl;
+    setLorasStartedAt(Date.now());
+    setIsLoadingLoras(true);
+    try {
+      const res = await fetchLocalLoras(hubUrl);
+      setAvailableLoras((res.loras || []).filter((l) => !l.is_full_model));
+      setLoraTrainerInfo(res.trainer || null);
+      setActiveHubImageModel(res.active_image_model || null);
+      setTrainableCheckpoints(res.trainable_checkpoints || []);
+      setInferenceOnlyModels(res.inference_only_models || []);
+      setReadyHubModels(res.ready_models || []);
+      if (checkActiveJob && hubUrl) {
+        const st = await fetchLoraTrainStatus(hubUrl).catch(() => null);
+        if (st?.job && (st.job.status === 'preparing' || st.job.status === 'training')) {
+          setLoraTrainStartedAt(st.job.started_at ? st.job.started_at * 1000 : Date.now());
+          setLoraTrainJob(st.job);
+          startLoraStatusPolling(hubUrl);
+        }
+      }
+    } catch {
+      setAvailableLoras([]);
+      setLoraTrainerInfo(null);
+      setActiveHubImageModel(null);
+      setTrainableCheckpoints([]);
+      setInferenceOnlyModels([]);
+      setReadyHubModels([]);
+    } finally {
+      setIsLoadingLoras(false);
+    }
+  };
+
+  const handleTrainLoraOnHub = async () => {
+    const validRefs = (imageGen.referenceImages || []).filter((p) => isRasterImageDataUrl(p));
+    const samples = validRefs.length > 0
+      ? validRefs
+      : isRasterImageDataUrl(avatar) ? [avatar] : [];
+    if (samples.length === 0) return;
+    const hubUrl = settings?.localHubUrl || 'http://192.168.1.55:8080/v1';
+    const latinSlug = transliterateCyrillicToLatin(name || 'char').toLowerCase().replace(/[^a-z0-9]/g, '') || 'char';
+    const trig = (imageGen.loraTrigger || `slx_${latinSlug}`).trim();
+    setLoraTrainStartedAt(Date.now());
+    setLoraTrainJob({ status: 'preparing', stage: 'preparing_dataset', progress: 4 });
+    try {
+      const job = await trainCharacterLoraOnHub(hubUrl, {
+        character_name: name || 'character',
+        trigger_word: trig,
+        images: samples.map((dataUrl) => ({ dataUrl, caption: imageGen.appearancePrompt || '' })),
+        base_model: selectedTrainBaseModel || undefined,
+        caption: imageGen.appearancePrompt || '',
+      });
+      setLoraTrainJob(job);
+      startLoraStatusPolling(hubUrl, trig);
+    } catch (err: any) {
+      setLoraTrainJob({ status: 'error', error: err?.message || 'Train failed' });
+    }
   };
 
   const handleImportCardFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -222,6 +476,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
       const buf = await file.arrayBuffer();
       const card = parseCharacterCardFile(file.name, new Uint8Array(buf), file.type);
       const initialFolder = selectedFolderId && selectedFolderId !== 'none' ? selectedFolderId : null;
+      const importedImgGen: CharacterImageGenConfig = { ...DEFAULT_IMAGE_GEN, ...(card.imageGen || {}) };
       setEditingCharacterId(null);
       setName(card.name);
       setDescription(card.description);
@@ -235,6 +490,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
       setChatBackground('');
       setChatBackgroundOffset({ x: 0, y: 0, scale: 1 });
       setEmotions([]);
+      setImageGen(importedImgGen);
       syncFormRef({
         name: card.name,
         description: card.description,
@@ -248,6 +504,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
         chatBackground: '',
         chatBackgroundOffset: { x: 0, y: 0, scale: 1 },
         emotions: [],
+        imageGen: importedImgGen,
       });
       onDirtyChange(true, handleSaveCharacter);
       setShowEditModal(true);
@@ -434,6 +691,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
       alert(language === 'ru' ? 'Сначала настройте подключение к ИИ во вкладке Настройки.' : 'Please configure AI connection in the Settings tab first.');
       return;
     }
+    setGenStartedAt(Date.now());
     setIsGenerating(true);
 
     try {
@@ -1066,6 +1324,567 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                   </div>
                 )}
               </div>
+
+              {/* Collapsible Advanced Scene Image Generation Section */}
+              <div className="pt-2 border-t border-silk-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !showAdvancedScene;
+                    setShowAdvancedScene(next);
+                    if (next) loadLocalLoras();
+                  }}
+                  className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-silk-850/90 hover:bg-silk-800 border border-silk-700/80 transition-colors text-left"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <SlidersHorizontal className="w-4 h-4 text-violet-400 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-slate-200 flex items-center gap-2">
+                        <span>{t.advancedSettingsTitle}</span>
+                        {imageGen.enabled && (
+                          <span className="px-1.5 py-0.5 rounded bg-violet-600/25 border border-violet-500/40 text-[10px] text-violet-300">
+                            {imageGen.mode === 'lora' ? 'LoRA' : language === 'ru' ? 'Фото' : 'Refs'}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-500 truncate">{t.advancedSettingsHint}</p>
+                    </div>
+                  </div>
+                  <ChevronDown
+                    className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${showAdvancedScene ? 'rotate-180' : ''}`}
+                  />
+                </button>
+
+                {showAdvancedScene && (
+                  <div className="mt-3 p-3.5 rounded-xl bg-silk-950/60 border border-silk-800 space-y-3.5 animate-fade-in">
+                    {/* Enable Switch + Full Guide Button */}
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-semibold text-slate-200">{t.enableSceneImageGen}</span>
+                        <SceneHelpButton
+                          topic="enableScene"
+                          language={language}
+                          onOpenGuide={() => setShowSceneGuide(true)}
+                        />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setShowSceneGuide(true)}
+                          className="px-2.5 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 border border-silk-700 text-[11px] text-slate-200 font-medium flex items-center gap-1 transition-colors"
+                        >
+                          <BookOpen className="w-3 h-3 text-slate-300" />
+                          <span>{t.sceneOpenGuideBtn}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => updateImageGen({ enabled: !imageGen.enabled })}
+                          className={`relative w-11 h-6 rounded-full transition-colors ${
+                            imageGen.enabled ? 'bg-violet-600' : 'bg-silk-700'
+                          }`}
+                        >
+                          <div
+                            className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${
+                              imageGen.enabled ? 'translate-x-5' : 'translate-x-0'
+                            }`}
+                          />
+                        </button>
+                      </div>
+                    </div>
+
+                    {imageGen.enabled && (
+                      <div className="space-y-3.5 pt-2.5 border-t border-silk-800/80">
+                        {/* Likeness Mode Segmented Switcher */}
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[11px] font-medium text-slate-300">
+                              {language === 'ru' ? 'Способ сохранения внешности' : 'Character Likeness Mode'}
+                            </span>
+                            <SceneHelpButton
+                              topic="modeSelect"
+                              language={language}
+                              onOpenGuide={() => setShowSceneGuide(true)}
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-silk-900 border border-silk-800">
+                            <button
+                              type="button"
+                              onClick={() => updateImageGen({ mode: 'reference' })}
+                              className={`px-2.5 py-2 rounded-lg text-[11px] font-medium transition-colors text-center ${
+                                imageGen.mode !== 'lora'
+                                  ? 'bg-violet-600 text-white shadow'
+                                  : 'text-slate-400 hover:text-slate-200'
+                              }`}
+                            >
+                              {t.sceneModeOptionA}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                updateImageGen({ mode: 'lora' });
+                                loadLocalLoras();
+                              }}
+                              className={`px-2.5 py-2 rounded-lg text-[11px] font-medium transition-colors text-center ${
+                                imageGen.mode === 'lora'
+                                  ? 'bg-violet-600 text-white shadow'
+                                  : 'text-slate-400 hover:text-slate-200'
+                              }`}
+                            >
+                              {t.sceneModeOptionB}
+                            </button>
+                          </div>
+                          <p className="text-[11px] text-slate-400 leading-relaxed">
+                            {imageGen.mode === 'lora' ? t.sceneModeOptionBDesc : t.sceneModeOptionADesc}
+                          </p>
+                        </div>
+
+                        {/* Reference Photo Pack */}
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[11px] font-medium text-slate-300">{t.refPhotosLabel}</span>
+                              <SceneHelpButton
+                                topic="refPhotos"
+                                language={language}
+                                onOpenGuide={() => setShowSceneGuide(true)}
+                              />
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              {isRasterImageDataUrl(avatar) && (imageGen.referenceImages || []).length < 4 && (
+                                <button
+                                  type="button"
+                                  onClick={handleUseAvatarAsRef}
+                                  className="px-2.5 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 border border-silk-700 text-[11px] text-slate-200 font-medium flex items-center gap-1 transition-colors"
+                                >
+                                  <Camera className="w-3 h-3" />
+                                  <span>{t.useAvatarAsRefBtn}</span>
+                                </button>
+                              )}
+                              <label className="px-2.5 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 border border-silk-700 text-[11px] text-violet-300 font-medium cursor-pointer flex items-center gap-1 transition-colors">
+                                <Upload className="w-3 h-3" />
+                                <span>{t.addRefPhotos}</span>
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  multiple
+                                  onChange={handleUploadRefPhotos}
+                                  className="hidden"
+                                />
+                              </label>
+                            </div>
+                          </div>
+
+                          {isUploadingRefs && (
+                            <ActivityProgressBar
+                              compact
+                              accent="violet"
+                              language={language}
+                              label={t.uploadingRefPhotosProgress}
+                              startedAt={RefsStartedAt}
+                            />
+                          )}
+
+                          {(imageGen.referenceImages || []).length > 0 && (
+                            <div className="grid grid-cols-4 gap-2">
+                              {(imageGen.referenceImages || []).map((src, idx) => (
+                                <div key={idx} className="relative aspect-square rounded-lg overflow-hidden border border-silk-700 bg-silk-900">
+                                  <img src={src} alt="" className="w-full h-full object-cover" />
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      updateImageGen({
+                                        referenceImages: (imageGen.referenceImages || []).filter((_, i) => i !== idx),
+                                      })
+                                    }
+                                    className="absolute top-1 right-1 p-0.5 rounded-full bg-black/75 text-white hover:bg-rose-600"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Visual Appearance & Style Hint */}
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <div className="flex items-center gap-1.5">
+                              <label className="text-[11px] font-medium text-slate-300">{t.appearancePromptLabel}</label>
+                              <SceneHelpButton
+                                topic="appearancePrompt"
+                                language={language}
+                                onOpenGuide={() => setShowSceneGuide(true)}
+                              />
+                            </div>
+                            <button
+                              type="button"
+                              disabled={
+                                describingPhoto ||
+                                (!(imageGen.referenceImages || []).some((p) => isRasterImageDataUrl(p)) &&
+                                  !isRasterImageDataUrl(avatar))
+                              }
+                              onClick={handleAutoDescribeAppearance}
+                              className="px-2 py-1 rounded-lg bg-violet-600/20 hover:bg-violet-600/35 disabled:opacity-40 border border-violet-500/35 text-[10px] text-violet-300 flex items-center gap-1"
+                            >
+                              <Sparkles className="w-3 h-3" />
+                              <span>{describingPhoto ? t.describingAppearance : t.autoDescribeAppearance}</span>
+                            </button>
+                          </div>
+                          {describingPhoto && (
+                            <ActivityProgressBar
+                              compact
+                              accent="violet"
+                              language={language}
+                              label={t.visionExtractingProgress}
+                              sublabel={visionChars > 0 ? t.visionStreamingSub.replace('{n}', String(visionChars)) : undefined}
+                              startedAt={visionStartedAt}
+                            />
+                          )}
+                          <textarea
+                            rows={2}
+                            value={imageGen.appearancePrompt || ''}
+                            onChange={(e) => updateImageGen({ appearancePrompt: e.target.value })}
+                            placeholder={t.appearancePromptPlaceholder}
+                            className="w-full bg-silk-900 border border-silk-700 rounded-xl px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-violet-500 resize-none"
+                          />
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <div className="flex items-center gap-1.5">
+                            <label className="text-[11px] font-medium text-slate-300">{t.styleHintLabel}</label>
+                            <SceneHelpButton
+                              topic="styleHint"
+                              language={language}
+                              onOpenGuide={() => setShowSceneGuide(true)}
+                            />
+                          </div>
+                          <input
+                            type="text"
+                            value={imageGen.styleHint || ''}
+                            onChange={(e) => updateImageGen({ styleHint: e.target.value })}
+                            placeholder={t.styleHintPlaceholder}
+                            className="w-full bg-silk-900 border border-silk-700 rounded-xl px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-violet-500"
+                          />
+                          <div className="flex flex-wrap gap-1.5 pt-0.5">
+                            {([
+                              [t.stylePresetPhoto, 'cinematic realistic photography, natural film grain, dramatic lighting'],
+                              [t.stylePresetAnime, 'high-detail anime key visual illustration, crisp cel shading, expressive lighting'],
+                              [t.stylePresetFantasy, 'atmospheric dark fantasy digital painting, rich textures, moody chiaroscuro'],
+                              [t.stylePresetPainterly, 'soft semi-realistic painterly illustration, warm atmospheric brushwork'],
+                              [t.stylePresetScifi, 'futuristic sci-fi cyberpunk illustration, atmospheric neon rim light, intricate tech details'],
+                              [t.stylePresetAnthro, 'detailed anthropomorphic character illustration, expressive fur and species anatomy, vibrant lighting'],
+                              [t.stylePresetComic, 'stylized graphic novel illustration, bold ink linework, dramatic cel-shaded lighting'],
+                            ] as const).map(([label, presetVal]) => {
+                              const isCurrent = (imageGen.styleHint || '').trim() === presetVal;
+                              return (
+                                <button
+                                  key={label}
+                                  type="button"
+                                  onClick={() => updateImageGen({ styleHint: isCurrent ? '' : presetVal })}
+                                  className={`px-2 py-0.5 rounded-lg text-[10px] border transition-colors ${
+                                    isCurrent
+                                      ? 'bg-violet-600/25 border-violet-500 text-violet-200'
+                                      : 'bg-silk-900 border-silk-800 text-slate-400 hover:text-slate-200'
+                                  }`}
+                                >
+                                  {label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        {/* LoRA Adapter Picker & Dataset Trainer */}
+                        {imageGen.mode === 'lora' && (() => {
+                          const selectedLoraItem = availableLoras.find((l) => l.filename === imageGen.loraName);
+                          const hasArchMismatch = Boolean(
+                            selectedLoraItem?.base_arch &&
+                              activeHubImageModel?.family &&
+                              !isLoraCompatibleWithModelFamily(selectedLoraItem.base_arch, activeHubImageModel.family)
+                          );
+                          const isTrainingActive =
+                            loraTrainJob?.status === 'preparing' || loraTrainJob?.status === 'training';
+                          const loraStageLabel = (() => {
+                            const st = loraTrainJob?.stage || loraTrainJob?.status || '';
+                            if (st === 'preparing_dataset' || st === 'preparing') return t.loraStageDataset;
+                            if (st === 'loading_checkpoint') return t.loraStageLoad;
+                            if (st === 'encoding_latents') return t.loraStageEncode;
+                            if (st === 'saving_weights') return t.loraStageSave;
+                            if (st === 'training_steps' || st === 'training') return t.loraStageSteps;
+                            return t.loraTrainingProgress;
+                          })();
+                          const lastLoraLog =
+                            loraTrainJob?.logs && loraTrainJob.logs.length > 0
+                              ? loraTrainJob.logs[loraTrainJob.logs.length - 1]
+                              : undefined;
+                          const effLoraStartMs = loraTrainJob?.started_at
+                            ? loraTrainJob.started_at * 1000
+                            : loraTrainStartedAt;
+
+                          return (
+                            <div className="pt-2 border-t border-silk-800 space-y-2.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-1.5">
+                                  <label className="text-[11px] font-medium text-slate-300">{t.loraFileLabel}</label>
+                                  <SceneHelpButton
+                                    topic="loraAdapter"
+                                    language={language}
+                                    onOpenGuide={() => setShowSceneGuide(true)}
+                                  />
+                                </div>
+                                <button
+                                  type="button"
+                                  disabled={isLoadingLoras}
+                                  onClick={() => loadLocalLoras()}
+                                  className="text-[11px] text-slate-400 hover:text-violet-300 disabled:opacity-50 flex items-center gap-1"
+                                >
+                                  <RefreshCw className={`w-3 h-3 ${isLoadingLoras ? 'animate-spin' : ''}`} />
+                                  <span>{t.loraRefreshList}</span>
+                                </button>
+                              </div>
+                              {isLoadingLoras && (
+                                <ActivityProgressBar
+                                  compact
+                                  accent="slate"
+                                  language={language}
+                                  label={t.loadingLoraListProgress}
+                                  startedAt={lorasStartedAt}
+                                />
+                              )}
+                              <select
+                                value={imageGen.loraName || ''}
+                                onChange={(e) => {
+                                  const picked = availableLoras.find((l) => l.filename === e.target.value);
+                                  updateImageGen({
+                                    loraName: e.target.value,
+                                    loraTrigger: picked?.trigger_word || imageGen.loraTrigger || '',
+                                  });
+                                }}
+                                className="w-full bg-silk-900 border border-silk-700 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-violet-500"
+                              >
+                                <option value="">{t.loraSelectPlaceholder}</option>
+                                {availableLoras.map((l) => (
+                                  <option key={l.filename} value={l.filename}>
+                                    {l.filename}
+                                    {l.base_arch ? ` [${l.base_arch.toUpperCase()}]` : ''}
+                                    {l.trigger_word ? ` (${l.trigger_word})` : ''}
+                                  </option>
+                                ))}
+                              </select>
+                              {hasArchMismatch && selectedLoraItem && activeHubImageModel && (() => {
+                                const compatReady = readyHubModels.find((m) =>
+                                  isLoraCompatibleWithModelFamily(selectedLoraItem.base_arch, m.family)
+                                );
+                                return (
+                                  <div className="space-y-1.5 bg-amber-950/30 border border-amber-800/40 rounded-lg px-2.5 py-2">
+                                    <p className="text-[10px] text-amber-400/95 leading-relaxed">
+                                      {t.loraArchMismatchHint
+                                        .replace('{lora}', selectedLoraItem.base_arch.toUpperCase())
+                                        .replace('{model}', activeHubImageModel.family.toUpperCase())}
+                                    </p>
+                                    {compatReady && (
+                                      <button
+                                        type="button"
+                                        disabled={switchingHubModel}
+                                        onClick={async () => {
+                                          setSwitchingHubModel(true);
+                                          try {
+                                            await selectLocalImageModel(settings?.localHubUrl, compatReady.filename);
+                                            await loadLocalLoras(false);
+                                          } catch (err: any) {
+                                            alert(err?.message || 'Switch failed');
+                                          } finally {
+                                            setSwitchingHubModel(false);
+                                          }
+                                        }}
+                                        className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-50 border border-amber-500/40 text-[10px] font-medium text-amber-200"
+                                      >
+                                        {t.loraSwitchModelBtn.replace('{model}', compatReady.filename)}
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })()}
+
+                              <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                  <div className="flex items-center justify-between gap-1 mb-1">
+                                    <label className="text-[10px] text-slate-400">{t.loraTriggerLabel}</label>
+                                    <SceneHelpButton
+                                      topic="loraTrigger"
+                                      language={language}
+                                      onOpenGuide={() => setShowSceneGuide(true)}
+                                    />
+                                  </div>
+                                  <input
+                                    type="text"
+                                    value={imageGen.loraTrigger || ''}
+                                    onChange={(e) => updateImageGen({ loraTrigger: e.target.value })}
+                                    placeholder="slx_char"
+                                    className="w-full bg-silk-900 border border-silk-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200"
+                                  />
+                                </div>
+                                <div>
+                                  <div className="flex items-center justify-between gap-1 mb-1">
+                                    <label className="text-[10px] text-slate-400">
+                                      {t.loraWeightLabel}: {(imageGen.loraWeight ?? 0.85).toFixed(2)}
+                                    </label>
+                                    <SceneHelpButton
+                                      topic="loraStrength"
+                                      language={language}
+                                      onOpenGuide={() => setShowSceneGuide(true)}
+                                    />
+                                  </div>
+                                  <input
+                                    type="range"
+                                    min="0.2"
+                                    max="1.2"
+                                    step="0.05"
+                                    value={imageGen.loraWeight ?? 0.85}
+                                    onChange={(e) => updateImageGen({ loraWeight: parseFloat(e.target.value) })}
+                                    className="w-full accent-violet-500 mt-1.5"
+                                  />
+                                </div>
+                              </div>
+
+                              {/* Train on Hub from uploaded refs */}
+                              <div className="pt-1.5 border-t border-silk-800/70 space-y-2">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-[10px] text-slate-400">{t.loraTrainBaseLabel}</span>
+                                  <SceneHelpButton
+                                    topic="loraTrain"
+                                    language={language}
+                                    onOpenGuide={() => setShowSceneGuide(true)}
+                                  />
+                                </div>
+                                {trainableCheckpoints.length > 0 ? (
+                                  <select
+                                    value={selectedTrainBaseModel}
+                                    onChange={(e) => setSelectedTrainBaseModel(e.target.value)}
+                                    className="w-full bg-silk-900 border border-silk-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200"
+                                  >
+                                    <option value="">{t.loraTrainBaseAuto}</option>
+                                    {trainableCheckpoints.map((ck) => (
+                                      <option key={ck.filename} value={ck.filename}>
+                                        {ck.filename} [{ck.family.toUpperCase()}
+                                        {ck.variant ? `/${ck.variant}` : ''}]
+                                        {ck.is_active ? ' *' : ''}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <select
+                                    disabled
+                                    value=""
+                                    className="w-full bg-silk-900/70 border border-silk-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-500"
+                                  >
+                                    <option value="">{t.loraTrainNoSafetensorsOption}</option>
+                                  </select>
+                                )}
+                                {(() => {
+                                  if (trainableCheckpoints.length > 0) {
+                                    const chosenCkpt =
+                                      trainableCheckpoints.find((ck) => ck.filename === selectedTrainBaseModel) ||
+                                      trainableCheckpoints.find((ck) => ck.is_active) ||
+                                      trainableCheckpoints[0];
+                                    if (
+                                      chosenCkpt &&
+                                      activeHubImageModel?.family &&
+                                      !isLoraCompatibleWithModelFamily(chosenCkpt.family, activeHubImageModel.family)
+                                    ) {
+                                      return (
+                                        <p className="text-[10px] leading-relaxed text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded-lg px-2.5 py-1.5">
+                                          {t.loraTrainArchDiffHint
+                                            .replace('{trainArch}', chosenCkpt.family.toUpperCase())
+                                            .replace('{activeModel}', activeHubImageModel.filename)
+                                            .replace(/\{activeArch\}/g, activeHubImageModel.family.toUpperCase())}
+                                        </p>
+                                      );
+                                    }
+                                    return null;
+                                  }
+                                  if (loraTrainerInfo && !isLoadingLoras) {
+                                    const ggufNames = inferenceOnlyModels.map((m) => m.filename);
+                                    const fallbackActive =
+                                      activeHubImageModel && activeHubImageModel.filename.toLowerCase().endsWith('.gguf')
+                                        ? [activeHubImageModel.filename]
+                                        : [];
+                                    const modelNames = ggufNames.length > 0 ? ggufNames : fallbackActive;
+                                    return (
+                                      <p className="text-[10px] leading-relaxed text-slate-300 bg-silk-900/80 border border-silk-700/80 rounded-lg px-2.5 py-2">
+                                        {modelNames.length > 0
+                                          ? t.loraTrainGgufOnlyHint.replace('{models}', modelNames.slice(0, 3).join(', '))
+                                          : t.loraTrainEmptyModelsHint}
+                                      </p>
+                                    );
+                                  }
+                                  return null;
+                                })()}
+                                {isTrainingActive && (
+                                  <ActivityProgressBar
+                                    accent="violet"
+                                    language={language}
+                                    label={loraStageLabel}
+                                    sublabel={lastLoraLog}
+                                    progress={loraTrainJob?.progress ?? null}
+                                    stepInfo={
+                                      loraTrainJob?.total_steps && loraTrainJob?.step
+                                        ? { step: loraTrainJob.step, totalSteps: loraTrainJob.total_steps }
+                                        : null
+                                    }
+                                    startedAt={effLoraStartMs}
+                                  />
+                                )}
+                                <button
+                                  type="button"
+                                  disabled={
+                                    isTrainingActive ||
+                                    (Boolean(loraTrainerInfo) && trainableCheckpoints.length === 0) ||
+                                    (!(imageGen.referenceImages || []).some((p) => isRasterImageDataUrl(p)) &&
+                                      !isRasterImageDataUrl(avatar))
+                                  }
+                                  onClick={handleTrainLoraOnHub}
+                                  className="w-full px-3 py-2 rounded-xl bg-silk-800 hover:bg-silk-700 disabled:opacity-45 border border-silk-700 text-xs font-medium text-violet-300 flex items-center justify-center gap-1.5"
+                                >
+                                  <Cpu className="w-3.5 h-3.5" />
+                                  <span>
+                                    {isTrainingActive
+                                      ? `${t.loraTrainingProgress} ${Math.round(loraTrainJob?.progress || 0)}%`
+                                      : t.loraTrainDatasetBtn}
+                                  </span>
+                                </button>
+                                {loraTrainerInfo?.warning && (
+                                  <p className="text-[10px] text-amber-400/90 mt-1">
+                                    {loraTrainerInfo.warning.includes('>= 6 GB VRAM')
+                                      ? t.loraTrainWarnLowVram
+                                      : loraTrainerInfo.warning}
+                                  </p>
+                                )}
+                                {loraTrainJob?.error && (
+                                  <p className="text-[10px] text-rose-400 mt-1">
+                                    {loraTrainJob.error.includes('Compressed .gguf files are inference-only') ||
+                                    loraTrainJob.error.includes('requires a full .safetensors/.ckpt base checkpoint')
+                                      ? t.loraTrainErrNoCheckpoint
+                                      : loraTrainJob.error.includes('LoRA trainer environment is not installed')
+                                        ? t.loraTrainErrEnvMissing
+                                        : loraTrainJob.error.includes('CPU-only PyTorch') || loraTrainJob.error.includes('CUDA GPU')
+                                          ? t.loraTrainErrCudaMissing
+                                          : loraTrainJob.error}
+                                  </p>
+                                )}
+                                {!loraTrainerInfo && !availableLoras.length && !isLoadingLoras && (
+                                  <p className="text-[10px] text-slate-500 mt-1">{t.loraTrainNoHub}</p>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -1194,6 +2013,14 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                   )}
                 </div>
               </div>
+              {isGenerating && (
+                <ActivityProgressBar
+                  accent="violet"
+                  language={language}
+                  label={t.generating}
+                  startedAt={genStartedAt}
+                />
+              )}
             </div>
 
             {/* Footer */}
@@ -1245,6 +2072,12 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
           }
         }}
         onClose={() => setCropperOpen(false)}
+      />
+
+      <SceneGuideModal
+        isOpen={showSceneGuide}
+        onClose={() => setShowSceneGuide(false)}
+        language={language}
       />
     </div>
   );

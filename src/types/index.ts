@@ -19,6 +19,17 @@ export interface CharacterEmotion {
   avatar: string; // Base64 data URL
 }
 
+export interface CharacterImageGenConfig {
+  enabled: boolean;
+  mode: 'reference' | 'lora'; // Option A: reference pack, Option B: trained LoRA
+  referenceImages?: string[]; // 1..4 compressed JPEG data URLs
+  appearancePrompt?: string; // Stable visual description in English for prompt grounding
+  styleHint?: string;
+  loraName?: string; // Filename inside server/models/loras/
+  loraTrigger?: string;
+  loraWeight?: number;
+}
+
 export interface Character {
   id: string;
   name: string;
@@ -33,6 +44,7 @@ export interface Character {
   greetingEnabled: boolean;
   folderId?: string | null;
   emotions?: CharacterEmotion[];
+  imageGen?: CharacterImageGenConfig;
   createdAt: number;
   updatedAt: number;
 }
@@ -61,6 +73,52 @@ export interface MessageVariant {
   timestamp: number;
 }
 
+export interface SceneLocationAnchor {
+  locationId: string;
+  locationName: string;
+  visualAnchor: string; // Locked static environment description in English
+  lighting: string;
+  weatherOrAtmosphere?: string;
+  locked: boolean;
+}
+
+export interface SceneActorState {
+  characterId: string;
+  name: string;
+  appearance?: string;
+  clothing: string;
+  poseOrAction: string;
+  expression: string;
+  positionInScene?: string;
+}
+
+export interface SceneState {
+  location: SceneLocationAnchor;
+  actors: SceneActorState[];
+  props: string[];
+  lastCameraAngle?: string;
+  lastCompositionPrompt?: string;
+  lastAnalyzedMsgId?: string;
+  updatedAt: number;
+}
+
+export interface SceneAsset {
+  id: string;
+  chatId: string;
+  messageId?: string;
+  imageData: string; // Base64 data URL
+  prompt: string;
+  negativePrompt?: string;
+  perspective?: string;
+  seed?: number;
+  width?: number;
+  height?: number;
+  modelUsed?: string;
+  backendUsed?: 'local' | 'cloud';
+  skippedLoras?: Array<{ filename: string; lora_arch: string; model_family: string }>;
+  createdAt: number;
+}
+
 export interface ChatMessage {
   id: string;
   chatId: string;
@@ -71,7 +129,18 @@ export interface ChatMessage {
   activeVariantIndex: number;
   emotion?: string; // Active emotion tag if bot
   image?: string; // base64 / url attachment
+  sceneAssetIds?: string[]; // Generated scene image IDs stored in db.sceneAssets
+  activeSceneAssetIndex?: number;
   createdAt: number;
+}
+
+export interface RelationshipDetail {
+  /** Custom or preset bond role/status (e.g. "Rivals", "Partners", "Childhood Friends"). */
+  customTitle?: string;
+  /** Concise relationship dynamic / attitude note injected into roleplay prompts. */
+  note?: string;
+  /** Locks affinity score against automatic post-turn AI changes. */
+  locked?: boolean;
 }
 
 export interface ChatSession {
@@ -84,8 +153,10 @@ export interface ChatSession {
   thoughtsEnabled: boolean;
   chatDirectives?: string;
   relationships: Record<string, number>; // characterId -> affinity (-100 to 100)
+  relationshipDetails?: Record<string, RelationshipDetail>; // characterId -> bond customization & lock
   rollingSummary?: string; // compressed rolling summary of older messages
   lastSummarizedMsgId?: string; // id of the latest message covered by rolling summary
+  sceneState?: SceneState; // persistent location anchor + actors/clothing for scene generation
   createdAt: number;
   updatedAt: number;
 }
@@ -165,6 +236,8 @@ export type AiComponent =
   | 'ghostwriter'
   | 'memory'
   | 'summary'
+  | 'sceneAnalysis'
+  | 'sceneImage'
   | 'characterGen'
   | 'groupGen'
   | 'vision';
@@ -178,6 +251,8 @@ export interface AppSettings {
   language: Language;
   textModel: string;
   visionModel: string;
+  sceneImageModel?: string;
+  sceneAspectRatio?: 'portrait' | 'landscape' | 'square';
   textStyleId: string;
   theme: ThemeConfig;
   contextWindowSize: number;

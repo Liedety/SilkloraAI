@@ -1624,10 +1624,10 @@ test('replyGuard: detects repeated paragraphs, leaked rule headers and incomplet
   assert.ok(!dedupeParagraphs(repeated).includes('закрепляет его вокруг шеи, проводя') || dedupeParagraphs(repeated).split('\n').length === 2);
   assert.strictEqual(dedupeParagraphs('Первая строка.\nВторая строка совсем другая по смыслу и длине.').split('\n').length, 2);
 
-  const leaked = '*Он кивает и смотрит на огонь.*\n# Отверба:\n- Объем по умолчанию: от 3 до 5 емких абзацев.\n- Посланья могут меняться в ходе сцены.\n— Садись.';
+  const leaked = '*Он кивает и смотрит на огонь.*\n# Правила:\n- Объем по умолчанию: от 3 до 5 емких абзацев.\n- Инструкции могут меняться в ходе сцены.\n— Садись.';
   assert.ok(findMetaLeakBoundary(leaked) > 0);
   const stripped = stripLeakedMeta(leaked);
-  assert.ok(!stripped.includes('Отверба') && !stripped.includes('Объем') && !stripped.includes('Посланья'));
+  assert.ok(!stripped.includes('Правила') && !stripped.includes('Объем') && !stripped.includes('Инструкции'));
   assert.ok(stripped.includes('— Садись.'));
 
   const long = '*Она подходит к окну и долго смотрит на дорогу.* — Мне кажется, они уже близко, и нам нужно решить, что делать дальше, пока не стало поздно. Мы можем остаться здесь или уйти ночью через лес, и каждый вариант опасен по-своему. Затем';

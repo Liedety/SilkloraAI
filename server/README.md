@@ -12,8 +12,8 @@ The launcher does the whole setup itself. You only need to run one file:
 On the first run it:
 
 1. Finds Python 3.10 to 3.13. If none is found, it downloads Python 3.12 with the small `uv` tool into `python_runtime\` (about 30 MB, one time). Linux and macOS do the same without the `uv` tool being installed by hand.
-2. Creates a private environment in `venv\` and installs all packages into it.
-3. Installs the inference engine for your graphics card and checks it. The check loads a tiny test model (about 1 MB, downloaded once into `data\`) and generates a few tokens. If an engine crashes on this processor (error 0xC000001D), the next option is tried, and the CPU engine is the last resort.
+2. Creates a private environment in `venv\` and installs all packages (including `Pillow`) into it.
+3. Installs the text/vision inference engine (`llama.cpp`) for your graphics card, the persistent scene image engine (`stable-diffusion.cpp` `sd-server` and `sd-cli` into `bin\sdcpp\`), and on GPUs with 6 GB+ VRAM a dedicated `venv_trainer\` environment with CUDA PyTorch for local LoRA training.
 4. Opens the network port (8080 and up) for the phone in the Windows firewall (one administrator prompt).
 5. Starts the server and opens the dashboard at `http://localhost:8080`.
 
@@ -35,9 +35,10 @@ An image-capable model needs two files: the model and its projector (`mmproj`). 
 
 ## Using the dashboard
 
-- **Home**: setup checklist, QR code for the phone, current model, quick chat test.
-- **Models**: models picked for your computer, search on Hugging Face, installed files.
-- **System**: hardware, engine, loading options, log and diagnostic report.
+- **Home**: active text LLM and scene image model selectors, GPU status, QR code for the phone, quick chat test.
+- **Models**: curated recommendations for your GPU, 1-click Hugging Face search bundles (automatically pairing `mmproj` or `VAE/CLIP/T5` companions), scene image bundles, and LoRA manager.
+- **AI Model Finder**: hardware-aware model recommendations (works out of the box, via your local LLM, or via Cloud API) with 1-click download cards.
+- **System**: 3 plain-language controls up front (auto-load last model, scene image speed/quality, external image engine URL) plus collapsible expert parameters and diagnostic logs.
 
 Connecting the phone: put the phone on the same Wi-Fi, open the app, Settings, Local AI, Scan QR.
 

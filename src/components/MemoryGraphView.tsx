@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useState } from 'react';
 import { ZoomIn, ZoomOut, RotateCcw, X, Network, LayoutGrid, Trash2 } from 'lucide-react';
 import type { MemoryNode, MemoryEdge, Language } from '../types';
 import { db } from '../db';
+import { removeMemoriesWithBridge } from '../services/memoryGraph';
 
 interface MemoryGraphViewProps {
   nodes: MemoryNode[];
@@ -432,9 +433,18 @@ export const MemoryGraphView: React.FC<MemoryGraphViewProps> = ({
   };
 
   const handleDeleteNode = async (nodeId: string) => {
-    await db.memoryNodes.delete(nodeId);
-    await db.memoryEdges.where('source').equals(nodeId).delete();
-    await db.memoryEdges.where('target').equals(nodeId).delete();
+    const target = nodes.find((n) => n.id === nodeId);
+    if (target) {
+      await removeMemoriesWithBridge({
+        chatId: target.chatId,
+        nodeIds: [nodeId],
+        respectPinned: false,
+      });
+    } else {
+      await db.memoryNodes.delete(nodeId);
+      await db.memoryEdges.where('source').equals(nodeId).delete();
+      await db.memoryEdges.where('target').equals(nodeId).delete();
+    }
     if (selectedNode?.id === nodeId) {
       setSelectedNode(null);
     }

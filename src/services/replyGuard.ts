@@ -123,7 +123,7 @@ export function findForeignActorBoundary(text: string, foreignNames: string[], m
   return earliest;
 }
 
-const META_KEYWORD = '(?:Отверба|Объем(?:\\s+по\\s+умолчанию)?|Посланья?|Правила(?:\\s+ответа)?|Инструкции?|Стиль\\s+повествования|Length|Rules?|Instructions?|Style)';
+const META_KEYWORD = '(?:Ответ|Объем(?:\\s+по\\s+умолчанию)?|Послания?|Правила(?:\\s+ответа)?|Инструкции?|Стиль\\s+повествования|Length|Rules?|Instructions?|Style)';
 const META_HEADER_LINE = new RegExp(`^[ \\t]*#{1,6}[ \\t]*\\S.*$`);
 const META_KEYWORD_LINE = new RegExp(`^[ \\t]*(?:[-•*][ \\t]+)?${META_KEYWORD}[ \\t]*:.*$`, 'i');
 const BULLET_LINE = /^[ \t]*(?:[-•]|\*(?=\s))[ \t]+\S.*$/;

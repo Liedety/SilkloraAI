@@ -76,7 +76,7 @@ def ensure_requirements(state: dict) -> bool:
     digest = hashlib.sha256(REQUIREMENTS.read_bytes()).hexdigest()
     if state.get("requirements") == digest:
         probe = subprocess.run(
-            [sys.executable, "-c", "import fastapi, uvicorn, requests, psutil"],
+            [sys.executable, "-c", "import fastapi, uvicorn, requests, psutil, PIL"],
             capture_output=True,
         )
         if probe.returncode == 0:
@@ -593,6 +593,56 @@ def ensure_firewall(state: dict, repair: bool):
 
 # --------------------------------------------------------------------------- main
 
+def ensure_image_engine(state: dict, repair: bool) -> dict:
+    """Install/verify sd-server + sd-cli for local scene image generation at server startup."""
+    from hub import image_engine as img_mod
+
+    if repair:
+        say("      Reinstalling scene image engine (--repair)...")
+    res = img_mod.image_engine.ensure_sdcpp_sync(
+        force=repair,
+        progress_cb=lambda msg: say(f"      {msg}"),
+    )
+    state["image_engine"] = res
+    return res
+
+
+def ensure_lora_trainer(state: dict, repair: bool) -> dict:
+    """Install/verify isolated venv_trainer for character LoRA training when a capable GPU is present."""
+    from hub import hardware as hw_mod
+    from hub import lora_trainer as trainer_mod
+
+    hw = hw_mod.analyze_hardware(fresh_gpu=False)
+    gpu = hw.get("gpu") or {}
+    vram_gb = (gpu.get("vram_total") or 0) / hw_mod.GIB
+    if not (gpu.get("has_gpu") and vram_gb >= 6.0):
+        return {"ok": True, "skipped": True, "reason": "no_6gb_gpu"}
+
+    trainer_py = trainer_mod._trainer_python()
+    expects_cuda = bool(gpu.get("has_gpu") and gpu.get("kind") == "cuda")
+    cuda_ok = (not expects_cuda) or (bool(state.get("lora_trainer_cuda_verified")) and trainer_py and trainer_mod._trainer_has_cuda(trainer_py))
+    if not repair and state.get("lora_trainer_verified") and cuda_ok and trainer_py and trainer_py.is_file():
+        return {"ok": True, "already_installed": True, "python": str(trainer_py)}
+
+    if not repair and state.get("lora_trainer_failed") and not trainer_py:
+        say("      Adapter trainer setup was skipped after an earlier error (run start-server.bat --repair to retry).")
+        return {"ok": False, "skipped": True}
+
+    say("      Setting up / verifying GPU character adapter training environment...")
+    res = trainer_mod.lora_trainer.ensure_trainer_sync(
+        force=repair,
+        progress_cb=lambda msg: say(f"      {msg}"),
+    )
+    if res.get("ok"):
+        state["lora_trainer_verified"] = True
+        if expects_cuda:
+            state["lora_trainer_cuda_verified"] = True
+        state.pop("lora_trainer_failed", None)
+    else:
+        state["lora_trainer_failed"] = True
+    return res
+
+
 def main(argv) -> int:
     from hub.console import disable_quickedit
 
@@ -610,21 +660,38 @@ def main(argv) -> int:
         say(f"Python 3.10 or newer is required (found {platform.python_version()}).")
         return 1
 
-    total = 3
-    step(1, total, "Checking components")
+    total = 5
+    step(1, total, "Checking core Python components")
     if not ensure_requirements(state):
         say("      Could not install the required packages. Check your internet connection and run again.")
         save_state(state)
         return 1
 
-    step(2, total, "Preparing the inference engine")
+    step(2, total, "Preparing the LLM inference engine")
     probe = ensure_engine(state, repair)
     if probe["ok"]:
         say(f"      Engine {probe['version']} ({'GPU acceleration' if probe['gpu'] else 'CPU'})")
     else:
-        say("      The inference engine could not be started. The dashboard will show details.")
+        say("      The LLM inference engine could not be started. Run start-server.bat --repair to retry.")
 
-    step(3, total, "Network access for the phone")
+    step(3, total, "Preparing the scene image engine (sd-server + sd-cli)")
+    img_res = ensure_image_engine(state, repair)
+    if img_res.get("ok"):
+        tag = img_res.get("tag") or img_res.get("backend") or "ready"
+        say(f"      Scene image engine ready ({tag})")
+    else:
+        say(f"      Scene image engine warning: {img_res.get('error') or 'unavailable'} (run start-server.bat --repair to retry)")
+
+    step(4, total, "Preparing character adapter training components")
+    lora_res = ensure_lora_trainer(state, repair)
+    if lora_res.get("skipped") and lora_res.get("reason") == "no_6gb_gpu":
+        say("      Skipped (GPU < 6 GB VRAM; reference photo mode remains active)")
+    elif lora_res.get("ok"):
+        say("      Character adapter trainer ready")
+    else:
+        say(f"      Character adapter trainer warning: {lora_res.get('error') or 'unavailable'}")
+
+    step(5, total, "Network access for the phone")
     ensure_firewall(state, repair)
     save_state(state)
 
