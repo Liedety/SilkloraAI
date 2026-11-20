@@ -109,9 +109,12 @@ class Engine:
         self.is_loading = False
         self.loading_model = ""
         self.loading_step = ""
+        self.loading_step_code = ""
+        self.loading_progress = 0.0
         self.load_started = 0.0
         self.load_seconds: Optional[float] = None
         self.load_error: Optional[Dict[str, Any]] = None
+        self.gen_started_at = 0.0
         self.started_at = time.time()
 
     @property
@@ -139,9 +142,13 @@ class Engine:
         speed_cap = {"full": 8192, "partial": 4608, "none": 3072}.get(self.plan.get("offload", "none"), 3072)
         return max(1024, min(n_ctx - 1280, speed_cap))
 
-    def _set_step(self, text: str):
+    def _set_step(self, text: str, code: str = "", progress: float = 0.0):
         with self.state_lock:
             self.loading_step = text
+            if code:
+                self.loading_step_code = code
+            if progress > 0:
+                self.loading_progress = progress
         logger.info(text)
 
     def unload(self):
@@ -161,7 +168,13 @@ class Engine:
             if acquired:
                 self.inference_lock.release()
 
-    def build_plan(self, model_name: str, projector_name: Optional[str], options: Dict[str, Any]) -> Dict[str, Any]:
+    def build_plan(
+        self,
+        model_name: str,
+        projector_name: Optional[str],
+        options: Dict[str, Any],
+        ignore_active_load: Optional[bool] = None,
+    ) -> Dict[str, Any]:
         model_path = MODELS_DIR / model_name
         info = inspect_model(model_path)
         proj_bytes = 0
@@ -179,6 +192,7 @@ class Engine:
         layers_request = options.get("n_gpu_layers")
         if layers_request in (None, "", "auto"):
             layers_request = None if prefs["gpu_layers_mode"] == "auto" else int(prefs["gpu_layers_mode"])
+        use_ignore_active = (self.llama is not None) if ignore_active_load is None else bool(ignore_active_load)
         plan = plan_load(
             info,
             hw,
@@ -188,6 +202,7 @@ class Engine:
             kv_quant=bool(prefs["kv_quant"]),
             ctx_cap=int(prefs["ctx_cap"]),
             vision=bool(projector_name),
+            ignore_active_load=use_ignore_active,
         )
         plan["model_name"] = model_name
         plan["projector_name"] = projector_name or ""
@@ -207,6 +222,8 @@ class Engine:
             self.load_error = None
             self.load_started = time.time()
             self.loading_step = "Preparing"
+            self.loading_step_code = "preparing"
+            self.loading_progress = 12.0
         threading.Thread(
             target=self._load_worker,
             args=(model_name, projector_name, options or {}),
@@ -248,11 +265,12 @@ class Engine:
                     logger.warning(f"Projector {projector_name} not found, loading text only")
                     projector_name, proj_path = None, None
 
-            self._set_step("Releasing memory of the previous model")
+            self._set_step("Releasing memory of the previous model", "releasing_memory", 26.0)
             self.unload()
-            time.sleep(0.4)
+            gc.collect()
+            time.sleep(0.8 if (analyze_hardware().get("gpu") or {}).get("has_gpu") else 0.3)
 
-            self._set_step("Planning memory use for this machine")
+            self._set_step("Planning memory use for this machine", "planning_memory", 46.0)
             plan = self.build_plan(model_name, projector_name, options)
             logger.info(
                 f"Plan: ctx={plan['n_ctx']} offload={plan['offload']} "
@@ -268,7 +286,7 @@ class Engine:
                     plan["projector_name"] = ""
                     plan.setdefault("warnings", []).append("vision_handler_missing")
 
-            self._set_step("Loading model into memory")
+            self._set_step("Loading model into memory", "loading_weights", 72.0)
             llama, used_plan, last_error = self._instantiate(str(model_path), plan, chat_handler)
             if llama is None:
                 self._report_failure(info, last_error)
@@ -283,6 +301,7 @@ class Engine:
                 self.model_info = info
                 self.load_seconds = elapsed
                 self.load_error = None
+                self.loading_progress = 100.0
             settings.update({"last_model": {"model": model_name, "projector": projector_name or ""}})
             logger.info(
                 f"Model ready in {elapsed}s: {model_name} (context {used_plan['n_ctx']}, offload {used_plan['offload']})"
@@ -294,6 +313,8 @@ class Engine:
             with self.state_lock:
                 self.is_loading = False
                 self.loading_step = ""
+                self.loading_step_code = ""
+                self.loading_progress = 0.0
 
     def _create_handler(self, info, proj_info, model_name, proj_path):
         for class_name in vision_handler_candidates(info, proj_info, model_name):
@@ -327,25 +348,46 @@ class Engine:
             n_threads=plan["n_threads"],
         )
         attempts = [(base, plan["offload"], plan["kv_type"])]
-        if plan["flash_attn"] or plan["kv_type"] != "f16":
-            plain = dict(base, flash_attn=False, type_k=None, type_v=None)
-            attempts.append((plain, plan["offload"], "f16"))
-        if plan["layers_gpu"] > 0:
-            layers = max(1, int(plan["layers_gpu"] * 0.6)) if plan["offload"] != "full" else max(1, int(plan["n_layer"] * 0.7))
-            reduced = dict(base, n_ctx=max(2048, plan["n_ctx"] // 2), n_gpu_layers=layers, flash_attn=False, type_k=None, type_v=None)
+        n_layer = max(1, int(plan.get("n_layer") or 32))
+        start_layers = n_layer if plan["offload"] == "full" else int(plan["layers_gpu"])
+
+        if start_layers > 0:
+            # First step down GPU layers while KEEPING Flash Attention + Q8 KV so VRAM decreases monotonically
+            for ratio in (0.80, 0.58):
+                stepped_layers = max(1, int(start_layers * ratio))
+                if stepped_layers < start_layers:
+                    stepped_ctx = max(4096, min(plan["n_ctx"], 8192)) if plan["n_ctx"] > 8192 else plan["n_ctx"]
+                    stepped = dict(base, n_ctx=stepped_ctx, n_gpu_layers=stepped_layers)
+                    attempts.append((stepped, "partial", plan["kv_type"]))
+
+            # Next retry without quantized KV / flash_attn in case an old CUDA/arch kernel dislikes q8_0 KV
+            reduced_layers = max(1, int(start_layers * 0.55))
+            reduced = dict(
+                base,
+                n_ctx=max(2048, min(plan["n_ctx"], 4096)),
+                n_gpu_layers=reduced_layers,
+                flash_attn=False,
+                type_k=None,
+                type_v=None,
+            )
             attempts.append((reduced, "partial", "f16"))
+
             cpu = dict(base, n_ctx=min(plan["n_ctx"], 4096), n_gpu_layers=0, flash_attn=False, type_k=None, type_v=None)
             attempts.append((cpu, "none", "f16"))
         else:
+            if plan["flash_attn"] or plan["kv_type"] != "f16":
+                plain = dict(base, flash_attn=False, type_k=None, type_v=None)
+                attempts.append((plain, plan["offload"], "f16"))
             small = dict(base, n_ctx=max(2048, plan["n_ctx"] // 2), flash_attn=False, type_k=None, type_v=None)
             attempts.append((small, "none", "f16"))
         return attempts
 
     def _instantiate(self, model_path: str, plan: Dict[str, Any], chat_handler):
         last_error = ""
+        n_layer = max(1, int(plan.get("n_layer") or 32))
         for number, (kwargs, offload, kv_type) in enumerate(self._attempts(plan), start=1):
             if number > 1:
-                self._set_step(f"Retrying with safer settings (attempt {number})")
+                self._set_step(f"Retrying with safer settings (attempt {number})", "retrying", min(92.0, 72.0 + number * 6.0))
             call = {k: v for k, v in kwargs.items() if v is not None}
             try:
                 llama = Llama(model_path=model_path, chat_handler=chat_handler, verbose=True, **call)
@@ -369,16 +411,29 @@ class Engine:
                     break
                 continue
 
+            raw_ngl = int(call["n_gpu_layers"])
+            actual_layers = n_layer if raw_ngl < 0 else min(raw_ngl, n_layer)
             used = dict(plan)
             used.update(
                 n_ctx=int(call["n_ctx"]),
-                n_gpu_layers=call["n_gpu_layers"],
+                n_gpu_layers=raw_ngl,
+                layers_gpu=actual_layers,
                 offload=offload,
                 kv_type=kv_type,
                 flash_attn=bool(call.get("flash_attn", False)),
             )
             if number > 1:
-                used["warnings"] = list(plan["warnings"]) + ["fallback_settings"]
+                warns = [w for w in plan.get("warnings", []) if w not in ("partial_offload", "cpu_only_with_gpu")]
+                if offload == "partial":
+                    warns.append("partial_offload")
+                elif (
+                    offload == "none"
+                    and "engine_cpu_only" not in warns
+                    and (plan.get("profile") != "cpu" or "cpu_only_with_gpu" in plan.get("warnings", []))
+                ):
+                    warns.append("cpu_only_with_gpu")
+                warns.append("fallback_settings")
+                used["warnings"] = list(dict.fromkeys(warns))
             return llama, used, ""
         return None, plan, last_error
 
@@ -394,6 +449,8 @@ class Engine:
 
     def status(self) -> Dict[str, Any]:
         with self.state_lock:
+            is_gen = self.gen_started_at > 0 and self.inference_lock.locked()
+            gen_elapsed = round(time.time() - self.gen_started_at, 1) if is_gen else 0.0
             return {
                 "ready": self.llama is not None,
                 "model": self.model_name,
@@ -402,7 +459,11 @@ class Engine:
                 "is_loading": self.is_loading,
                 "loading_model": self.loading_model,
                 "loading_step": self.loading_step,
+                "loading_step_code": self.loading_step_code,
+                "loading_progress": self.loading_progress if self.is_loading else 0.0,
                 "loading_elapsed": round(time.time() - self.load_started, 1) if self.is_loading else 0.0,
+                "is_generating": is_gen,
+                "generating_elapsed": gen_elapsed,
                 "load_seconds": self.load_seconds,
                 "load_error": self.load_error,
                 "n_ctx": self.n_ctx,
@@ -439,6 +500,8 @@ class GenerationJob:
             with self.lock:
                 if self.cancel.is_set():
                     return
+                with engine.state_lock:
+                    engine.gen_started_at = time.time()
                 generator = self.llama.create_chat_completion(stream=True, **self.params)
                 for chunk in generator:
                     if self.cancel.is_set():
@@ -453,4 +516,6 @@ class GenerationJob:
                     generator.close()
                 except Exception:
                     pass
+            with engine.state_lock:
+                engine.gen_started_at = 0.0
             self._emit(("done", None))

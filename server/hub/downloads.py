@@ -9,8 +9,18 @@ import requests
 
 from . import library
 from .log import logger
-from .paths import MODELS_DIR
+from .paths import IMAGE_AUX_DIR, IMAGE_MODELS_DIR, LORAS_DIR, MODELS_DIR
 from .store import HF_URL, _headers
+
+
+def _dir_for_role(role: str):
+    if role == "image":
+        return IMAGE_MODELS_DIR, "image/"
+    if role in ("image_aux", "vae", "clip_l", "clip_g", "t5xxl", "llm_encoder"):
+        return IMAGE_AUX_DIR, "image_aux/"
+    if role == "lora":
+        return LORAS_DIR, "loras/"
+    return MODELS_DIR, ""
 
 TERMINAL_VISIBLE_SEC = 10
 CHUNK = 1024 * 1024
@@ -84,20 +94,66 @@ class DownloadManager:
         window = []
         try:
             for index, spec in enumerate(files, start=1):
-                target = MODELS_DIR / spec["local_name"]
+                role = spec.get("role", "model")
+                spec_repo = spec.get("repo_id") or repo_id
+                base_dir, meta_prefix = _dir_for_role(role)
+                base_dir.mkdir(parents=True, exist_ok=True)
+                target = base_dir / spec["local_name"]
                 self._update(current=spec["local_name"], index=index)
+                meta_key = f"{meta_prefix}{spec['local_name']}" if meta_prefix else spec["local_name"]
+                meta_payload: Dict[str, Any] = {
+                    "repo": spec_repo,
+                    "source_file": spec["filename"],
+                    "role": role,
+                }
+                if role in ("vae", "clip_l", "clip_g", "t5xxl", "llm_encoder"):
+                    meta_payload["aux_role"] = role
+                if role == "lora" and spec.get("trigger_word"):
+                    meta_payload["trigger_word"] = str(spec["trigger_word"]).strip()
+                if "supports_refs" in spec:
+                    meta_payload["supports_refs"] = bool(spec["supports_refs"])
                 if target.exists():
                     done_bytes += target.stat().st_size
+                    if role == "lora":
+                        inspected = library.inspect_lora_header(target)
+                        if inspected.get("base_arch"):
+                            meta_payload.setdefault("base_arch", inspected["base_arch"])
+                        if inspected.get("trigger_word") and not meta_payload.get("trigger_word"):
+                            meta_payload["trigger_word"] = inspected["trigger_word"]
+                    library.set_meta(meta_key, meta_payload)
                     continue
-                done_bytes = self._fetch(repo_id, spec, target, done_bytes, window)
+                done_bytes = self._fetch(spec_repo, spec, target, done_bytes, window)
                 if done_bytes < 0:
                     return
-                library.set_meta(spec["local_name"], {"repo": repo_id, "source_file": spec["filename"], "role": spec.get("role", "model")})
+                if role == "lora":
+                    inspected = library.inspect_lora_header(target)
+                    if inspected.get("base_arch"):
+                        meta_payload.setdefault("base_arch", inspected["base_arch"])
+                    if inspected.get("trigger_word") and not meta_payload.get("trigger_word"):
+                        meta_payload["trigger_word"] = inspected["trigger_word"]
+                library.set_meta(meta_key, meta_payload)
             names = [f["local_name"] for f in files]
             projector = next((f["local_name"] for f in files if f.get("role") == "projector"), None)
-            model = next((f["local_name"] for f in files if f.get("role") != "projector"), None)
+            model = next((f["local_name"] for f in files if f.get("role") == "model"), None)
             if model and projector:
                 library.set_meta(model, {"projector": projector})
+            image_spec = next((f for f in files if f.get("role") == "image"), None)
+            if image_spec:
+                image_main = image_spec["local_name"]
+                companions: Dict[str, str] = {}
+                for f in files:
+                    r = f.get("role")
+                    if r in ("vae", "clip_l", "clip_g", "t5xxl", "llm_encoder"):
+                        companions[r] = f["local_name"]
+                patch: Dict[str, Any] = {}
+                if companions:
+                    patch["companions"] = companions
+                if "supports_refs" in image_spec:
+                    patch["supports_refs"] = bool(image_spec["supports_refs"])
+                if image_spec.get("family"):
+                    patch["family"] = image_spec["family"]
+                if patch:
+                    library.set_meta(f"image/{image_main}", patch)
             self._update(percent=100.0)
             self._finish("completed")
             logger.info(f"Download complete: {', '.join(names)}")
@@ -108,7 +164,7 @@ class DownloadManager:
             self._finish("failed", str(e))
 
     def _fetch(self, repo_id, spec, target, base_bytes, window, retry=True) -> int:
-        url = f"{HF_URL}/{repo_id}/resolve/main/{spec['filename']}"
+        url = spec.get("url") or f"{HF_URL}/{repo_id}/resolve/main/{spec['filename']}"
         part = target.with_name(target.name + ".part")
         resume_from = part.stat().st_size if part.exists() else 0
         headers = _headers()

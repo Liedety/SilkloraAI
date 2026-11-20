@@ -25,6 +25,8 @@ import {
   Info,
   Shield,
   Scan,
+  Camera,
+  BookOpen,
 } from 'lucide-react';
 import { db, DEFAULT_THEME, APP_THEMES, getLocalizedTextStyle } from '../db';
 import type {
@@ -39,20 +41,31 @@ import type {
   ThemeConfig,
 } from '../types';
 import { translations } from '../i18n';
+import { ActivityProgressBar } from '../components/ActivityProgressBar';
+import { SceneGuideModal, SceneHelpButton } from '../components/SceneHelp';
 import {
   fetchAvailableModels,
   fetchVisionModels,
+  fetchImageModels,
   pingLocalServer,
   normalizeLocalServerUrl,
   AI_COMPONENTS,
   getComponentBackend,
   RP_SAMPLER_PRESETS,
   resolveSamplerConfig,
+  type ImageModelChoice,
   type RpSamplerPreset,
 } from '../services/ai';
 import { DEFAULT_CORE_SYSTEM_PROMPT } from '../services/promptBuilder';
 import { ChatPreviewCard } from '../components/ChatPreviewCard';
 import { fontStack } from '../utils/fonts';
+import {
+  applyThemeToDocument,
+  normalizeThemeConfig,
+  readCachedTheme,
+  resolveActiveTheme,
+  saveCachedTheme,
+} from '../utils/themePersistence';
 import { QrScannerModal } from '../components/QrScannerModal';
 
 interface SettingsViewProps {
@@ -180,6 +193,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [isLoadingVisionModels, setIsLoadingVisionModels] = useState(false);
   const [customVisionInput, setCustomVisionInput] = useState('');
 
+  // Scene Image Model Selector State
+  const [imageModelsList, setImageModelsList] = useState<ImageModelChoice[]>([]);
+  const [isLoadingImageModels, setIsLoadingImageModels] = useState(false);
+  const [customSceneImageInput, setCustomSceneImageInput] = useState('');
+
   // Text Style Modal State
   const [showStyleModal, setShowStyleModal] = useState(false);
   const [editingStyleId, setEditingStyleId] = useState<string | null>(null);
@@ -268,17 +286,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setTimeout(() => setPromptFeedback(null), 2500);
   };
 
-  // Theme settings local state
-  const currentTheme = settings?.theme || DEFAULT_THEME;
+  // Theme settings local state (backed by synchronous localStorage mirror)
+  const currentTheme = resolveActiveTheme({
+    dbTheme: settings?.theme,
+    cachedTheme: readCachedTheme(undefined, DEFAULT_THEME),
+    fallback: DEFAULT_THEME,
+  });
+  const themeWriteChainRef = useRef<Promise<void>>(Promise.resolve());
 
-  // Theme writes are read-modify-write on the stored settings, so quick consecutive changes
-  // (slider, color, font) never overwrite each other with a stale copy from the screen.
+  // Theme writes are serialized read-modify-write transactions on stored settings AND mirrored
+  // synchronously to localStorage + CSS variables so rapid slider drags never race or reset on chat open.
   const writeTheme = async (build: (stored: ThemeConfig) => ThemeConfig) => {
-    await db.transaction('rw', db.settings, async () => {
-      const row = await db.settings.get('default');
-      if (!row) return;
-      await db.settings.update('default', { theme: build(row.theme || DEFAULT_THEME) });
+    const run = themeWriteChainRef.current.then(async () => {
+      await db.transaction('rw', db.settings, async () => {
+        const row = await db.settings.get('default');
+        const baseStored = normalizeThemeConfig(row?.theme || readCachedTheme(undefined, DEFAULT_THEME), DEFAULT_THEME);
+        const nextTheme = normalizeThemeConfig(build(baseStored), DEFAULT_THEME);
+        saveCachedTheme(nextTheme, undefined, DEFAULT_THEME);
+        applyThemeToDocument(nextTheme);
+        if (row) {
+          await db.settings.update('default', { theme: nextTheme });
+        }
+      });
     });
+    themeWriteChainRef.current = run.catch(() => {});
+    await run;
   };
 
   const handleUpdateTheme = async (updates: Partial<ThemeConfig>, markCustomColor = false) => {
@@ -295,6 +327,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       ...themePreset,
       fontSize: stored.fontSize,
       fontFamily: stored.fontFamily,
+      usePixelUiFont: stored.usePixelUiFont,
       lineHeight: stored.lineHeight,
     }));
   };
@@ -375,6 +408,47 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       setIsLoadingVisionModels(false);
     }
   };
+
+  const textUsesCloud = (
+    ['chat', 'ghostwriter', 'memory', 'summary', 'characterGen', 'groupGen', 'sceneAnalysis'] as AiComponent[]
+  ).some((c) => getComponentBackend(settings, c) === 'cloud');
+  const visionUsesCloud = getComponentBackend(settings, 'vision') === 'cloud';
+  const sceneImageIsLocal = getComponentBackend(settings, 'sceneImage') === 'local';
+
+  const handleRefreshImageModels = async () => {
+    const activeKey = apiKeys.find((k) => k.isActive);
+    if (sceneImageIsLocal) return;
+    if (!activeKey) {
+      alert(t.activateKeyFirst);
+      return;
+    }
+    setIsLoadingImageModels(true);
+    try {
+      const list = await fetchImageModels({
+        apiKeyConfig: activeKey,
+        isLocal: false,
+      });
+      setImageModelsList(list);
+    } catch (err: any) {
+      alert(`${t.failedLoadModels}: ${err.message}`);
+    } finally {
+      setIsLoadingImageModels(false);
+    }
+  };
+
+  useEffect(() => {
+    if (settingsTab !== 'models' || sceneImageIsLocal) {
+      setImageModelsList([]);
+      return;
+    }
+    const activeKey = apiKeys.find((k) => k.isActive);
+    fetchImageModels({
+      apiKeyConfig: activeKey,
+      isLocal: false,
+    })
+      .then((list) => setImageModelsList(list))
+      .catch(() => {});
+  }, [settingsTab, sceneImageIsLocal, apiKeys]);
 
   // Text Style Actions
   const handleOpenCreateStyle = () => {
@@ -457,6 +531,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     return true;
   });
 
+  const [showSceneGuide, setShowSceneGuide] = useState(false);
+
   // Per-function backend: cloud (your API key) or the local PC hub
   const routingItems: Array<[AiComponent, string, string]> = [
     ['chat', t.routingChat, t.routingChatDesc],
@@ -466,6 +542,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     ['characterGen', t.routingCharGen, t.routingCharGenDesc],
     ['groupGen', t.routingGroupGen, t.routingGroupGenDesc],
     ['vision', t.routingVision, t.routingVisionDesc],
+    ['sceneAnalysis', t.routingSceneAnalysis, t.routingSceneAnalysisDesc],
+    ['sceneImage', t.routingSceneImage, t.routingSceneImageDesc],
   ];
   const renderRouting = () => {
     const backends = AI_COMPONENTS.map((c) => getComponentBackend(settings, c));
@@ -480,10 +558,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <div className="divide-y divide-silk-800/60">
           {routingItems.map(([id, label, desc]) => {
             const current = getComponentBackend(settings, id);
+            const isSceneRow = id === 'sceneAnalysis' || id === 'sceneImage';
             return (
               <div key={id} className="flex items-center justify-between gap-3 py-2.5">
                 <div className="min-w-0">
-                  <div className="text-sm font-medium text-slate-100">{label}</div>
+                  <div className="text-sm font-medium text-slate-100 flex items-center gap-1.5">
+                    <span>{label}</span>
+                    {isSceneRow && (
+                      <SceneHelpButton
+                        topic="sceneRouting"
+                        language={language}
+                        onOpenGuide={() => setShowSceneGuide(true)}
+                      />
+                    )}
+                  </div>
                   <div className="text-[11px] text-slate-500 leading-snug">{desc}</div>
                 </div>
                 <div className="flex shrink-0 rounded-xl border border-silk-700 overflow-hidden text-xs">
@@ -517,8 +605,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   return (
     <div className="flex flex-col h-full overflow-hidden bg-silk-950 text-slate-100">
       {/* Top Header */}
-      <div className="p-4 border-b border-silk-800/80 bg-silk-900/60 backdrop-blur-md">
+      <div className="p-4 border-b border-silk-800/80 bg-silk-900/60 backdrop-blur-md flex items-center justify-between gap-2">
         <h1 className="text-xl font-bold tracking-tight text-white">{t.settingsTitle}</h1>
+        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-silk-800 text-slate-300 border border-silk-700">
+          {t.appVersionLabel}2.1.0
+        </span>
       </div>
 
       {/* Tab bar */}
@@ -674,6 +765,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <Activity className={`w-4 h-4 ${isPinging ? 'animate-spin' : ''}`} />
                 <span>{isPinging ? t.checkingConnection : t.checkConnection}</span>
               </button>
+              {isPinging && (
+                <ActivityProgressBar
+                  compact
+                  accent="emerald"
+                  language={language}
+                  label={t.hubCheckingProgress}
+                />
+              )}
             </div>
 
             {/* Ping Result Status Banner */}
@@ -1120,109 +1219,127 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           );
         })()}
 
-        {/* 3. Text & RP Model Selector */}
+        {/* 3. Cloud Text & RP Model Selector */}
         <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
               <Sparkles className="w-4 h-4 text-violet-400" />
               <span>{t.sectionTextModel}</span>
             </div>
-            <button
-              onClick={handleRefreshModels}
-              disabled={isLoadingModels}
-              type="button"
-              className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isLoadingModels ? 'animate-spin' : ''}`} />
-              <span>{t.fetchModels}</span>
-            </button>
-          </div>
-
-          <div className="text-xs text-slate-300">
-            {t.selectedModel}: <span className="font-mono text-violet-400 font-semibold">{settings?.textModel}</span>
-          </div>
-
-          {/* Custom input */}
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={customModelInput}
-              onChange={(e) => setCustomModelInput(e.target.value)}
-              placeholder="e.g. deepseek/deepseek-chat"
-              className="flex-1 px-3 py-1.5 bg-silk-800 border border-silk-700 rounded-lg text-xs text-white font-mono"
-            />
-            <button
-              onClick={() => {
-                if (customModelInput.trim()) {
-                  handleSelectTextModel(customModelInput.trim());
-                  setCustomModelInput('');
-                }
-              }}
-              type="button"
-              className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-xs font-medium"
-            >
-              {t.applyModel}
-            </button>
-          </div>
-
-          {/* Search Text Models Input */}
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input
-              type="text"
-              value={textModelSearch}
-              onChange={(e) => setTextModelSearch(e.target.value)}
-              placeholder={t.searchModelsPlaceholder}
-              className="w-full pl-8 pr-3 py-1.5 bg-silk-800 border border-silk-700 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
-            />
-          </div>
-
-          {/* Model Filter Pills */}
-          <div className="flex items-center gap-1.5 pt-1">
-            {(['all', 'free', 'paid'] as const).map((f) => (
+            {textUsesCloud && (
               <button
-                key={f}
+                onClick={handleRefreshModels}
+                disabled={isLoadingModels}
                 type="button"
-                onClick={() => setModelFilter(f)}
-                className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
-                  modelFilter === f
-                    ? 'bg-violet-600 text-white'
-                    : 'bg-silk-800 text-slate-400 hover:text-white'
-                }`}
+                className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300"
               >
-                {f === 'all' ? t.modelFilterAll : f === 'free' ? t.modelFilterFree : t.modelFilterPaid}
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingModels ? 'animate-spin' : ''}`} />
+                <span>{t.fetchModels}</span>
               </button>
-            ))}
-          </div>
-
-          {/* Compact Selectable Models List */}
-          <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
-            {filteredTextModels.length === 0 ? (
-              <div className="text-xs text-slate-500 italic p-2 text-center">{t.noMatchingModels}</div>
-            ) : (
-              filteredTextModels.map((m) => {
-                const isSelected = settings?.textModel === m.id;
-                return (
-                  <button
-                    key={m.id}
-                    onClick={() => handleSelectTextModel(m.id)}
-                    type="button"
-                    className={`w-full flex items-center justify-between p-2.5 rounded-xl border text-left transition-all ${
-                      isSelected
-                        ? 'bg-violet-600/20 border-violet-500 text-white'
-                        : 'bg-silk-850 border-silk-800 text-slate-300 hover:text-white'
-                    }`}
-                  >
-                    <div className="truncate pr-2">
-                      <div className="text-xs font-medium truncate">{m.name}</div>
-                      <div className="text-[10px] font-mono text-slate-500 truncate">{m.id}</div>
-                    </div>
-                    {isSelected && <Check className="w-4 h-4 text-violet-400 shrink-0" />}
-                  </button>
-                );
-              })
             )}
           </div>
+
+          {!textUsesCloud ? (
+            <p className="text-[11px] text-slate-400 leading-relaxed bg-silk-950/60 border border-silk-800/80 rounded-xl p-3">
+              {t.localTextManagedOnServer}
+            </p>
+          ) : (
+            <>
+              {isLoadingModels && (
+                <ActivityProgressBar
+                  compact
+                  accent="violet"
+                  language={language}
+                  label={t.fetchingModelsProgress}
+                />
+              )}
+              <div className="text-xs text-slate-300">
+                {t.selectedModel}: <span className="font-mono text-violet-400 font-semibold">{settings?.textModel}</span>
+              </div>
+
+              {/* Custom input */}
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={customModelInput}
+                  onChange={(e) => setCustomModelInput(e.target.value)}
+                  placeholder="e.g. deepseek/deepseek-chat"
+                  className="flex-1 px-3 py-1.5 bg-silk-800 border border-silk-700 rounded-lg text-xs text-white font-mono"
+                />
+                <button
+                  onClick={() => {
+                    if (customModelInput.trim()) {
+                      handleSelectTextModel(customModelInput.trim());
+                      setCustomModelInput('');
+                    }
+                  }}
+                  type="button"
+                  className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-xs font-medium"
+                >
+                  {t.applyModel}
+                </button>
+              </div>
+
+              {/* Search Text Models Input */}
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  value={textModelSearch}
+                  onChange={(e) => setTextModelSearch(e.target.value)}
+                  placeholder={t.searchModelsPlaceholder}
+                  className="w-full pl-8 pr-3 py-1.5 bg-silk-800 border border-silk-700 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
+                />
+              </div>
+
+              {/* Model Filter Pills */}
+              <div className="flex items-center gap-1.5 pt-1">
+                {(['all', 'free', 'paid'] as const).map((f) => (
+                  <button
+                    key={f}
+                    type="button"
+                    onClick={() => setModelFilter(f)}
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
+                      modelFilter === f
+                        ? 'bg-violet-600 text-white'
+                        : 'bg-silk-800 text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {f === 'all' ? t.modelFilterAll : f === 'free' ? t.modelFilterFree : t.modelFilterPaid}
+                  </button>
+                ))}
+              </div>
+
+              {/* Compact Selectable Models List */}
+              <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
+                {filteredTextModels.length === 0 ? (
+                  <div className="text-xs text-slate-500 italic p-2 text-center">{t.noMatchingModels}</div>
+                ) : (
+                  filteredTextModels.map((m) => {
+                    const isSelected = settings?.textModel === m.id;
+                    return (
+                      <button
+                        key={m.id}
+                        onClick={() => handleSelectTextModel(m.id)}
+                        type="button"
+                        className={`w-full flex items-center justify-between p-2.5 rounded-xl border text-left transition-all ${
+                          isSelected
+                            ? 'bg-violet-600/20 border-violet-500 text-white'
+                            : 'bg-silk-850 border-silk-800 text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        <div className="truncate pr-2">
+                          <div className="text-xs font-medium truncate">{m.name}</div>
+                          <div className="text-[10px] font-mono text-slate-500 truncate">{m.id}</div>
+                        </div>
+                        {isSelected && <Check className="w-4 h-4 text-violet-400 shrink-0" />}
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            </>
+          )}
         </div>
 
         {/* 4. Vision Model Selector */}
@@ -1232,101 +1349,282 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <Eye className="w-4 h-4 text-violet-400" />
               <span>{t.sectionVisionModel}</span>
             </div>
-            <button
-              onClick={handleRefreshVisionModels}
-              disabled={isLoadingVisionModels}
-              type="button"
-              className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isLoadingVisionModels ? 'animate-spin' : ''}`} />
-              <span>{t.fetchVisionModels}</span>
-            </button>
+            {visionUsesCloud && (
+              <button
+                onClick={handleRefreshVisionModels}
+                disabled={isLoadingVisionModels}
+                type="button"
+                className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingVisionModels ? 'animate-spin' : ''}`} />
+                <span>{t.fetchVisionModels}</span>
+              </button>
+            )}
           </div>
           <p className="text-[11px] text-slate-400 leading-snug">{t.visionModelDesc}</p>
 
-          <div className="text-xs text-slate-300">
-            {t.selectedModel}: <span className="font-mono text-violet-400 font-semibold">{settings?.visionModel}</span>
-          </div>
+          {!visionUsesCloud ? (
+            <p className="text-[11px] text-slate-400 leading-relaxed bg-silk-950/60 border border-silk-800/80 rounded-xl p-3">
+              {t.localVisionManagedOnServer}
+            </p>
+          ) : (
+            <>
+              {isLoadingVisionModels && (
+                <ActivityProgressBar
+                  compact
+                  accent="violet"
+                  language={language}
+                  label={t.fetchingModelsProgress}
+                />
+              )}
+              <div className="text-xs text-slate-300">
+                {t.selectedModel}: <span className="font-mono text-violet-400 font-semibold">{settings?.visionModel}</span>
+              </div>
 
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={customVisionInput}
-              onChange={(e) => setCustomVisionInput(e.target.value)}
-              placeholder="e.g. google/gemini-flash-1.5"
-              className="flex-1 px-3 py-1.5 bg-silk-800 border border-silk-700 rounded-lg text-xs text-white font-mono"
-            />
-            <button
-              onClick={() => {
-                if (customVisionInput.trim()) {
-                  handleSelectVisionModel(customVisionInput.trim());
-                  setCustomVisionInput('');
-                }
-              }}
-              type="button"
-              className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-xs font-medium"
-            >
-              {t.applyModel}
-            </button>
-          </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={customVisionInput}
+                  onChange={(e) => setCustomVisionInput(e.target.value)}
+                  placeholder="e.g. google/gemini-flash-1.5"
+                  className="flex-1 px-3 py-1.5 bg-silk-800 border border-silk-700 rounded-lg text-xs text-white font-mono"
+                />
+                <button
+                  onClick={() => {
+                    if (customVisionInput.trim()) {
+                      handleSelectVisionModel(customVisionInput.trim());
+                      setCustomVisionInput('');
+                    }
+                  }}
+                  type="button"
+                  className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-xs font-medium"
+                >
+                  {t.applyModel}
+                </button>
+              </div>
 
-          {/* Search Vision Models Input */}
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input
-              type="text"
-              value={visionModelSearch}
-              onChange={(e) => setVisionModelSearch(e.target.value)}
-              placeholder={t.searchVisionPlaceholder}
-              className="w-full pl-8 pr-3 py-1.5 bg-silk-800 border border-silk-700 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
-            />
-          </div>
+              {/* Search Vision Models Input */}
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  value={visionModelSearch}
+                  onChange={(e) => setVisionModelSearch(e.target.value)}
+                  placeholder={t.searchVisionPlaceholder}
+                  className="w-full pl-8 pr-3 py-1.5 bg-silk-800 border border-silk-700 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
+                />
+              </div>
 
-          {/* Vision Filter Pills */}
-          <div className="flex items-center gap-1.5 pt-1">
-            {(['all', 'free', 'paid'] as const).map((f) => (
-              <button
-                key={f}
-                type="button"
-                onClick={() => setVisionModelFilter(f)}
-                className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
-                  visionModelFilter === f
-                    ? 'bg-violet-600 text-white'
-                    : 'bg-silk-800 text-slate-400 hover:text-white'
-                }`}
-              >
-                {f === 'all' ? t.modelFilterAll : f === 'free' ? t.modelFilterFree : t.modelFilterPaid}
-              </button>
-            ))}
-          </div>
-
-          <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
-            {filteredVisionModels.length === 0 ? (
-              <div className="text-xs text-slate-500 italic p-2 text-center">{t.noMatchingModels}</div>
-            ) : (
-              filteredVisionModels.map((m) => {
-                const isSelected = settings?.visionModel === m.id;
-                return (
+              {/* Vision Filter Pills */}
+              <div className="flex items-center gap-1.5 pt-1">
+                {(['all', 'free', 'paid'] as const).map((f) => (
                   <button
-                    key={m.id}
-                    onClick={() => handleSelectVisionModel(m.id)}
+                    key={f}
                     type="button"
-                    className={`w-full flex items-center justify-between p-2 rounded-xl border text-left transition-all ${
-                      isSelected
-                        ? 'bg-violet-600/20 border-violet-500 text-white'
-                        : 'bg-silk-850 border-silk-800 text-slate-300 hover:text-white'
+                    onClick={() => setVisionModelFilter(f)}
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
+                      visionModelFilter === f
+                        ? 'bg-violet-600 text-white'
+                        : 'bg-silk-800 text-slate-400 hover:text-white'
                     }`}
                   >
-                    <div className="truncate pr-2">
-                      <div className="text-xs font-medium truncate">{m.name}</div>
-                      <div className="text-[10px] font-mono text-slate-500 truncate">{m.id}</div>
-                    </div>
-                    {isSelected && <Check className="w-4 h-4 text-violet-400 shrink-0" />}
+                    {f === 'all' ? t.modelFilterAll : f === 'free' ? t.modelFilterFree : t.modelFilterPaid}
+                  </button>
+                ))}
+              </div>
+
+              <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                {filteredVisionModels.length === 0 ? (
+                  <div className="text-xs text-slate-500 italic p-2 text-center">{t.noMatchingModels}</div>
+                ) : (
+                  filteredVisionModels.map((m) => {
+                    const isSelected = settings?.visionModel === m.id;
+                    return (
+                      <button
+                        key={m.id}
+                        onClick={() => handleSelectVisionModel(m.id)}
+                        type="button"
+                        className={`w-full flex items-center justify-between p-2 rounded-xl border text-left transition-all ${
+                          isSelected
+                            ? 'bg-violet-600/20 border-violet-500 text-white'
+                            : 'bg-silk-850 border-silk-800 text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        <div className="truncate pr-2">
+                          <div className="text-xs font-medium truncate">{m.name}</div>
+                          <div className="text-[10px] font-mono text-slate-500 truncate">{m.id}</div>
+                        </div>
+                        {isSelected && <Check className="w-4 h-4 text-violet-400 shrink-0" />}
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* 5. Scene Image Generation */}
+        <div className="p-4 rounded-2xl bg-silk-900/80 border border-silk-800 space-y-3">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+              <Camera className="w-4 h-4 text-emerald-400" />
+              <span>{t.sceneGenSettingsTitle}</span>
+              <SceneHelpButton
+                topic="sceneRouting"
+                language={language}
+                onOpenGuide={() => setShowSceneGuide(true)}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowSceneGuide(true)}
+                className="px-2.5 py-1 rounded-lg bg-silk-800 hover:bg-silk-700 border border-silk-700 text-[11px] text-slate-200 font-medium flex items-center gap-1 transition-colors"
+              >
+                <BookOpen className="w-3 h-3 text-slate-300" />
+                <span>{t.sceneOpenGuideBtn}</span>
+              </button>
+              {!sceneImageIsLocal && (
+                <button
+                  onClick={handleRefreshImageModels}
+                  disabled={isLoadingImageModels}
+                  type="button"
+                  className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isLoadingImageModels ? 'animate-spin' : ''}`} />
+                  <span>{t.fetchModels}</span>
+                </button>
+              )}
+            </div>
+          </div>
+          <p className="text-[11px] text-slate-400 leading-snug">{t.sceneGenSettingsDesc}</p>
+
+          {/* Default Aspect Ratio */}
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-1.5 text-[11px] text-slate-300 font-medium">
+              <span>{t.sceneAspectLabel}</span>
+              <SceneHelpButton
+                topic="aspectRatio"
+                language={language}
+                onOpenGuide={() => setShowSceneGuide(true)}
+              />
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {([
+                ['portrait', t.aspectPortrait],
+                ['square', t.aspectSquare],
+                ['landscape', t.aspectLandscape],
+              ] as const).map(([ratio, label]) => {
+                const active = (settings?.sceneAspectRatio || 'portrait') === ratio;
+                return (
+                  <button
+                    key={ratio}
+                    type="button"
+                    onClick={() => db.settings.update('default', { sceneAspectRatio: ratio })}
+                    className={`py-1.5 px-2 rounded-xl text-[11px] font-medium border transition-colors ${
+                      active
+                        ? 'bg-emerald-600/20 border-emerald-500 text-emerald-200'
+                        : 'bg-silk-850 border-silk-800 text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {label}
                   </button>
                 );
-              })
-            )}
+              })}
+            </div>
           </div>
+
+          {sceneImageIsLocal ? (
+            <p className="text-[11px] text-slate-400 leading-relaxed bg-silk-950/60 border border-silk-800/80 rounded-xl p-3">
+              {t.localImageManagedOnServer}
+            </p>
+          ) : (
+            <>
+              {isLoadingImageModels && (
+                <ActivityProgressBar
+                  compact
+                  accent="emerald"
+                  language={language}
+                  label={t.fetchingModelsProgress}
+                />
+              )}
+              <div className="flex items-center justify-between gap-2 text-xs text-slate-300">
+                <span className="truncate">
+                  {t.sceneImageModelLabel}:{' '}
+                  <span className="font-mono text-emerald-400 font-semibold">
+                    {settings?.sceneImageModel || (language === 'ru' ? 'Авто по провайдеру' : 'Provider default')}
+                  </span>
+                </span>
+                {settings?.sceneImageModel && (
+                  <button
+                    type="button"
+                    onClick={() => db.settings.update('default', { sceneImageModel: '' })}
+                    className="text-[10px] text-slate-400 hover:text-white shrink-0 underline"
+                  >
+                    {language === 'ru' ? 'Сброс' : 'Auto'}
+                  </button>
+                )}
+              </div>
+
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={customSceneImageInput}
+                  onChange={(e) => setCustomSceneImageInput(e.target.value)}
+                  placeholder="e.g. google/gemini-2.5-flash-image"
+                  className="flex-1 px-3 py-1.5 bg-silk-800 border border-silk-700 rounded-lg text-xs text-white font-mono"
+                />
+                <button
+                  onClick={() => {
+                    if (customSceneImageInput.trim()) {
+                      db.settings.update('default', { sceneImageModel: customSceneImageInput.trim() });
+                      setCustomSceneImageInput('');
+                    }
+                  }}
+                  type="button"
+                  className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-xs font-medium"
+                >
+                  {t.applyModel}
+                </button>
+              </div>
+
+              <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                {imageModelsList.length === 0 ? (
+                  <div className="text-xs text-slate-500 italic p-2 text-center">{t.noMatchingModels}</div>
+                ) : (
+                  imageModelsList.map((m) => {
+                    const isSelected = settings?.sceneImageModel === m.id;
+                    return (
+                      <button
+                        key={m.id}
+                        onClick={() => db.settings.update('default', { sceneImageModel: m.id })}
+                        type="button"
+                        className={`w-full flex items-center justify-between p-2 rounded-xl border text-left transition-all ${
+                          isSelected
+                            ? 'bg-emerald-600/20 border-emerald-500 text-white'
+                            : 'bg-silk-850 border-silk-800 text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        <div className="truncate pr-2 min-w-0">
+                          <div className="flex items-center gap-1.5 text-xs font-medium truncate">
+                            <span className="truncate">{m.name}</span>
+                            {m.supportsRefs && (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0">
+                                Refs
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] font-mono text-slate-500 truncate">{m.id}</div>
+                        </div>
+                        {isSelected && <Check className="w-4 h-4 text-emerald-400 shrink-0" />}
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            </>
+          )}
         </div>
         </>)}
 
@@ -1840,6 +2138,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         onScanSuccess={handleQrScanSuccess}
         title={t.scanQrTitle}
         hint={t.scanQrHint}
+      />
+
+      <SceneGuideModal
+        isOpen={showSceneGuide}
+        onClose={() => setShowSceneGuide(false)}
+        language={language}
       />
     </div>
   );

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SilkloraAI Hub</title>
     <link rel="icon" type="image/png" href="/static/logo.png">
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/style.css?v=2.1.2">
 </head>
 <body>
     <header class="topbar">
@@ -17,6 +17,7 @@
             <nav class="nav" id="nav">
                 <button class="nav-btn active" data-view="home" data-i18n="navHome"></button>
                 <button class="nav-btn" data-view="models" data-i18n="navModels"></button>
+                <button class="nav-btn" data-view="assistant" data-i18n="navAssistant"></button>
                 <button class="nav-btn" data-view="system" data-i18n="navSystem"></button>
             </nav>
             <div class="topbar-right">
@@ -29,18 +30,20 @@
         </div>
     </header>
 
+    <div class="activity-bar" id="activityBar" hidden></div>
     <div class="banner" id="banner" hidden></div>
 
     <main class="container">
         <section class="view active" id="view-home"></section>
         <section class="view" id="view-models"></section>
+        <section class="view" id="view-assistant"></section>
         <section class="view" id="view-system"></section>
     </main>
 
     <div class="download-bar" id="downloadBar" hidden></div>
 
-    <script src="/static/qrcode.min.js"></script>
-    <script src="/static/i18n.js"></script>
-    <script src="/static/app.js"></script>
+    <script src="/static/qrcode.min.js?v=2.1.2"></script>
+    <script src="/static/i18n.js?v=2.1.2"></script>
+    <script src="/static/app.js?v=2.1.2"></script>
 </body>
 </html>

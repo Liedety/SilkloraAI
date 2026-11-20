@@ -53,7 +53,7 @@ if [ ! -x "$VENV_DIR/bin/python" ] || ! "$VENV_DIR/bin/python" -c 'import sys' >
     rm -rf "$VENV_DIR"
     if ! "$PY" -m venv "$VENV_DIR" 2>/dev/null; then
         UV="$(command -v uv 2>/dev/null || echo "$HOME/.local/bin/uv")"
-        "$UV" venv --python "$PY" "$VENV_DIR" >/dev/null || {
+        "$UV" venv --seed --python "$PY" "$VENV_DIR" >/dev/null || {
             echo "Could not create the environment. On Debian or Ubuntu run: sudo apt install python3-venv"
             exit 1
         }

@@ -1,4 +1,4 @@
-import type { Character } from '../types';
+import type { Character, CharacterImageGenConfig } from '../types';
 
 export interface ParsedCharacterCard {
   name: string;
@@ -8,6 +8,7 @@ export interface ParsedCharacterCard {
   greeting: string;
   greetingEnabled: boolean;
   avatar?: string;
+  imageGen?: CharacterImageGenConfig;
 }
 
 function decodeBase64Utf8(b64: string): string {
@@ -114,6 +115,17 @@ export function parseCharacterCardJson(rawText: string, avatarDataUrl?: string):
       ? nested.avatar
       : undefined);
 
+  const ext = (nested.extensions && typeof nested.extensions === 'object'
+    ? (nested.extensions as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+  const slxExt = (ext.silklora && typeof ext.silklora === 'object'
+    ? (ext.silklora as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+  const imageGen =
+    slxExt.imageGen && typeof slxExt.imageGen === 'object'
+      ? (slxExt.imageGen as CharacterImageGenConfig)
+      : undefined;
+
   return {
     name,
     description: combinedDesc,
@@ -122,6 +134,7 @@ export function parseCharacterCardJson(rawText: string, avatarDataUrl?: string):
     greeting,
     greetingEnabled,
     avatar,
+    imageGen,
   };
 }
 
@@ -167,6 +180,7 @@ export function exportCharacterCardV2Json(character: Character): string {
       extensions: {
         silklora: {
           greetingEnabled: character.greetingEnabled,
+          ...(character.imageGen ? { imageGen: character.imageGen } : {}),
         },
       },
     },

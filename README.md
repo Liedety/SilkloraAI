@@ -18,16 +18,17 @@ SilkloraAI works with:
 
 ## Features
 
-- **Silklora Local AI Hub (`server/`):** Standalone PC server (Windows, Linux, macOS) with automated Python/engine setup (CUDA, Metal, CPU), DriverStore/WMI NVIDIA detection, CPU-only engine diagnostics, hardware-aware Hugging Face GGUF model search, resumable downloads, `mmproj` vision pairing, and a local web dashboard with QR code pairing.
-- **Characters, Groups & Emotion Sprites:** SillyTavern V1/V2 PNG and JSON character card import/export, lore, custom greetings, static avatars, and dedicated emotion sprites rendered below messages with validated emotion tags.
-- **Roleplay Control & Memory:** Streaming anti-runaway guard (`replyGuard`), turn/meta-leak cleanup, RP sampler presets, concrete state fact tracking (clothing, items, movement), draggable knowledge graph, cache-friendly prompt layout, and token-budgeted context compression.
-- **Per-Function AI Routing & Vision:** Route roleplay chat, Magic Wand ghostwriter, memory extraction, summarization, character/group generators, and image/vision requests independently between your PC and cloud APIs.
-- **100% Local & Private:** Characters, personas, chat sessions, and memory graphs are stored directly on your device via IndexedDB, opening the last active session for each character or group.
-- **Matte UI, OLED Theme & Bilingual Support:** Zero-neon matte themes including pure black `#000000` OLED, global 4-font typography (including crisp Cyrillic pixel font), smooth transitions, and full English / Russian localization.
+- **Silklora Local AI Hub (`server/`):** Standalone PC server (Windows, Linux, macOS) with automated Python/engine setup (CUDA, Metal, CPU), NVIDIA DriverStore/WMI detection, hardware-aware Hugging Face search, resumable downloads with companion bundles, `mmproj` vision pairing, AI Model Finder, local scene image server, on-device GPU LoRA training, and a web dashboard with QR pairing.
+- **Scene State, Scene Generation & LoRA Support:** Persistent scene memory (`SceneState` tracking location, lighting, outfits, positions, and visual anchor across camera angles), scene image generation via `/scene`, character reference photos or `.safetensors` LoRA adapters with automatic architecture compatibility checks and 1-tap server model switching.
+- **Characters, Groups, Relationships & Emotions:** SillyTavern V1/V2 PNG and JSON character card import/export, 7-stage customizable relationship scale, lore, greetings, static avatars, and dedicated emotion sprites rendered below messages with validated emotion tags.
+- **Slash Commands, Roleplay Control & Memory:** Minimalist slash command menu (`/scene`, `/wand`, `/continue`, `/summary`, `/action`, `/memory`, `/reset`), streaming anti-runaway guard (`replyGuard`), turn/meta-leak cleanup, RP sampler presets, concrete state fact tracking, upgraded knowledge memory graph with rollback and pruning bridges, and token-budgeted context compression.
+- **Per-Function AI Routing & Vision:** Route roleplay chat, Magic Wand ghostwriter, memory extraction, summarization, character/group generators, scene generation, and image/vision requests independently between your PC and cloud APIs.
+- **100% Local & Private:** Characters, personas, chat sessions, scene states, and memory graphs are stored directly on your device via IndexedDB, restoring the latest active session for each character or group.
+- **Matte UI, OLED Theme & Bilingual Support:** Zero-neon matte themes including pure black `#000000` OLED, persistent appearance settings, live progress timers, global 4-font typography (including full Cyrillic pixel font), smooth transitions, and complete English / Russian localization.
 
 ---
 
-## Quick Start (v2.0.1)
+## Quick Start (v2.1.0)
 
 ### 1. Android App
 1. Download `silklora-ai.apk` from [Releases](../../releases).

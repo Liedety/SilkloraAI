@@ -1,4 +1,6 @@
-import type { Character, Group, TextStylePreset, MemoryNode } from '../types';
+import type { Character, Group, TextStylePreset, MemoryEdge, MemoryNode, RelationshipDetail, SceneState } from '../types/index.ts';
+import { selectRelevantMemories } from './memory/scoring.ts';
+import { formatRelationshipPromptLine } from '../utils/relationships.ts';
 
 export function isRawDialogueMemoryDetail(detail?: string): boolean {
   if (!detail) return false;
@@ -51,7 +53,11 @@ export interface PromptBuildParams {
   turnGuidance?: string;
   thoughtsEnabled?: boolean;
   memoryNodes?: MemoryNode[];
+  memoryEdges?: MemoryEdge[];
+  /** Latest dialogue text used to automatically recall older relevant memories from the graph. */
+  queryContext?: string;
   relationshipScore?: number; // -100 to 100
+  relationshipDetail?: RelationshipDetail | null;
   speakerCharacter?: Character; // in group chat: who is speaking
   customSystemPrompt?: string;
   customSystemPromptMode?: 'override' | 'augment';
@@ -252,7 +258,10 @@ export function buildSystemPrompt(params: PromptBuildParams): string {
     turnGuidance,
     thoughtsEnabled = false,
     memoryNodes = [],
+    memoryEdges = [],
+    queryContext = '',
     relationshipScore = 0,
+    relationshipDetail = null,
     speakerCharacter,
     customSystemPrompt,
     customSystemPromptMode = 'augment',
@@ -463,22 +472,28 @@ ${emoTag}<thought>He is pushing too hard. If I give in now, he'll think I'm weak
     }
   }
 
-  // Static/long-term memories (filtering out legacy raw dialogue quote fallbacks)
-  const cleanMemories = memoryNodes.filter((n) => !isRawDialogueMemoryDetail(n.detail));
+  // Relevance-aware long-term memories (filtering out raw quotes & routine gestures, recalling older relevant facts)
+  const relevantSysMemories = selectRelevantMemories(memoryNodes, {
+    queryText: `${queryContext} ${turnGuidance || ''}`.trim(),
+    edges: memoryEdges,
+    limit: 6,
+  });
 
   if (!dynamicTail) {
     if (ru) {
       prompt += `\n### ВЗАИМООТНОШЕНИЯ:\n`;
-      prompt += `Отношения ${speakerName} к ${userName}: ${relationshipScore} из 100 (${affinityLabel(relationshipScore, language)})\n`;
+      prompt += `${formatRelationshipPromptLine({
+        speakerName,
+        userName,
+        score: relationshipScore,
+        detail: relationshipDetail,
+        language,
+        mode: 'system',
+      })}\n`;
 
-      if (cleanMemories.length > 0) {
+      if (relevantSysMemories.length > 0) {
         prompt += `\n### ВАЖНЫЕ ФАКТЫ И ПАМЯТЬ О СЦЕНЕ:\n`;
-        const sortedNodes = [...cleanMemories].sort((a, b) => {
-          if (a.isPinned && !b.isPinned) return -1;
-          if (!a.isPinned && b.isPinned) return 1;
-          return b.createdAt - a.createdAt;
-        });
-        for (const node of sortedNodes.slice(0, 6)) {
+        for (const node of relevantSysMemories) {
           const pinTag = node.isPinned ? ' [КЛЮЧЕВОЕ]' : '';
           prompt += `- [${node.type.toUpperCase()}${pinTag}] ${node.label}: ${node.detail}\n`;
         }
@@ -486,16 +501,18 @@ ${emoTag}<thought>He is pushing too hard. If I give in now, he'll think I'm weak
       }
     } else {
       prompt += `\n### RELATIONSHIP DYNAMICS:\n`;
-      prompt += `Your current affinity score with the user is: ${relationshipScore} (from -100 Hostile to +100 Deep Devotion — ${affinityLabel(relationshipScore, language)}).\n`;
+      prompt += `${formatRelationshipPromptLine({
+        speakerName,
+        userName,
+        score: relationshipScore,
+        detail: relationshipDetail,
+        language,
+        mode: 'system',
+      })}\n`;
 
-      if (cleanMemories.length > 0) {
+      if (relevantSysMemories.length > 0) {
         prompt += `\n### RELEVANT LONG-TERM MEMORIES & ESTABLISHED FACTS:\n`;
-        const sortedNodes = [...cleanMemories].sort((a, b) => {
-          if (a.isPinned && !b.isPinned) return -1;
-          if (!a.isPinned && b.isPinned) return 1;
-          return b.createdAt - a.createdAt;
-        });
-        for (const node of sortedNodes.slice(0, 6)) {
+        for (const node of relevantSysMemories) {
           const pinTag = node.isPinned ? ' [CORE/PERMANENT]' : '';
           prompt += `- [${node.type.toUpperCase()}${pinTag}] ${node.label}: ${node.detail}\n`;
         }
@@ -590,14 +607,6 @@ Start your reply once with an exact tag formatted as <emotion>emotion_name</emot
   return prompt;
 }
 
-function affinityLabel(score: number, language: 'en' | 'ru'): string {
-  const ru = language === 'ru';
-  if (score <= -40) return ru ? 'глубокая неприязнь или открытая вражда.' : 'Deep distrust, resentment, antagonism or open hostility.';
-  if (score < 10) return ru ? 'настороженно, отстраненно или ровно.' : 'Cautious, distant, neutral or professional.';
-  if (score < 50) return ru ? 'тепло, дружелюбно, доверие растет.' : 'Warm, friendly, cooperative, developing trust.';
-  return ru ? 'высокая близость, доверие, сильная привязанность.' : 'High intimacy, unconditional trust, deep passion or sworn loyalty.';
-}
-
 /**
  * High-priority per-turn OOC guidance appended outside the "do not quote scene lore" note
  * so explicit formatting or length instructions (like "не пиши больше 2 абзацев" / "пиши меньше")
@@ -638,15 +647,20 @@ export function buildSceneNote(params: {
   userGender?: 'female' | 'male' | null;
   language?: 'en' | 'ru';
   relationshipScore?: number;
+  relationshipDetail?: RelationshipDetail | null;
   memoryNodes?: MemoryNode[];
+  memoryEdges?: MemoryEdge[];
+  queryContext?: string;
   emotionNames?: string[];
   guidance?: string;
   /** Group chat: everyone who is in the scene right now (other characters, without the speaker and the user). */
   presentNames?: string[];
   /** Group chat: names the user mentioned in the last message. */
   mentionedNames?: string[];
+  /** Optional anchored visual scene state (location, lighting, clothes). */
+  sceneState?: SceneState;
 }): string {
-  const { speakerName, userName, speakerGender, userGender, language = 'en', relationshipScore = 0, memoryNodes = [], emotionNames, guidance, presentNames = [], mentionedNames = [] } = params;
+  const { speakerName, userName, speakerGender, userGender, language = 'en', relationshipScore = 0, relationshipDetail = null, memoryNodes = [], memoryEdges = [], queryContext = '', emotionNames, guidance, presentNames = [], mentionedNames = [], sceneState } = params;
   const ru = language === 'ru';
   const lines: string[] = [];
   if (presentNames.length > 0) {
@@ -682,19 +696,23 @@ export function buildSceneNote(params: {
     );
   }
   lines.push(
-    ru
-      ? `${speakerName} и ${userName}: отношения ${relationshipScore} из 100 (${affinityLabel(relationshipScore, language)})`
-      : `${speakerName} and ${userName}: affinity ${relationshipScore} of 100 (${affinityLabel(relationshipScore, language)})`
+    formatRelationshipPromptLine({
+      speakerName,
+      userName,
+      score: relationshipScore,
+      detail: relationshipDetail,
+      language,
+      mode: 'sceneNote',
+    })
   );
-  const cleanNodes = memoryNodes.filter((n) => !isRawDialogueMemoryDetail(n.detail));
-  if (cleanNodes.length > 0) {
-    const sorted = [...cleanNodes].sort((a, b) => {
-      if (a.isPinned && !b.isPinned) return -1;
-      if (!a.isPinned && b.isPinned) return 1;
-      return b.createdAt - a.createdAt;
-    });
+  const relevantSceneNodes = selectRelevantMemories(memoryNodes, {
+    queryText: `${queryContext} ${guidance || ''}`.trim(),
+    edges: memoryEdges,
+    limit: 8,
+  });
+  if (relevantSceneNodes.length > 0) {
     lines.push(ru ? 'Известные факты сцены (учитывай их):' : 'Established facts (keep them consistent):');
-    for (const node of sorted.slice(0, 8)) {
+    for (const node of relevantSceneNodes) {
       const pinPrefix = node.isPinned ? (ru ? 'Важно — ' : 'Core — ') : '';
       lines.push(`- ${pinPrefix}${node.label}: ${node.detail}`);
     }
@@ -706,6 +724,15 @@ export function buildSceneNote(params: {
       ru
         ? `Формат эмоции ${speakerName}: один раз <emotion>название</emotion> (например <emotion>${firstValid}</emotion>) из: ${list}.`
         : `Emotion tag for ${speakerName}: <emotion>emotion_name</emotion> (e.g. <emotion>${firstValid}</emotion>) from: ${list}.`
+    );
+  }
+  if (sceneState?.location?.locationName) {
+    const speakerActor = sceneState.actors.find((a) => a.name.toLowerCase() === speakerName.toLowerCase());
+    const clothHint = speakerActor?.clothing ? ` (${speakerActor.clothing})` : '';
+    lines.push(
+      ru
+        ? `Текущая обстановка: ${sceneState.location.locationName}, свет: ${sceneState.location.lighting}${clothHint ? `, одежда ${speakerName}: ${speakerActor!.clothing}` : ''}.`
+        : `Current physical setting: ${sceneState.location.locationName}, lighting: ${sceneState.location.lighting}${clothHint ? `, wearing: ${speakerActor!.clothing}` : ''}.`
     );
   }
   if (guidance && guidance.trim()) {
